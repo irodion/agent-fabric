@@ -37,7 +37,7 @@ env:
 
 jobs:
   vet:
-    name: Dependency gate
+    name: Dependency gate (agentsview)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

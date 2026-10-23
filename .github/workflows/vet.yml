@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   vet:
-    name: Dependency gate
+    name: Dependency gate (this repo)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
