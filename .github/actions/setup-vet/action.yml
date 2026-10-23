@@ -1,0 +1,26 @@
+name: setup-vet
+description: Install a pinned SafeDep vet release after checking its SHA-256 and build provenance.
+outputs:
+  bin:
+    description: Path to the vet binary
+    value: ${{ steps.install.outputs.bin }}
+runs:
+  using: composite
+  steps:
+    - name: Install vet
+      id: install
+      shell: bash
+      env:
+        VET_VERSION: v1.20.0
+        VET_SHA256: cb875389498d7a4cb6f0edda19ae18e976739a8f88187f994ccb8396e925569c
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/vet"
+        asset=vet_Linux_x86_64.tar.gz
+        mkdir -p "$dir"
+        gh release download "$VET_VERSION" --repo safedep/vet --pattern "$asset" --dir "$dir"
+        echo "$VET_SHA256  $dir/$asset" | sha256sum -c -
+        gh attestation verify "$dir/$asset" --repo safedep/vet
+        tar -xzf "$dir/$asset" -C "$dir" vet
+        echo "bin=$dir/vet" >>"$GITHUB_OUTPUT"

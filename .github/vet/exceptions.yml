@@ -1,0 +1,14 @@
+name: agent-fabric dependency gate exceptions
+description: |
+  Each entry skips one package version in every vet scan, including the malware check, until it
+  expires. Add one only with the advisory, the reason it does not apply, and a short expiry (at
+  most 30 days); a PR that adds or renews an entry needs the same review as a pin change.
+exceptions:
+  # GHSA-cg2g-xh64-v4q7 (critical, SAFE_FOR_TEMPLATES bypass). agentsview v0.45.0 calls
+  # DOMPurify.sanitize(html) with the default config (frontend/src/lib/utils/markdown.ts), so the
+  # SAFE_FOR_TEMPLATES and IN_PLACE paths in this advisory and GHSA-mrv2-3pqr-j5jr are not used.
+  # Remove once upstream ships dompurify >= the fixed version.
+  - ecosystem: npm
+    name: dompurify
+    version: '3.4.16'
+    expires: 2026-11-22T00:00:00Z

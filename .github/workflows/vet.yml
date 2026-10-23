@@ -1,0 +1,43 @@
+# SafeDep vet gate over this repo's own dependencies: the actions in its workflows now, and
+# uv.lock once the Python core exists (docs/design.md §4.1).
+name: vet
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  vet:
+    name: Dependency gate (this repo)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-vet
+        id: setup-vet
+
+      - name: Scan
+        env:
+          VET: ${{ steps.setup-vet.outputs.bin }}
+          VET_DISABLE_TELEMETRY: "true"
+        run: |
+          "$VET" scan -D . \
+            --policy-suite .github/vet/policy.yml \
+            --exceptions .github/vet/exceptions.yml \
+            --malware-query --filter-fail --fail-fast \
+            --report-markdown-summary "$GITHUB_STEP_SUMMARY"
