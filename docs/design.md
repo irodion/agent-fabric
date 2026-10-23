@@ -76,7 +76,7 @@ short-lived job. The `kb` CLI and `kb mcp` read the same local files.
 ### 4.1 Capture: agentsview
 
 - Built once per version on CI from a pinned tag (below) and installed as a checksummed binary. Upgrade
-  deliberately: bump the pin, CI rebuilds, the adapter contract tests pass.
+  deliberately: bump the pin, CI rebuilds, the adapter contract tests pass, then release it with a manual run.
 - Run sandboxed under systemd (below): `agentsview serve --no-browser --no-update-check`. Binds `127.0.0.1:8080`
   (default).
 - Sources used (defaults verified in its source): Codex `~/.codex/sessions` + `archived_sessions`, Copilot CLI
@@ -89,7 +89,8 @@ short-lived job. The `kb` CLI and `kb mcp` read the same local files.
 
 **Build (CI).** `.github/workflows/build-agentsview.yml` builds agentsview once per pinned version; nothing is
 compiled on the desktop. `vendor/agentsview.pin` holds the tag and commit. A PR that changes the pin, the vet files
-or the workflow runs steps 1–4; the same change on `main`, or a manual run, also runs step 5. A weekly run repeats
+or the workflow runs steps 1–4, and so does the same change on `main`. Step 5 runs only in a manual run on `main`
+(`gh workflow run build-agentsview.yml`), so nothing is released without a deliberate action. A weekly run repeats
 step 2 alone, so a dependency of the installed version that is later found to be malware or critical still shows up.
 All actions are pinned by commit SHA.
 
