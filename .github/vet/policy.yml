@@ -1,0 +1,17 @@
+# SafeDep vet policy for every dependency scan in this repo: agentsview's lockfiles before a
+# build, and this repo's own uv.lock and workflow actions. A package matching any rule fails
+# the scan (`--filter-fail`). Known malware is checked separately (`--malware-query --fail-fast`).
+version: POLICY_VERSION_V2
+type: POLICY_TYPE_DENY
+name: agent-fabric dependency gate
+rules:
+  - name: critical-vulnerability
+    description: The version has a known critical vulnerability
+    check: RULE_CHECK_VULNERABILITY
+    value: |
+      pkg.vulnerabilities.exists(v, v.severity == 'CRITICAL')
+  - name: fresh-release
+    description: The version was published less than 14 days ago
+    check: RULE_CHECK_MAINTENANCE
+    value: |
+      has(pkg.insight.package_published_at) && now() - pkg.insight.package_published_at < duration('336h')

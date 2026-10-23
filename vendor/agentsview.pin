@@ -1,0 +1,5 @@
+# agentsview release built by .github/workflows/build-agentsview.yml (docs/design.md §4.1).
+# Change both lines together, only to a release at least 14 days old. The workflow checks that
+# the tag still points at this commit.
+tag=v0.45.0
+commit=b9d0a207f51ff27b84adbaae2a91b344247079b3

@@ -1,0 +1,8 @@
+# Exact resolved URLs in agentsview's frontend/package-lock.json that vet's lockfile-poisoning
+# check would flag, passed as --trusted-registry. Each line must be one full URL that a review of
+# the pinned agentsview version confirmed; a changed URL fails the gate until it is reviewed here.
+#
+# vite is an npm alias: "vite": "npm:@voidzero-dev/vite-plus-core@1.0.0" (agentsview v0.45.0).
+https://registry.npmjs.org/@voidzero-dev/vite-plus-core/-/vite-plus-core-1.0.0.tgz
+# @kenn-io/kit-ui is a commit-pinned git dependency from the agentsview author's own org.
+git+ssh://git@github.com/kenn-io/kit-ui.git#ceff715d835017daa9ec099446fa6ce71233829f

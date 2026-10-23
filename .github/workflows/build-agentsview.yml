@@ -1,0 +1,286 @@
+# Builds the pinned agentsview release with telemetry compiled out, after a SafeDep vet gate, and
+# publishes it as a release of this repo (docs/design.md §4.1). Pull requests run everything
+# except the release; the weekly run re-scans the pinned version's dependencies only.
+name: build-agentsview
+
+on:
+  pull_request:
+    paths:
+      - vendor/agentsview.pin
+      - .github/vet/**
+      - .github/actions/setup-vet/**
+      - .github/scripts/**
+      - .github/workflows/build-agentsview.yml
+  push:
+    branches: [main]
+    paths:
+      - vendor/agentsview.pin
+      - .github/vet/**
+      - .github/actions/setup-vet/**
+      - .github/scripts/**
+      - .github/workflows/build-agentsview.yml
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  AGENTSVIEW_REPO: kenn-io/agentsview
+  # Ubuntu 24.04 is the oldest supported desktop.
+  MAX_GLIBC: "2.39"
+  MAX_GLIBCXX: "3.4.33"
+
+jobs:
+  vet:
+    name: Dependency gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.pin.outputs.tag }}
+      commit: ${{ steps.pin.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read and check the pin
+        id: pin
+        run: |
+          tag=$(sed -n 's/^tag=//p' vendor/agentsview.pin)
+          commit=$(sed -n 's/^commit=//p' vendor/agentsview.pin)
+          if [[ ! $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ || ! $commit =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error file=vendor/agentsview.pin::expected tag=vX.Y.Z and a 40-character commit"
+            exit 1
+          fi
+          refs=$(git ls-remote "https://github.com/$AGENTSVIEW_REPO" "refs/tags/$tag" "refs/tags/$tag^{}")
+          peeled=$(awk -v t="refs/tags/$tag^{}" '$2 == t { print $1 }' <<<"$refs")
+          [[ -n $peeled ]] || peeled=$(awk -v t="refs/tags/$tag" '$2 == t { print $1 }' <<<"$refs")
+          if [[ $peeled != "$commit" ]]; then
+            echo "::error file=vendor/agentsview.pin::$tag points at '${peeled:-nothing}', not $commit"
+            exit 1
+          fi
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          echo "commit=$commit" >>"$GITHUB_OUTPUT"
+
+      # Upstream's CI covers lint, Go tests (Linux, Windows, macOS, race detector), PostgreSQL and
+      # ClickHouse integration, frontend tests and e2e. Its e2e server is built with the same
+      # fts5,kit_posthog_disabled tags as ours, so we require that run instead of repeating it.
+      - name: Check upstream CI passed for the pinned commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ steps.pin.outputs.commit }}
+        run: |
+          conclusion=$(gh api "repos/$AGENTSVIEW_REPO/actions/runs?head_sha=$COMMIT&event=push&per_page=100" \
+            --jq '[.workflow_runs[] | select(.path == ".github/workflows/ci.yml")] | sort_by(.created_at) | last | .conclusion // "missing"')
+          if [[ $conclusion != success ]]; then
+            echo "::error::upstream CI (ci.yml, push) for $COMMIT: $conclusion"
+            exit 1
+          fi
+          echo "Upstream CI passed for $COMMIT" >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.AGENTSVIEW_REPO }}
+          ref: ${{ steps.pin.outputs.commit }}
+          path: src
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-vet
+        id: setup-vet
+
+      - name: Scan agentsview's lockfiles
+        env:
+          VET: ${{ steps.setup-vet.outputs.bin }}
+          VET_DISABLE_TELEMETRY: "true"
+        run: |
+          trusted=()
+          while IFS= read -r url; do
+            trusted+=(--trusted-registry "$url")
+          done < <(grep -v -e '^#' -e '^$' .github/vet/agentsview-trusted-urls.txt)
+          "$VET" scan \
+            --lockfiles src/go.mod \
+            --lockfiles src/frontend/package-lock.json \
+            --policy-suite .github/vet/policy.yml \
+            --exceptions .github/vet/exceptions.yml \
+            "${trusted[@]}" \
+            --malware-query --filter-fail --fail-fast \
+            --report-markdown-summary "$GITHUB_STEP_SUMMARY"
+
+  frontend:
+    name: Build frontend
+    needs: vet
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.AGENTSVIEW_REPO }}
+          ref: ${{ needs.vet.outputs.commit }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: npm ci and build
+        working-directory: frontend
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    name: Build binary
+    needs: [vet, frontend]
+    runs-on: ubuntu-24.04
+    # Bookworm's glibc 2.36 sits below the Ubuntu 24.04 floor; upstream's Dockerfile uses the same image.
+    container: golang:1.27.0-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: fabric
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.AGENTSVIEW_REPO }}
+          ref: ${{ needs.vet.outputs.commit }}
+          path: src
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: frontend-dist
+          path: src/internal/web/dist
+
+      - name: Build
+        working-directory: src
+        env:
+          TAG: ${{ needs.vet.outputs.tag }}
+          COMMIT: ${{ needs.vet.outputs.commit }}
+        run: |
+          go mod download
+          # Same steps as upstream's Dockerfile: sqlite-vec's cgo bindings need the header of the
+          # SQLite amalgamation that go-sqlite3 bundles, and the pricing snapshot is restored.
+          inc="$RUNNER_TEMP/sqlite-include"
+          mkdir -p "$inc"
+          cp "$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3)/sqlite3-binding.h" "$inc/sqlite3.h"
+          export CGO_CFLAGS="-O2 -g -I$inc"
+          go run ./internal/pricing/cmd/litellm-snapshot -restore
+          build_date=$(git -c safe.directory="$PWD" log -1 --format=%cI)
+          mkdir -p "$RUNNER_TEMP/out"
+          go build -tags fts5,kit_posthog_disabled -trimpath -buildvcs=false \
+            -ldflags "-s -w -X main.version=$TAG -X main.commit=${COMMIT:0:7} -X main.buildDate=$build_date" \
+            -o "$RUNNER_TEMP/out/agentsview" ./cmd/agentsview
+          cp LICENSE "$RUNNER_TEMP/out/agentsview.LICENSE"
+
+      - name: Check glibc floor
+        run: fabric/.github/scripts/check-glibc.sh "$RUNNER_TEMP/out/agentsview" "$MAX_GLIBC" "$MAX_GLIBCXX"
+
+      - name: Checksums
+        working-directory: ${{ runner.temp }}/out
+        run: |
+          ./agentsview --version
+          sha256sum agentsview agentsview.LICENSE >SHA256SUMS
+          cat SHA256SUMS >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agentsview-linux-amd64
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+          retention-days: 7
+
+  smoke:
+    name: Smoke test on Ubuntu 24.04
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: agentsview-linux-amd64
+          path: ${{ runner.temp }}/out
+
+      - name: Verify and start
+        run: |
+          (cd "$RUNNER_TEMP/out" && sha256sum -c SHA256SUMS && chmod +x agentsview)
+          .github/scripts/smoke-agentsview.sh "$RUNNER_TEMP/out/agentsview"
+
+  release:
+    name: Attest and release
+    needs: [vet, smoke]
+    if: github.event_name != 'pull_request' && github.event_name != 'schedule' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release
+      id-token: write # sign the provenance attestation
+      attestations: write # store the attestation
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE: agentsview-${{ needs.vet.outputs.tag }}
+    steps:
+      - name: Skip if already released
+        id: existing
+        run: |
+          if gh release view "$RELEASE" >/dev/null 2>&1; then
+            echo "::notice::$RELEASE already exists; bump the pin, or delete that release to rebuild it"
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: steps.existing.outputs.skip != 'true'
+        with:
+          name: agentsview-linux-amd64
+          path: out
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: steps.existing.outputs.skip != 'true'
+        with:
+          subject-path: out/agentsview
+
+      - name: Create release
+        if: steps.existing.outputs.skip != 'true'
+        env:
+          TAG: ${{ needs.vet.outputs.tag }}
+          COMMIT: ${{ needs.vet.outputs.commit }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          notes="agentsview $TAG ($AGENTSVIEW_REPO@$COMMIT), built with -tags fts5,kit_posthog_disabled
+          (telemetry compiled out) after the vet gate, for glibc <= $MAX_GLIBC. Build: $RUN_URL.
+          agentsview is MIT-licensed; its license ships as agentsview.LICENSE.
+          Install with scripts/install-agentsview.sh."
+          gh release create "$RELEASE" out/agentsview out/agentsview.LICENSE out/SHA256SUMS \
+            --target "$GITHUB_SHA" --title "agentsview $TAG" --notes "$notes"

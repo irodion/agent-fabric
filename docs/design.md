@@ -87,43 +87,65 @@ short-lived job. The `kb` CLI and `kb mcp` read the same local files.
   Back it up with SQLite's online backup (`sqlite3 … ".backup"`) or its DuckDB/PG push, never by copying the
   DB/WAL files. The archive contains Cursor's `state.vscdb` content, which includes auth tokens: keep it local.
 
-**Build (CI).** A GitHub Actions workflow in this repo (`build-agentsview.yml`) builds agentsview once per pinned
-version; nothing is compiled on the desktop. `vendor/agentsview.pin` holds the tag and commit SHA, and a PR that
-changes it (or a manual dispatch) runs:
+**Build (CI).** `.github/workflows/build-agentsview.yml` builds agentsview once per pinned version; nothing is
+compiled on the desktop. `vendor/agentsview.pin` holds the tag and commit. A PR that changes the pin, the vet files
+or the workflow runs steps 1–4; the same change on `main`, or a manual run, also runs step 5. A weekly run repeats
+step 2 alone, so a dependency of the installed version that is later found to be malware or critical still shows up.
+All actions are pinned by commit SHA.
 
-1. Check out `kenn-io/agentsview` at the pinned commit.
-2. Dependency gate: SafeDep `vet` (Apache-2.0, no account; it sends package names and versions to SafeDep, no
-   code) over `go.mod`/`go.sum` and `frontend/package-lock.json`, with a `vet-policy.yml` that fails on malware
-   findings, critical vulnerabilities, and packages published less than 14 days ago.
-3. Build (verified by hand on 2026-10-22 with v0.45.0): `npm ci --ignore-scripts && npm run build` in
-   `frontend/`, then the go-sqlite3 header and pricing-snapshot steps from its Dockerfile, then
-   `go build -tags fts5,kit_posthog_disabled -trimpath …`. About 7 minutes on 2 vCPU; the binary is 145 MB
-   (DuckDB is linked in statically).
-4. Smoke test on GitHub's `ubuntu-24.04` runner, the minimum desktop (see glibc below): `agentsview --version`,
-   then `serve` on a throwaway data dir and one `GET /api/v1/sessions`.
-5. Publish the binary as a release asset of this repo, together with its SHA-256, agentsview's `LICENSE` (MIT
-   requires the notice to travel with the binary) and a build-provenance attestation
-   (`actions/attest-build-provenance`; available because this repo is public). The desktop installs it with
-   `gh release download`, `sha256sum -c` and `gh attestation verify`.
+1. Check the pin: the tag must still point at the pinned commit (`git ls-remote`), and upstream's `CI` workflow
+   must have passed on that commit. That workflow runs lint, Go tests on Linux, Windows and macOS (plus the race
+   detector), PostgreSQL and ClickHouse integration, frontend tests and e2e. Its e2e server is built with the same
+   `fts5,kit_posthog_disabled` tags as ours, so we don't rerun the suite. Then check out `kenn-io/agentsview` at
+   that commit.
+2. Dependency gate: SafeDep `vet` v1.20.0 over `go.mod` and `frontend/package-lock.json`. vet is Apache-2.0 and
+   is installed from its release after a SHA-256 and attestation check. It runs in community mode (no account) and
+   sends package names and versions to SafeDep, no code. Its telemetry is off (`VET_DISABLE_TELEMETRY`). The gate
+   fails on:
+   - known malware (`--malware-query`). SafeDep's database covered 265 of the 564 npm packages in v0.45.0, so
+     this catches known cases only;
+   - lockfile poisoning, meaning a package resolved from an unexpected URL. v0.45.0 has two on purpose, the `vite`
+     npm alias and the commit-pinned `@kenn-io/kit-ui`; `.github/vet/agentsview-trusted-urls.txt` trusts those
+     exact URLs;
+   - the policy in `.github/vet/policy.yml`: a critical vulnerability, or a version published less than 14 days
+     ago.
+
+   Exceptions go in `.github/vet/exceptions.yml`, each with the advisory, why it doesn't apply, and an expiry of at
+   most 30 days. An exception skips that version in every check, malware included. Run against v0.45.0 on
+   2026-10-23, the gate needed one: `dompurify` 3.4.16 (GHSA-cg2g-xh64-v4q7), which only affects the
+   `SAFE_FOR_TEMPLATES` option; agentsview calls `DOMPurify.sanitize` with the default config.
+   `go.kenn.io/kit` v0.33.0, published with agentsview v0.45.0 on 2026-10-09, cleared the 14-day rule that day.
+3. Build. The frontend builds in its own job (Node 24, `npm ci --ignore-scripts && npm run build`). The binary
+   builds in `golang:1.27.0-bookworm`, pinned by digest: the go-sqlite3 header and pricing-snapshot steps from
+   upstream's Dockerfile, then `go build -tags fts5,kit_posthog_disabled -trimpath …`, then the glibc check below.
+   By hand on 2 vCPU this took about 7 minutes; the binary is 145 MB (DuckDB is linked in statically).
+4. Smoke test on GitHub's `ubuntu-24.04` runner, the minimum desktop (`.github/scripts/smoke-agentsview.sh`):
+   `agentsview --version`, then `serve` on a throwaway home and data dir until `GET /api/v1/sessions` answers.
+5. Attest the binary (`actions/attest-build-provenance`; available because this repo is public) and publish the
+   release `agentsview-<tag>` with the binary, agentsview's `LICENSE` (MIT requires the notice to travel with the
+   binary) and `SHA256SUMS`. An existing release is never replaced. On the desktop,
+   `scripts/install-agentsview.sh` installs it: `gh release download`, `sha256sum -c`, then
+   `gh attestation verify` limited to this workflow on `main`.
 
 **glibc.** The binary uses cgo (SQLite, DuckDB) and links glibc and libstdc++ dynamically, so it runs only on
 distros at least as new as the build image. The devbox build needs `GLIBC_2.43` and would not start on Ubuntu 24.04
 (2.39). The minimum desktop is **Ubuntu 24.04** (glibc 2.39, libstdc++ up to `GLIBCXX_3.4.33`), so the build job
-runs in `golang:1.27-bookworm` (glibc 2.36, GCC 12), pinned by digest. It also fails if `objdump -T` shows a
+runs in `golang:1.27.0-bookworm` (glibc 2.36, GCC 12), pinned by digest. It also fails if `objdump -T` shows a
 `GLIBC_` version above 2.39 or a `GLIBCXX_` version above 3.4.33, so a base-image bump can't raise the floor
 unnoticed. Options considered:
 
 | Option | Runs on | Cost |
 |---|---|---|
-| **Build in an old-enough container** (chosen): `golang:1.27-bookworm`, the base of upstream's own Dockerfile | glibc ≥ 2.36: Ubuntu 24.04+, Debian 12+, Fedora 37+ | none |
+| **Build in an old-enough container** (chosen): `golang:1.27.0-bookworm`, the base of upstream's own Dockerfile | glibc ≥ 2.36: Ubuntu 24.04+, Debian 12+, Fedora 37+ | none |
 | Build in `ubuntu:24.04` + Go tarball | Ubuntu 24.04+ | more CI setup, no gain over bookworm |
 | Fully static binary (musl or static glibc) | any Linux | DuckDB is a prebuilt glibc C++ library with no build tag to leave it out in v0.45.0, so this means patching agentsview; not worth it |
 | Upstream release binary, checksum-verified | whatever upstream targets | loses the compile-time telemetry removal and our `vet` gate on what runs; needs `AGENTSVIEW_TELEMETRY_ENABLED=0` |
 
 The `kit_posthog_disabled` tag compiles telemetry out; v0.45.0 ignores `DO_NOT_TRACK`.
 
-The same `vet` gate runs on this repo's own dependencies (`uv.lock`) from the first commit, in CI on every PR.
-Whether `vet` reads `uv.lock` directly is unverified; if not, it scans `uv export --format requirements-txt`.
+The same `vet` gate (`.github/workflows/vet.yml`) runs on this repo's own dependencies on every PR, every push to
+`main` and weekly: the actions its workflows use now, and `uv.lock` once the Python core has one (vet parses
+`uv.lock` directly).
 Snyk can join as a second scanner: per its docs, the free plan allows unlimited tests on public repositories. It
 needs an account and a `SNYK_TOKEN` secret, and whether `snyk test` runs from a public repo's CI count as public
 needs checking on the first run (Settings → Usage).
