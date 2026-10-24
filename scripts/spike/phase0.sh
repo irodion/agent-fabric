@@ -211,11 +211,14 @@ MODELS_DIR=${MODELS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/agent-fabric/model
 REC=$SPIKE_DIR/recordings
 ENV_FILE=$SPIKE_DIR/state.env
 BIN=${BIN_DIR:-$HOME/.local/bin}/agentsview
-API=${AGENTSVIEW_API:-http://127.0.0.1:8080}
+API=http://127.0.0.1:8080 # agentsview's default bind, which the unit uses
 PROBE_FILE=$HOME/.agent-fabric-probe
 PROBE_PORT=18089
+COPILOT_SETTINGS=$HOME/.copilot/settings.json
+CURSOR_DB=$HOME/.config/Cursor/User/globalStorage/state.vscdb
 
-# The unit's sandbox (§4.1), as systemd-run properties for the probes.
+# The unit's sandbox (§4.1). The probes pass these to systemd-run and unit_file writes the same
+# settings, so what is probed is what gets installed.
 SANDBOX_PROPS=(
   -p ProtectSystem=strict -p ProtectHome=read-only -p PrivateTmp=yes -p NoNewPrivileges=yes
   -p "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" -p IPAddressDeny=any -p IPAddressAllow=localhost
@@ -238,11 +241,22 @@ MODELS=(
 # ── helpers ───────────────────────────────────────────────────────────────
 
 now() { date +%s.%N; }
-# secs START END: seconds between two now() values, one decimal.
+# secs START END: seconds between two epoch times, one decimal.
 secs() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.1f", b - a }'; }
+# iso_epoch TIMESTAMP: epoch seconds of an RFC 3339 timestamp; nothing for an empty or bad one.
+iso_epoch() { [[ -n $1 ]] && date -d "$1" +%s.%N 2>/dev/null || true; }
 uri() { jq -rn --arg s "$1" '$s | @uri'; }
 api() { curl -fsS --max-time 10 "$API/api/v1/$1"; }
+api_up() { curl -fsS -o /dev/null --max-time 3 "$API/api/v1/sessions" 2>/dev/null; }
 messages() { api "sessions/$(uri "$1")/messages?from=0&limit=1000"; }
+new_nonce() { printf 'spk%s' "$(od -An -N4 -tx4 /dev/urandom | tr -d ' \n')"; }
+
+# need_api: true when the unit's API answers; otherwise says which stage to finish first.
+need_api() {
+  api_up && return 0
+  warn "agentsview isn't answering on $API: finish the \"Start the sandboxed unit\" stage first"
+  return 1
+}
 
 # prompt "text" shows a prompt to send in an agent, and copies it when a clipboard tool exists.
 prompt() {
@@ -304,20 +318,46 @@ trap bg_stop EXIT
 sctl() { if [[ ${UNIT_MODE:-} == user ]]; then systemctl --user "$@"; else systemctl "$@"; fi; }
 jctl() { if [[ ${UNIT_MODE:-} == user ]]; then journalctl --user -u agentsview "$@"; else journalctl -u agentsview "$@"; fi; }
 
-# find_session AGENT NONCE: id of the agent's recent session with a user message containing NONCE.
-find_session() {
-  local ids id
-  ids=$(api "sessions?agent=$1&include_one_shot=true&limit=10" | jq -r '.sessions[].id') || return 1
-  for id in $ids; do
-    if messages "$id" | jq -e --arg n "$2" 'any(.messages[]; .role == "user" and (.content | contains($n)))' >/dev/null; then
-      printf '%s\n' "$id"
-      return 0
-    fi
-  done
-  return 1
+# copilot_sync_off: true when Copilot CLI won't sync sessions: remoteExport false and remoteSessions
+# not true (§7). Falls back to text matching when the file has comments.
+copilot_sync_off() {
+  local f=$COPILOT_SETTINGS
+  [[ -s $f ]] || return 1
+  if jq empty "$f" 2>/dev/null; then
+    jq -e '.remoteExport == false and .remoteSessions != true' "$f" >/dev/null 2>&1
+  else
+    grep -Eq '"remoteExport"[[:space:]]*:[[:space:]]*false' "$f" && ! grep -Eq '"remoteSessions"[[:space:]]*:[[:space:]]*true' "$f"
+  fi
 }
 
-# wait_for_session AGENT NONCE TIMEOUT: find_session, retried every second.
+# cursor_db_mode: journal mode of Cursor's state.vscdb, from its header (bytes 18-19 are 2 in WAL mode).
+cursor_db_mode() {
+  [[ -f $CURSOR_DB ]] || {
+    echo "not found"
+    return 0
+  }
+  od -An -tu1 -j18 -N2 "$CURSOR_DB" | awk '{ print ($1 == 2 && $2 == 2) ? "wal" : "rollback" }'
+}
+
+# find_session AGENT NONCE: id of the agent's recent session whose first message contains NONCE.
+find_session() {
+  local list id
+  list=$(api "sessions?agent=$1&include_one_shot=true&limit=10") || return 1
+  id=$(jq -r --arg n "$2" 'first(.sessions[] | select((.first_message // "") | contains($n)) | .id) // empty' <<<"$list")
+  if [[ -z $id ]]; then
+    # first_message may be cut short; look through the newest sessions' messages instead.
+    for id in $(jq -r '.sessions[:5][].id' <<<"$list"); do
+      if messages "$id" | jq -e --arg n "$2" 'any(.messages[]; .role == "user" and (.content | contains($n)))' >/dev/null; then
+        printf '%s\n' "$id"
+        return 0
+      fi
+    done
+    return 1
+  fi
+  printf '%s\n' "$id"
+}
+
+# wait_for_session AGENT NONCE TIMEOUT: find_session, retried every half second.
 wait_for_session() {
   local end=$(($(date +%s) + $3)) id
   while (($(date +%s) < end)); do
@@ -325,26 +365,34 @@ wait_for_session() {
       printf '%s\n' "$id"
       return 0
     fi
-    sleep 1
+    sleep 0.5
   done
   return 1
 }
 
-# poll_nonce SID NONCE TIMEOUT: prints "user T" and "assistant T" when each message with NONCE
-# first shows up in the API.
+# message_ts SID ROLE NONCE: epoch of the first ROLE message containing NONCE, from the message's
+# own timestamp; nothing when it has none.
+message_ts() {
+  iso_epoch "$(messages "$1" | jq -r --arg r "$2" --arg n "$3" \
+    'first(.messages[] | select(.role == $r and (.content | contains($n))) | .timestamp // "") // ""' 2>/dev/null || true)"
+}
+
+# poll_nonce SID NONCE TIMEOUT: prints "ROLE ARRIVED STAMPED" when the user message and then the
+# assistant message containing NONCE first show up in the API. ARRIVED is when this poll saw it,
+# STAMPED the message's own timestamp (empty when it has none).
 poll_nonce() {
-  local end=$(($(date +%s) + $3)) user="" body
+  local end=$(($(date +%s) + $3)) user="" body hit role
   while (($(date +%s) < end)); do
     if body=$(messages "$1"); then
-      if [[ -z $user ]] && jq -e --arg n "$2" 'any(.messages[]; .role == "user" and (.content | contains($n)))' <<<"$body" >/dev/null; then
-        user=1
-        echo "user $(now)"
-      fi
-      if jq -e --arg n "$2" 'any(.messages[]; .role == "assistant" and (.content | contains($n)))' <<<"$body" >/dev/null; then
-        [[ -n $user ]] || echo "user $(now)"
-        echo "assistant $(now)"
-        return 0
-      fi
+      for role in user assistant; do
+        [[ $role == user && -n $user ]] && continue
+        hit=$(jq -r --arg r "$role" --arg n "$2" \
+          'first(.messages[] | select(.role == $r and (.content | contains($n))) | "hit " + (.timestamp // "")) // empty' <<<"$body")
+        [[ -n $hit ]] || continue
+        echo "$role $(now) $(iso_epoch "${hit#hit }")"
+        [[ $role == user ]] && user=1
+        [[ $role == assistant ]] && return 0
+      done
     fi
     sleep 0.5
   done
@@ -376,28 +424,53 @@ rec_snapshots() {
   done
 }
 
-# lag_round SID NONCE WATCHLOG: one timed prompt; sets LAG_USER, LAG_REPLY and LAG_WATCH.
+# quiet_wait WATCHLOG: wait until the session has had no update for 5 s (at most 60 s), so the
+# next round's watch event can't be a late update from the previous turn.
+quiet_wait() {
+  local end=$(($(date +%s) + 60)) last
+  while (($(date +%s) < end)); do
+    last=$(awk '/session_updated/ { t = $1 } END { print t + 0 }' "$1")
+    awk -v l="$last" -v n="$(now)" 'BEGIN { exit !(n - l >= 5) }' && return 0
+    sleep 1
+  done
+  return 0
+}
+
+# lag_round SID NONCE WATCHLOG: one timed prompt. Sets LAG_USER and LAG_REPLY (API arrival minus
+# the message's own timestamp, or minus the Enter key press when there is none; LAG_ENTER=1 then),
+# and LAG_WATCH (first session_updated event at or after the prompt's timestamp).
 lag_round() {
-  local out t0 tseen pid tu ta
+  local out t0 tu mu ta ma base
+  note "waiting for the session to go quiet…"
+  quiet_wait "$3"
   step "Send exactly:"
   prompt "Reply with exactly $2 and nothing else."
   pause "Press Enter here, then send it straight away"
   t0=$(now)
+  note "waiting for the prompt and the reply to show up in agentsview (up to 3 min)…"
   out=$(mktemp)
-  poll_nonce "$1" "$2" 180 </dev/null >"$out" &
-  pid=$!
-  pause "Press Enter when the reply has appeared in the chat"
-  tseen=$(now)
-  note "waiting for the API to have both messages (up to 3 min)…"
-  wait "$pid" || true
-  tu=$(awk '$1 == "user" { print $2 }' "$out")
-  ta=$(awk '$1 == "assistant" { print $2 }' "$out")
+  poll_nonce "$1" "$2" 180 >"$out" || true
+  read -r tu mu < <(awk '$1 == "user" { print $2, $3 }' "$out") || true
+  read -r ta ma < <(awk '$1 == "assistant" { print $2, $3 }' "$out") || true
   rm -f "$out"
-  LAG_USER=$([[ -n $tu ]] && secs "$t0" "$tu" || echo ">180")
-  LAG_REPLY=$([[ -n $ta ]] && secs "$tseen" "$ta" || echo ">180")
-  LAG_WATCH=$(awk -v t="$t0" '$1 + 0 >= t + 0 && /session_updated/ { printf "%.1f", $1 - t; found = 1; exit }
-    END { if (!found) print "none" }' "$3" 2>/dev/null || echo none)
-  say "prompt → API ${LAG_USER} s · first watch event ${LAG_WATCH} s · reply on screen → API ${LAG_REPLY} s"
+  if [[ -z ${tu:-} ]]; then
+    LAG_USER=">180"
+  elif [[ -n ${mu:-} ]]; then
+    LAG_USER=$(secs "$mu" "$tu")
+  else
+    LAG_USER=$(secs "$t0" "$tu") LAG_ENTER=1
+  fi
+  if [[ -z ${ta:-} ]]; then
+    LAG_REPLY=">180"
+  elif [[ -n ${ma:-} ]]; then
+    LAG_REPLY=$(secs "$ma" "$ta")
+  else
+    LAG_REPLY="no timestamp"
+  fi
+  base=${mu:-$t0}
+  LAG_WATCH=$(awk -v t="$base" '$1 + 0 >= t + 0 && /session_updated/ { printf "%.1f", $1 - t; found = 1; exit }
+    END { if (!found) print "none" }' "$3")
+  say "prompt captured after ${LAG_USER} s · first watch event ${LAG_WATCH} s · reply captured after ${LAG_REPLY} s"
 }
 
 # max_of VALUES...: largest number, or the first non-number (">180", "none") if there is one.
@@ -418,18 +491,33 @@ tool_rows() {
     ] | @tsv' "$1"
 }
 
+# failing_command / failed_edit ROWS: the first matching tool call, by agentsview's category; the
+# tool name only counts when the category says nothing (Other, Tool or empty).
+failing_command() {
+  awk -F'\t' '($3 == "Bash" || (($3 == "" || $3 == "Other" || $3 == "Tool") && tolower($2) ~ /terminal|shell|command|exec/)) &&
+    (($5 != "" && $5 != "0") || $6 == "yes") { print $2 " (exit " ($5 == "" ? "?" : $5) ")"; exit }' <<<"$1"
+}
+failed_edit() {
+  awk -F'\t' '($3 == "Edit" || $3 == "Write" || (($3 == "" || $3 == "Other" || $3 == "Tool") && tolower($2) ~ /edit|replace|patch|write_file|create_file/)) &&
+    ($4 ~ /error/ || $6 == "yes") { print $2 " (" ($4 ~ /error/ ? "status " $4 : "error text") ")"; exit }' <<<"$1"
+}
+
 # agent_session KEY LABEL AGENT HOW: one test session in an agent (§9 items 1, 2, 4 and 7).
 agent_session() {
-  local key=$1 label=$2 agent=$3 how=$4 dir="$REC/$1" v n0 n1 n2 sid t0 lag_first
-  local u1 r1 w1 u2 r2 w2 rows cmd_hit edit_hit confirmed snaps
-  v="NONCE_${key}_0" && n0=${!v:-}
-  v="NONCE_${key}_1" && n1=${!v:-}
-  v="NONCE_${key}_2" && n2=${!v:-}
-  if [[ -z $n0 || -z ${SCRATCH_DIR:-} ]]; then
+  local key=$1 label=$2 agent=$3 how=$4 dir n0 n1 n2 sid t0 tf m0 lag_first basis
+  local u1 r1 w1 u2 r2 w2 rows cmd_hit edit_hit confirmed snaps tool_summary="0" tool_list="(none)"
+  need_api || return 1
+  if [[ -z ${SCRATCH_DIR:-} ]]; then
     warn "run the scratch project stage first"
     return 1
   fi
-  rm -rf "$dir" && mkdir -p "$dir"
+  # Fresh tags on every attempt, so a retry can't match the previous attempt's session.
+  n0=$(new_nonce) n1=$(new_nonce) n2=$(new_nonce)
+  write_env "CAPTURED_$key" no >/dev/null
+  write_env "SID_$key" "" >/dev/null
+  write_env "NONCE_$key" "$n0" >/dev/null
+  dir=$REC/$key/$(date +%Y%m%d-%H%M%S)
+  mkdir -p "$dir"
   say "$how"
   step "Start a new chat in agent mode and send exactly:"
   prompt "Hi, this is a capture test ($n0). Reply with one short sentence."
@@ -438,26 +526,32 @@ agent_session() {
   note "waiting for agentsview to capture it (up to 5 min)…"
   if ! sid=$(wait_for_session "$agent" "$n0" 300); then
     warn "$label: not captured within 5 min"
-    write_env "CAPTURED_$key" no
     record "20-$key" "## $label ($agent)
 
 Not captured within 5 min of sending the first prompt. Check \`journalctl\` for agentsview errors
 and whether the sandbox hides the agent's files (\`agentsview doctor\`).
 "
-    return 0
+    return 1
   fi
-  lag_first=$(secs "$t0" "$(now)")
+  tf=$(now)
   write_env "SID_$key" "$sid"
   write_env "CAPTURED_$key" yes
+  LAG_ENTER=""
+  m0=$(message_ts "$sid" user "$n0")
+  if [[ -n $m0 ]]; then lag_first=$(secs "$m0" "$tf"); else lag_first=$(secs "$t0" "$tf") LAG_ENTER=1; fi
   say "captured as $sid after $lag_first s"
 
   : >"$dir/watch.log"
   bg_start rec_watch "$sid" "$dir/watch.log"
   bg_start rec_events "$dir/events.log"
   bg_start rec_snapshots "$sid" "$dir/snapshots"
-  sleep 2
   lag_round "$sid" "$n1" "$dir/watch.log" && u1=$LAG_USER r1=$LAG_REPLY w1=$LAG_WATCH
   lag_round "$sid" "$n2" "$dir/watch.log" && u2=$LAG_USER r2=$LAG_REPLY w2=$LAG_WATCH
+  if [[ -n $LAG_ENTER ]]; then
+    basis="the Enter key press (some messages have no timestamp), so these include your own delay"
+  else
+    basis="each message's own timestamp"
+  fi
 
   step "Now send this (approve the command if the agent asks):"
   prompt "Run python3 -m unittest -q in this folder with your terminal tool and tell me the exit code. Don't change any files."
@@ -474,25 +568,20 @@ and whether the sandbox hides the agent's files (\`agentsview doctor\`).
   snaps=$(find "$dir/snapshots" -name '*.json' 2>/dev/null | wc -l || true)
 
   rows=$(tool_rows "$dir/messages.json" 2>/dev/null || true)
-  cmd_hit=$(awk -F'\t' '($3 == "Bash" || tolower($2) ~ /terminal|shell|command|exec/) && (($5 != "" && $5 != "0") || $6 == "yes") { print $2 " (exit " ($5 == "" ? "?" : $5) ")"; exit }' <<<"$rows")
-  edit_hit=$(awk -F'\t' '($3 ~ /^(Edit|Write|MultiEdit)$/ || tolower($2) ~ /edit|replace|patch|write/) && ($4 ~ /error/ || $6 == "yes") { print $2 " (" ($4 ~ /error/ ? "status " $4 : "error text") ")"; exit }' <<<"$rows")
-  say "tool calls captured:"
+  cmd_hit=$(failing_command "$rows")
+  edit_hit=$(failed_edit "$rows")
   if [[ -n $rows ]]; then
-    awk -F'\t' '{ printf "    #%s %-22s %-8s status=%-9s exit=%-3s error-text=%s\n", $1, $2, $3, ($4 == "" ? "-" : $4), ($5 == "" ? "-" : $5), ($6 == "" ? "no" : $6) }' <<<"$rows"
-  else
-    warn "none"
+    tool_summary=$(awk -F'\t' '{ n++; c[$3 == "" ? "?" : $3]++ } END { s = ""; for (k in c) s = s (s == "" ? "" : ", ") k " " c[k]; print n " (" s ")" }' <<<"$rows")
+    tool_list=$(awk -F'\t' '{ printf "#%s %s %s status=%s exit=%s error-text=%s\n", $1, $2, ($3 == "" ? "-" : $3), ($4 == "" ? "-" : $4), ($5 == "" ? "-" : $5), ($6 == "" ? "no" : $6) }' <<<"$rows")
   fi
+  say "tool calls captured:"
+  printf '%s\n' "$tool_list" | sed 's/^/    /'
   say "failing command detected: ${cmd_hit:-no}"
   say "failed edit detected: ${edit_hit:-no}"
   if confirm "In $label, did the agent really run the tests (they fail) and try the edit (it fails)?"; then
     confirmed=yes
   else
     confirmed="no: the agent didn't do both, so a 'no' above may be the agent, not agentsview"
-  fi
-  local tool_summary="0" tool_list="(none)"
-  if [[ -n $rows ]]; then
-    tool_summary=$(awk -F'\t' '{ n++; c[$3 == "" ? "?" : $3]++ } END { s = ""; for (k in c) s = s (s == "" ? "" : ", ") k " " c[k]; print n " (" s ")" }' <<<"$rows")
-    tool_list=$(awk -F'\t' '{ printf "#%s %s %s status=%s exit=%s error-text=%s\n", $1, $2, ($3 == "" ? "-" : $3), ($4 == "" ? "-" : $4), ($5 == "" ? "-" : $5), ($6 == "" ? "no" : $6) }' <<<"$rows")
   fi
   write_env "LAG_${key}" "$(max_of "$lag_first" "$u1" "$u2")"
   write_env "WATCH_${key}" "$(max_of "$w1" "$w2")"
@@ -503,10 +592,11 @@ and whether the sandbox hides the agent's files (\`agentsview doctor\`).
 | Check | Result |
 |---|---|
 | Captured | yes, \`$sid\` |
-| First prompt → API | $lag_first s |
-| Prompt → API (rounds 1, 2) | $u1 s, $u2 s |
-| First \`session watch\` event after sending | $w1 s, $w2 s |
-| Reply on screen → API (≤ 0: API first) | $r1 s, $r2 s |
+| Capture lag, first prompt | $lag_first s |
+| Capture lag, prompts (rounds 1, 2) | $u1 s, $u2 s |
+| First \`session watch\` event after the prompt | $w1 s, $w2 s |
+| Capture lag, replies (from the reply's timestamp, which may be when it started) | $r1 s, $r2 s |
+| Lags measured from | $basis |
 | Failing command detected | ${cmd_hit:-no} |
 | Failed edit detected | ${edit_hit:-no} |
 | You saw the agent do both | $confirmed |
@@ -525,21 +615,21 @@ $tool_list
 # unit_file: the sandboxed unit for UNIT_MODE (§4.1). Absolute paths, so it also works as a system
 # unit, where %h would be root's home.
 unit_file() {
-  local p
+  local p i
   printf '[Unit]\nDescription=agentsview session capture for agent-fabric (sandboxed)\n\n[Service]\n'
-  [[ $UNIT_MODE == system ]] && printf 'User=%s\n' "$USER"
+  [[ ${UNIT_MODE:-} == system ]] && printf 'User=%s\n' "$USER"
   printf 'ExecStart=%s serve --no-browser --no-update-check\n' "$BIN"
   printf 'Environment=AGENTSVIEW_TELEMETRY_ENABLED=0\nRestart=on-failure\n'
-  printf 'ProtectSystem=strict\nProtectHome=read-only\nReadWritePaths=%s/.agentsview\n' "$HOME"
+  for ((i = 1; i < ${#SANDBOX_PROPS[@]}; i += 2)); do printf '%s\n' "${SANDBOX_PROPS[i]}"; done
+  printf 'ReadWritePaths=%s/.agentsview\n' "$HOME"
   for p in "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.config/gh" "$HOME/.codex/auth.json"; do
     printf 'InaccessiblePaths=-%s\n' "$p"
   done
   if [[ -s $SPIKE_DIR/inaccessible.txt ]]; then
     while IFS= read -r p; do printf 'InaccessiblePaths=-%s\n' "$p"; done <"$SPIKE_DIR/inaccessible.txt"
   fi
-  printf 'PrivateTmp=yes\nNoNewPrivileges=yes\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n'
-  printf 'IPAddressDeny=any\nIPAddressAllow=localhost\n\n[Install]\n'
-  if [[ $UNIT_MODE == system ]]; then printf 'WantedBy=multi-user.target\n'; else printf 'WantedBy=default.target\n'; fi
+  printf '\n[Install]\n'
+  if [[ ${UNIT_MODE:-} == system ]]; then printf 'WantedBy=multi-user.target\n'; else printf 'WantedBy=default.target\n'; fi
 }
 
 # loopback_server: a throwaway HTTP server on 127.0.0.1 for the loopback probe; prints its pid.
@@ -606,41 +696,40 @@ $os, glibc $glibc, $(nproc) CPUs, $(awk '/MemTotal/ { printf "%.0f GB", $2 / 104
 }
 
 s_copilot_sync() {
-  local f=$HOME/.copilot/settings.json export_now sessions_now tmp
-  say "Copilot CLI copies local sessions to your GitHub account unless \"remoteExport\" is false (§7)."
-  say "Do this before any test session, so none of them is synced."
-  if [[ -f $f ]] && ! jq empty "$f" 2>/dev/null; then
-    warn "$f isn't plain JSON (comments?), so set \"remoteExport\": false in it by hand"
+  local f=$COPILOT_SETTINGS tmp state
+  say "Copilot CLI copies local sessions to your GitHub account unless \"remoteExport\" is false, and"
+  say "\"remoteSessions\": true turns that back on (§7). Do this before any test session."
+  if copilot_sync_off; then
+    say "Already off in $f."
+  elif [[ -s $f ]] && ! jq empty "$f" 2>/dev/null; then
+    warn "$f isn't plain JSON (comments?), so edit it by hand:"
+    say "set \"remoteExport\": false, and \"remoteSessions\": false if it's there."
     pause "Press Enter when it's saved"
-  fi
-  export_now=$(jq -r 'if has("remoteExport") then .remoteExport | tostring else "unset (default: true)" end' "$f" 2>/dev/null || echo "no settings file (default: true)")
-  sessions_now=$(jq -r 'if has("remoteSessions") then .remoteSessions | tostring else "unset (default: false)" end' "$f" 2>/dev/null || echo "unset (default: false)")
-  say "remoteExport: $export_now · remoteSessions: $sessions_now"
-  if [[ $export_now != false ]] && confirm "Set \"remoteExport\": false in $f (keeps a backup)?"; then
+  elif confirm "Set \"remoteExport\": false (and \"remoteSessions\": false if it's true) in $f? A backup is kept."; then
     mkdir -p "$(dirname "$f")"
     [[ -f $f ]] && cp -p "$f" "$f.bak-$(date +%Y%m%d%H%M%S)"
     tmp=$(mktemp)
-    if [[ -f $f ]]; then jq '.remoteExport = false' "$f" >"$tmp"; else echo '{"remoteExport": false}' | jq . >"$tmp"; fi
-    cat "$tmp" >"$f" && rm -f "$tmp"
-    export_now=false
-    printf '  %s✓ set%s remoteExport = false\n' "$GREEN" "$RESET"
-  fi
-  if [[ $sessions_now == true ]]; then
-    warn "remoteSessions is true, which turns export back on whatever remoteExport says"
-    if confirm "Set \"remoteSessions\": false too?"; then
-      tmp=$(mktemp) && jq '.remoteSessions = false' "$f" >"$tmp" && cat "$tmp" >"$f" && rm -f "$tmp"
-      sessions_now=false
+    # An empty or missing file starts from {}; the file is only replaced by a checked result.
+    if { if [[ -s $f ]]; then cat "$f"; else echo '{}'; fi; } |
+      jq '.remoteExport = false | if .remoteSessions == true then .remoteSessions = false else . end' >"$tmp" &&
+      jq -e '.remoteExport == false and .remoteSessions != true' "$tmp" >/dev/null; then
+      cat "$tmp" >"$f"
+    else
+      warn "couldn't update $f; it's unchanged"
     fi
+    rm -f "$tmp"
   fi
   note "Don't turn on remote control in Copilot CLI (/remote on): that re-enables export too."
+  if copilot_sync_off; then state=off; else state="still on"; fi
   record "02-copilot-sync" "## Copilot session sync
 
-\`~/.copilot/settings.json\`: remoteExport = $export_now, remoteSessions = $sessions_now
+\`~/.copilot/settings.json\`: session sync $state (remoteExport false and remoteSessions not true).
 "
-  if [[ $export_now != false ]]; then
-    warn "remoteExport is still on: Copilot CLI test sessions would be synced to GitHub"
+  if [[ $state != off ]]; then
+    warn "session sync is still on: Copilot CLI test sessions would be synced to GitHub"
     return 1
   fi
+  printf '  %s✓%s session sync is off\n' "$GREEN" "$RESET"
   pause "Press Enter to go on"
 }
 
@@ -667,7 +756,7 @@ $("$BIN" --version), sha256 $(sha256sum "$BIN" | cut -c1-16)…, checksum and at
 }
 
 s_probes() {
-  local curl net_ok start fs net lo srv mode out key val sys_start="" sys_fs="" sys_net="" sys_lo=""
+  local curl net_ok start fs net lo srv mode out key val q verdict sys_start="" sys_fs="" sys_net="" sys_lo=""
   curl=$(command -v curl)
   say "Can a user unit enforce the sandbox, or does agentsview need a system unit with User= (§4.1)?"
   say "Each probe runs as a transient user unit with the unit's sandbox settings."
@@ -698,7 +787,6 @@ s_probes() {
     out=$SPIKE_DIR/system-probe.txt
     rm -f "$out"
     srv=$(loopback_server)
-    local q
     q=$(printf '%q ' "${SANDBOX_PROPS[@]}")
     prompt "sudo bash -c 'p() { systemd-run --wait --quiet --collect --uid=$USER $q \"\$@\" >/dev/null 2>&1; echo \$?; }; rm -f $PROBE_FILE; { echo start=\$(p /bin/true); echo write=\$(p $(command -v touch) $PROBE_FILE); echo net=\$(p $curl -fsS -o /dev/null --max-time 10 https://example.com); echo loopback=\$(p $curl -fsS -o /dev/null --max-time 5 http://127.0.0.1:$PROBE_PORT/); } >$out'"
     pause "Press Enter when it has finished"
@@ -718,7 +806,7 @@ s_probes() {
     fi
     rm -f "$PROBE_FILE" 2>/dev/null || true
   fi
-  local verdict="**$mode unit**"
+  verdict="**$mode unit**"
   if [[ $mode == system && ! ($sys_start == ok && $sys_fs == yes && $sys_net == yes && $sys_lo == ok) ]]; then
     verdict="none: the system unit wasn't confirmed to confine agentsview"
   fi
@@ -742,7 +830,7 @@ Chosen: $verdict
 }
 
 s_secrets() {
-  local d dirs=() found db mode="no database" p
+  local d dirs=() found mode p
   say "agentsview reads these agents' folders, so their credential files must be hidden from it."
   for d in "$HOME/.config/Cursor" "$HOME/.cursor" "$HOME/.copilot" "$HOME/.config/github-copilot" "$HOME/.config/Code"; do
     [[ -d $d ]] && dirs+=("$d")
@@ -753,29 +841,27 @@ s_secrets() {
       -o -name logs -o -name session-state -o -name projects -o -name History \) -prune -o -type f \
       \( -iname '*auth*' -o -iname '*token*' -o -iname '*cred*' -o -iname '*secret*' -o -iname '*.pem' -o -iname '*.key' \
       -o -name hosts.json -o -name apps.json \) -print 2>/dev/null
-    find "${dirs[@]}" -maxdepth 2 -type f -name '*.json' -size -1M -print0 2>/dev/null |
-      xargs -0r grep -l -i -E '"[a-z_]*(oauth|access|refresh|api)_?token"|"token"[[:space:]]*:' 2>/dev/null
+    # -size -1024k, not -1M: find rounds sizes up to whole units, so -1M matches only empty files.
+    find "${dirs[@]}" -maxdepth 2 -type f -name '*.json' -size -1024k -print0 2>/dev/null |
+      xargs -0r grep -l -i -E '"[a-z_.-]*(tokens?|secret|password)"[[:space:]]*:' 2>/dev/null
   } | grep -v -E '/state\.vscdb(-|$)' | sort -u || true)
   : >"$SPIKE_DIR/inaccessible.txt"
   if [[ -z $found ]]; then
-    say "No credential-looking files found in: ${dirs[*]}"
+    say "No credential-looking files found in: ${dirs[*]:-none of the agent folders exist}"
   else
     say "Files that look like credentials (names or JSON token keys; contents not shown):"
-    while IFS= read -r p; do
+    # The list comes in on fd 3, so confirm still reads the answers from the terminal.
+    while IFS= read -r p <&3; do
       if [[ $p == *[[:space:]]* ]]; then
         warn "$p has a space in its path: add it to the unit by hand if it's a credential"
       elif confirm "Hide $p from agentsview?"; then
         printf '%s\n' "$p" >>"$SPIKE_DIR/inaccessible.txt"
       fi
-    done <<<"$found"
+    done 3<<<"$found"
   fi
   note "Cursor's state.vscdb holds tokens too, but agentsview has to read it (§4.1)."
-  db=$HOME/.config/Cursor/User/globalStorage/state.vscdb
-  if [[ -f $db ]]; then
-    mode=$(od -An -tu1 -j18 -N2 "$db" | awk '{ print ($1 == 2 && $2 == 2) ? "wal" : "rollback" }')
-    say "Cursor's state.vscdb journal mode: $mode"
-  fi
-  write_env CURSOR_DB_MODE "$mode"
+  mode=$(cursor_db_mode)
+  say "Cursor's state.vscdb journal mode: $mode"
   record "05-secrets" "## Credential files and Cursor's database
 
 Hidden from agentsview besides the defaults (~/.ssh, ~/.gnupg, ~/.config/gh, ~/.codex/auth.json):
@@ -790,11 +876,19 @@ Cursor \`state.vscdb\` journal mode: $mode
 
 s_unit() {
   local f pid home_opts data_opts counts prev stray i
+  if [[ -z ${UNIT_MODE:-} ]]; then
+    warn "run the sandbox probes stage first: it decides between a user and a system unit"
+    return 1
+  fi
   mkdir -p "$HOME/.agentsview"
-  if curl -fsS -o /dev/null --max-time 3 "$API/api/v1/sessions" && ! sctl is-active --quiet agentsview.service 2>/dev/null; then
+  if api_up && ! sctl is-active --quiet agentsview.service 2>/dev/null; then
     warn "something already answers on $API, and it isn't the unit (an agentsview started by hand or by an MCP client?)"
-    say "Stop it first, e.g. agentsview daemon stop, then press Enter."
+    say "Stop it (agentsview daemon stop, or quit what started it), then press Enter."
     pause
+    if api_up; then
+      warn "it still answers, so the unit couldn't bind $API"
+      return 1
+    fi
   fi
   f=$SPIKE_DIR/agentsview.service
   unit_file >"$f"
@@ -814,15 +908,15 @@ s_unit() {
   fi
   note "waiting for the API on $API…"
   for i in $(seq 1 60); do
-    curl -fsS -o /dev/null --max-time 2 "$API/api/v1/sessions" && break
+    api_up && break
     sleep 1
   done
-  if ! curl -fsS -o /dev/null --max-time 2 "$API/api/v1/sessions"; then
-    warn "no API after 60 s; recent log:"
+  pid=$(sctl show -p MainPID --value agentsview.service 2>/dev/null || true)
+  if ! api_up || ! sctl is-active --quiet agentsview.service || [[ ${pid:-0} == 0 ]]; then
+    warn "the unit isn't running with the API up after 60 s; recent log:"
     jctl -n 20 --no-pager 2>/dev/null || true
     return 1
   fi
-  pid=$(sctl show -p MainPID --value agentsview.service 2>/dev/null || true)
   home_opts=$(awk -v h="$(dirname "$HOME")" '$5 == h { o = $6 } END { print o }' "/proc/$pid/mountinfo" 2>/dev/null || true)
   data_opts=$(awk -v d="$HOME/.agentsview" '$5 == d { o = $6 } END { print o }' "/proc/$pid/mountinfo" 2>/dev/null || true)
   say "inside the unit: $(dirname "$HOME") mounted ${home_opts:-?}, ~/.agentsview ${data_opts:-?}"
@@ -839,7 +933,7 @@ s_unit() {
   [[ -z $stray ]] || warn "agentsview running outside the unit: $stray"
   record "06-unit" "## Sandboxed unit
 
-$UNIT_MODE unit, active. Inside it $(dirname "$HOME") is mounted \`${home_opts:-?}\` and ~/.agentsview \`${data_opts:-?}\`.
+$UNIT_MODE unit, active (pid $pid). Inside it $(dirname "$HOME") is mounted \`${home_opts:-?}\` and ~/.agentsview \`${data_opts:-?}\`.
 Existing sessions per agent after the first sync: $(paste -sd ',' - <<<"$counts" | sed 's/,/, /g').
 agentsview processes outside the unit: ${stray:-none}
 "
@@ -847,11 +941,13 @@ agentsview processes outside the unit: ${stray:-none}
 }
 
 s_scratch() {
-  local def=$HOME/agent-fabric-spike k i
+  local def=$HOME/agent-fabric-spike
   say "The test sessions run in a throwaway project with no secrets, so their recordings can later"
   say "become scrubbed fixtures (§7)."
   ask SCRATCH_DIR "Folder for it [$def]:" || true
   SCRATCH_DIR=${SCRATCH_DIR:-$def}
+  SCRATCH_DIR=${SCRATCH_DIR/#\~/$HOME}
+  [[ $SCRATCH_DIR == /* ]] || SCRATCH_DIR=$PWD/$SCRATCH_DIR
   if [[ -e $SCRATCH_DIR && ! -f $SCRATCH_DIR/.agent-fabric-spike ]] && [[ -n $(ls -A "$SCRATCH_DIR" 2>/dev/null) ]]; then
     warn "$SCRATCH_DIR exists and isn't empty; pick another folder"
     return 1
@@ -882,11 +978,6 @@ EOF
   printf '# agent-fabric spike\n\nThrowaway project for the capture spike. The test fails on purpose.\n' >"$SCRATCH_DIR/README.md"
   [[ -d $SCRATCH_DIR/.git ]] || git -C "$SCRATCH_DIR" init -q
   write_env SCRATCH_DIR "$SCRATCH_DIR"
-  for k in cursor vscode codex cli; do
-    for i in 0 1 2; do
-      write_env "NONCE_${k}_$i" "spk$(od -An -N4 -tx4 /dev/urandom | tr -d ' \n')" >/dev/null
-    done
-  done
   say "Created $SCRATCH_DIR (calc.py, test_calc.py with a failing test, README.md, git repo)."
   pause "Press Enter to go on"
 }
@@ -907,8 +998,9 @@ s_codex() {
 }
 
 s_copilot_cli() {
-  local n=${NONCE_cli_0:-} sid seen
-  if [[ -z $n || -z ${SCRATCH_DIR:-} ]]; then
+  local n sid seen
+  need_api || return 1
+  if [[ -z ${SCRATCH_DIR:-} ]]; then
     warn "run the scratch project stage first"
     return 1
   fi
@@ -921,7 +1013,12 @@ Skipped: Copilot CLI isn't installed.
     pause "Press Enter to go on"
     return 0
   fi
-  say "With remoteExport off, a new Copilot CLI session must not show up on github.com (§9 item 8)."
+  if ! copilot_sync_off; then
+    warn "Copilot session sync is still on in $COPILOT_SETTINGS: finish the \"Copilot session sync off\" stage first"
+    return 1
+  fi
+  n=$(new_nonce)
+  say "With sync off, a new Copilot CLI session must not show up on github.com (§9 item 8)."
   step "In a new terminal: cd $SCRATCH_DIR && copilot, then send:"
   prompt "Reply with exactly $n and nothing else."
   step "Wait for the reply, then quit Copilot CLI (/exit)."
@@ -943,35 +1040,45 @@ Captured by agentsview: ${sid:-no}. Test session found on github.com: $seen.
 }
 
 s_mcp() {
-  local target key sid n reg found stray
+  local target="" key v sid n reg reg_json reg_cmd found stray
+  need_api || return 1
   say "Codex queries agentsview over MCP, through the unit (--server), for another agent's session (§9 item 3)."
   for key in cursor vscode; do
-    sid="SID_$key"
-    if [[ -n ${!sid:-} ]]; then
+    v="CAPTURED_$key"
+    if [[ ${!v:-} == yes ]]; then
       target=$key
       break
     fi
   done
-  if [[ -z ${target:-} ]]; then
+  if [[ -z $target ]]; then
     warn "neither the Cursor nor the VS Code session was captured, so there's nothing to look up"
     return 1
   fi
   sid="SID_$target" && sid=${!sid}
-  n="NONCE_${target}_0" && n=${!n}
+  n="NONCE_$target" && n=${!n}
   if ! command -v codex >/dev/null 2>&1; then
     warn "Codex CLI (codex) isn't installed"
     return 1
   fi
-  if codex mcp get agentsview >/dev/null 2>&1; then
-    say "Codex already has an agentsview MCP server:"
-    codex mcp get agentsview 2>/dev/null | sed 's/^/    /'
+  # A registration without --server lets the MCP proxy start its own unconfined daemon (§8).
+  server_ok() { jq -e --arg s "$API" '(.transport.args // []) as $a | ($a | index("--server")) as $i | $i != null and $a[$i + 1] == $s' >/dev/null; }
+  reg_json=$(codex mcp get agentsview --json 2>/dev/null || true)
+  if [[ -n $reg_json ]] && server_ok <<<"$reg_json"; then
     reg=existing
+  elif [[ -n $reg_json ]]; then
+    warn "Codex's agentsview server doesn't pass --server $API: $(jq -r '[.transport.command // ""] + (.transport.args // []) | join(" ")' <<<"$reg_json")"
+    confirm "Replace it with: $BIN mcp --profile memory --server $API ?" || return 1
+    codex mcp remove agentsview && codex mcp add agentsview -- "$BIN" mcp --profile memory --server "$API" || return 1
+    reg=replaced
   elif confirm "Register it in Codex: codex mcp add agentsview -- $BIN mcp --profile memory --server $API ?"; then
     codex mcp add agentsview -- "$BIN" mcp --profile memory --server "$API" || return 1
     reg=added
   else
     return 1
   fi
+  reg_cmd=$(codex mcp get agentsview --json 2>/dev/null | jq -r '[.transport.command // ""] + (.transport.args // []) | join(" ")' || true)
+  reg_cmd=${reg_cmd:-?}
+  say "Codex runs: ${reg_cmd:-?}"
   step "In a new terminal: cd $SCRATCH_DIR && codex, then send:"
   prompt "Use the agentsview MCP server's search_content tool to find the conversation that contains $n. Tell me its session id and which agent it came from. Don't read files or run commands."
   say "Expected: $sid"
@@ -980,19 +1087,24 @@ s_mcp() {
   [[ -z $stray ]] || warn "agentsview running outside the unit: $stray"
   record "40-mcp" "## MCP from Codex
 
-Registration ($reg): \`codex mcp add agentsview -- agentsview mcp --profile memory --server $API\`.
+Registration ($reg): \`${reg_cmd//$HOME/\~}\`.
 Codex found the $target session through it: $found. agentsview processes outside the unit afterwards: ${stray:-none}.
 "
   pause "Press Enter to go on"
 }
 
 s_cursor_closed() {
-  local db=$HOME/.config/Cursor/User/globalStorage/state.vscdb files rc py p
-  if [[ ${CURSOR_DB_MODE:-} != wal ]]; then
-    say "Cursor's database isn't in WAL mode (${CURSOR_DB_MODE:-not found}), so there's nothing to check."
+  local db=$CURSOR_DB mode files rc py p
+  if [[ -z ${UNIT_MODE:-} ]]; then
+    warn "run the sandbox probes stage first"
+    return 1
+  fi
+  mode=$(cursor_db_mode)
+  if [[ $mode != wal ]]; then
+    say "Cursor's database isn't in WAL mode ($mode), so there's nothing to check."
     record "50-cursor-closed" "## Cursor database with Cursor closed
 
-Not needed: journal mode ${CURSOR_DB_MODE:-not found}.
+Not needed: journal mode $mode.
 "
     pause "Press Enter to go on"
     return 0
@@ -1048,8 +1160,7 @@ Not run yet. Devices:
     fi
     missing=$(ldd "$dir/llama-bench" 2>/dev/null | awk '/not found/ { print $1 }' | paste -sd ' ' - || true)
     if [[ -n $missing && $v == sycl-fp16 && -f $setvars ]]; then
-      # shellcheck disable=SC1090
-      missing=$(bash -c "source $setvars >/dev/null 2>&1; ldd $dir/llama-bench" 2>/dev/null | awk '/not found/ { print $1 }' | paste -sd ' ' - || true)
+      missing=$(run_llama "$v" ldd "$dir/llama-bench" 2>/dev/null | awk '/not found/ { print $1 }' | paste -sd ' ' - || true)
     fi
     if [[ -n $missing ]]; then
       warn "$v: missing libraries: $missing"
@@ -1075,15 +1186,19 @@ Not run yet. Devices:
   for m in "${MODELS[@]}"; do
     read -r repo file sha <<<"$m"
     path=$MODELS_DIR/$file
-    if [[ -f $path ]] && [[ $(sha256sum "$path" | cut -d' ' -f1) == "$sha" ]]; then continue; fi
-    say "downloading $file…"
-    curl -fL --retry 3 -C - -o "$path.part" "https://huggingface.co/$repo/resolve/main/$file" || return 1
-    if [[ $(sha256sum "$path.part" | cut -d' ' -f1) != "$sha" ]]; then
-      warn "$file: SHA-256 mismatch"
-      rm -f "$path.part"
-      return 1
+    # FILE.sha256 records a verified download, so re-runs don't re-hash 25 GB.
+    if [[ -f $path && -f $path.sha256 && $path.sha256 -nt $path && $(<"$path.sha256") == "$sha" ]]; then continue; fi
+    if [[ ! -f $path ]] || [[ $(sha256sum "$path" | cut -d' ' -f1) != "$sha" ]]; then
+      say "downloading $file…"
+      curl -fL --retry 3 -C - -o "$path.part" "https://huggingface.co/$repo/resolve/main/$file" || return 1
+      if [[ $(sha256sum "$path.part" | cut -d' ' -f1) != "$sha" ]]; then
+        warn "$file: SHA-256 mismatch"
+        rm -f "$path.part"
+        return 1
+      fi
+      mv "$path.part" "$path"
     fi
-    mv "$path.part" "$path"
+    printf '%s' "$sha" >"$path.sha256"
   done
   for backend in "${!ready[@]}"; do
     for m in "${MODELS[@]}"; do
@@ -1094,10 +1209,10 @@ Not run yet. Devices:
       run_llama "$backend" "${ready[$backend]}/llama-bench" -m "$MODELS_DIR/$file" -ngl 99 -p 512,2048 -n 128 -r 3 -o jsonl \
         >"$out" 2>"$out.err" || warn "$backend · $name failed: $(tail -1 "$out.err")"
       table+=$(jq -rs --arg b "$backend" --arg m "$name" '
-        (map(select(.n_gen == 0 and .n_prompt == 512))[0].avg_ts // null) as $pp512 |
-        (map(select(.n_gen == 0 and .n_prompt == 2048))[0].avg_ts // null) as $pp2048 |
-        (map(select(.n_prompt == 0 and .n_gen == 128))[0].avg_ts // null) as $tg |
-        "| \($m) | \($b) | \($pp512 // "-" | if type == "number" then . * 10 | round / 10 else . end) | \($pp2048 // "-" | if type == "number" then . * 10 | round / 10 else . end) | \($tg // "-" | if type == "number" then . * 10 | round / 10 else . end) |"' "$out" 2>/dev/null || echo "| $name | $backend | failed | | |")$'\n'
+        def r: if type == "number" then . * 10 | round / 10 else "-" end;
+        def ts(f): map(select(f))[0].avg_ts | r;
+        "| \($m) | \($b) | \(ts(.n_gen == 0 and .n_prompt == 512)) | \(ts(.n_gen == 0 and .n_prompt == 2048)) | \(ts(.n_prompt == 0 and .n_gen == 128)) |"' \
+        "$out" 2>/dev/null || echo "| $name | $backend | failed | | |")$'\n'
     done
   done
   record "60-bench" "## GPU benchmark (§9 item 5)
@@ -1114,12 +1229,15 @@ Raw results: \`$SPIKE_DIR/bench\`. Devices:
   pause "Press Enter to go on"
 }
 
-# run_llama BACKEND BIN ARGS...: SYCL runs with oneAPI's environment when it's installed.
+# run_llama BACKEND CMD ARGS...: SYCL runs with oneAPI's environment when it's installed. The
+# positional parameters are cleared before sourcing setvars.sh, which would otherwise take
+# llama-bench's arguments as its own options.
 run_llama() {
   local backend=$1
   shift
   if [[ $backend == sycl-fp16 && -f /opt/intel/oneapi/setvars.sh ]]; then
-    ZES_ENABLE_SYSMAN=1 bash -c 'source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1; exec "$@"' _ "$@"
+    # shellcheck disable=SC2016
+    ZES_ENABLE_SYSMAN=1 bash -c 'cmd=("$@"); set --; source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1; exec "${cmd[@]}"' _ "$@"
   elif [[ $backend == sycl-fp16 ]]; then
     ZES_ENABLE_SYSMAN=1 "$@"
   else
@@ -1128,15 +1246,15 @@ run_llama() {
 }
 
 s_results() {
-  local k label lag watch row rows=""
+  local k label lag watch row rows="" verdict c l w fc fe
   for k in cursor vscode codex; do
     case $k in cursor) label="Cursor IDE" ;; vscode) label="VS Code Copilot Chat" ;; codex) label="Codex CLI" ;; esac
-    local c="CAPTURED_$k" l="LAG_$k" w="WATCH_$k" fc="FAILCMD_$k" fe="FAILEDIT_$k"
+    c="CAPTURED_$k" l="LAG_$k" w="WATCH_$k" fc="FAILCMD_$k" fe="FAILEDIT_$k"
     lag=${!l:-} watch=${!w:-}
     if [[ ${!c:-} != yes ]]; then
       row="| $label | no | | | | | no-go |"
     else
-      local verdict=go
+      verdict=go
       awk -v a="$lag" -v b="$watch" 'BEGIN { exit !(a ~ /^[0-9.]+$/ && a <= 10 && b ~ /^[0-9.]+$/ && b <= 10) }' || verdict="check lag"
       [[ ${!fc:-} == yes ]] || verdict="$verdict, check failures"
       row="| $label | yes | $lag s | $watch s | ${!fc:-no} | ${!fe:-no} | $verdict |"
@@ -1145,11 +1263,11 @@ s_results() {
   done
   record "90-summary" "## Summary
 
-| Agent | Captured | Max prompt → API | Max first watch event | Failing command | Failed edit | Suggested |
+| Agent | Captured | Max capture lag | Max first watch event | Failing command | Failed edit | Suggested |
 |---|---|---|---|---|---|---|
 $rows
-Suggested is mechanical (captured, both lags ≤ 10 s, failing command detected); the go/no-go per
-agent and the GPU backend are decided with these results in the design review.
+Suggested is mechanical (captured, capture and watch lag ≤ 10 s, failing command detected); the
+go/no-go per agent and the GPU backend are decided with these results in the design review.
 "
   say "Results: $SPIKE_DIR/results.md"
   say "Paste that file into the agent-fabric conversation. It has timings, counts and settings, no"
