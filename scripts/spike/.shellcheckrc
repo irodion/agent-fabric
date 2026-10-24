@@ -1,0 +1,3 @@
+# phase0.sh: SC1087 is a false positive in the wizard library ("$e[Enter keeps current]" is a string,
+# not an array); SC2329 because the stages run indirectly through run_stage.
+disable=SC1087,SC2329
