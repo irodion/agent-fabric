@@ -1,0 +1,5 @@
+rules:
+  # Wants `uses: $/...` for in-repo actions, which actionlint 1.7.12 rejects. Our one in-repo action is
+  # used from our own checkout at the workspace root; the upstream source is checked out under src/.
+  self-repository:
+    disable: true
