@@ -710,7 +710,8 @@ port_holders() {
 # next free port by itself, so the unit passes --port to fail instead.
 pick_port() {
   local p=$AV_PORT q last unit_pid held
-  if ! [[ $p =~ ^[0-9]+$ ]] || ((p < 1024 || p > 65535)); then
+  # No leading zero (bash would read it as octal) and at most 5 digits (no overflow), then the range.
+  if ! [[ $p =~ ^[1-9][0-9]{3,4}$ ]] || ((p < 1024 || p > 65535)); then
     warn "AV_PORT=$p in $ENV_FILE isn't a port from 1024 to 65535"
     return 1
   fi
