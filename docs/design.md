@@ -566,7 +566,8 @@ wrap that later.
 Python 3.13+ with uv; `httpx` + `httpx-sse` (adapter), `starlette` + `uvicorn` (panel), `mcp` official SDK (MCP
 server), `pydantic` (schemas), stdlib `sqlite3` (FTS5). External binaries: agentsview (CI-built, pinned),
 llama.cpp `llama-server` (SYCL or Vulkan build), `gitleaks`, `git`, `codex`. Dev: ruff, mypy, pytest, pinned per
-project. CI: GitHub Actions with the `vet` gate (§4.1).
+project. CI: GitHub Actions with the `vet` gate (§4.1) and `lint` (shellcheck, shfmt, actionlint, zizmor; ruff,
+mypy and pytest join it with the Python core).
 
 ## 7. Security and privacy
 

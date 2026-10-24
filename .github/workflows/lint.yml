@@ -1,0 +1,75 @@
+# Lint for this repo's shell scripts and workflows. ruff, mypy and pytest join it with the Python core
+# (docs/design.md §6).
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Pinned by SHA-256; actionlint and zizmor also publish build provenance.
+      - name: Install linters
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/lint/bin"
+          mkdir -p "$bin"
+          cd "$RUNNER_TEMP/lint"
+          fetch() { # repo tag asset sha256 [attested]
+            gh release download "$2" --repo "$1" --pattern "$3"
+            echo "$4  $3" | sha256sum -c -
+            if [[ ${5:-} == attested ]]; then gh attestation verify "$3" --repo "$1"; fi
+          }
+          fetch koalaman/shellcheck v0.11.0 shellcheck-v0.11.0.linux.x86_64.tar.gz \
+            b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
+          tar -xzf shellcheck-v0.11.0.linux.x86_64.tar.gz -C "$bin" --strip-components=1 shellcheck-v0.11.0/shellcheck
+          fetch mvdan/sh v3.14.1 shfmt_v3.14.1_linux_amd64 \
+            76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf
+          install -m 755 shfmt_v3.14.1_linux_amd64 "$bin/shfmt"
+          fetch rhysd/actionlint v1.7.12 actionlint_1.7.12_linux_amd64.tar.gz \
+            8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 attested
+          tar -xzf actionlint_1.7.12_linux_amd64.tar.gz -C "$bin" actionlint
+          fetch zizmorcore/zizmor v1.30.1 zizmor-x86_64-unknown-linux-gnu.tar.gz \
+            e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a attested
+          tar -xzf zizmor-x86_64-unknown-linux-gnu.tar.gz -C "$bin" zizmor
+          echo "$bin" >>"$GITHUB_PATH"
+
+      - name: shellcheck
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck -x
+
+      # Style comes from .editorconfig.
+      - name: shfmt
+        run: shfmt -d .
+
+      # Also runs the pinned shellcheck over every run: block.
+      - name: actionlint
+        run: actionlint
+
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --format=github .

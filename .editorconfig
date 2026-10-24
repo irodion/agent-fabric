@@ -1,0 +1,11 @@
+root = true
+
+[*.sh]
+indent_style = tab
+
+# The wizard library above the STAGES marker stays byte-identical to its template, which indents with two
+# spaces; shfmt skips the file.
+[scripts/spike/phase0.sh]
+indent_style = space
+indent_size = 2
+ignore = true
