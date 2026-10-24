@@ -1,6 +1,7 @@
 # Builds the pinned agentsview release with telemetry compiled out, after a SafeDep vet gate, and
-# publishes it as a release of this repo (docs/design.md §4.1). Pull requests run everything
-# except the release; the weekly run re-scans the pinned version's dependencies only.
+# publishes it as a release of this repo (docs/design.md §4.1). Pull requests and pushes to main
+# run everything except the release, which only a manual run on main publishes; the weekly run
+# re-scans the pinned version's dependencies only.
 name: build-agentsview
 
 on:
@@ -245,7 +246,7 @@ jobs:
   release:
     name: Attest and release
     needs: [vet, smoke]
-    if: github.event_name != 'pull_request' && github.event_name != 'schedule' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
