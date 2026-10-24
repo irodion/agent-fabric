@@ -169,7 +169,7 @@ limited to its data dir. Initial sync and the REST API worked, appended Codex li
 
 ```ini
 [Service]
-ExecStart=/home/<me>/.local/share/agent-fabric/bin/agentsview serve --no-browser --no-update-check
+ExecStart=/home/<me>/.local/bin/agentsview serve --no-browser --no-update-check
 Environment=AGENTSVIEW_TELEMETRY_ENABLED=0
 ProtectSystem=strict
 ProtectHome=read-only
@@ -188,7 +188,9 @@ with `User=`. A user unit gets the filesystem settings only through unprivileged
 Ubuntu restricts with AppArmor, and the IP filter needs cgroup BPF, which a user manager may not be able to attach.
 If `systemd-run --user --wait -p IPAddressDeny=any curl -sI https://example.com` succeeds, or
 `systemd-run --user --wait -p ProtectHome=read-only touch ~/probe` succeeds, the filter is not enforced. In that
-case install a system unit with `User=` (root once). Two more spike checks: Cursor's `state.vscdb` is opened
+case install a system unit with `User=` (root once). On the devbox (Ubuntu 26.04, systemd 259, AppArmor
+restricting unprivileged user namespaces) a user unit with these settings starts but enforces neither: both probes
+succeed, so expect a system unit on the desktop too. Two more spike checks: Cursor's `state.vscdb` is opened
 `mode=ro` without `immutable`, so if it is in WAL mode SQLite may need its `-shm` file under a read-only home; and
 the list of Copilot and Cursor credential files to add to `InaccessiblePaths`. Cursor's own `state.vscdb` holds
 tokens too, but agentsview has to read it.
@@ -620,6 +622,11 @@ project. CI: GitHub Actions with the `vet` gate (§4.1).
    right exit code where there is one.
 8. Set Copilot `remoteExport` to `false` (§7) and confirm that a new Copilot CLI session doesn't show up on
    github.com.
+
+`scripts/spike/phase0.sh` walks through items 1–8 on the desktop: it runs the checks it can (probes, lag timing,
+API recording, failure detection, llama.cpp `b11539` benchmarks) and says what to do in each agent. Results
+(timings, counts, settings; no session text) go to `~/.local/share/agent-fabric/spike/results.md`; the test
+sessions' recordings stay in `spike/recordings/` for the phase 1 fixtures, scrubbed first (§7).
 
 Exit: go/no-go on agentsview per agent; chosen GPU backend.
 
