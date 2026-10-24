@@ -77,8 +77,13 @@ short-lived job. The `kb` CLI and `kb mcp` read the same local files.
 
 - Built once per version on CI from a pinned tag (below) and installed as a checksummed binary. Upgrade
   deliberately: bump the pin, CI rebuilds, the adapter contract tests pass, then release it with a manual run.
-- Run sandboxed under systemd (below): `agentsview serve --no-browser --no-update-check`. Binds `127.0.0.1:8080`
-  (default).
+- Run sandboxed under systemd (below): `agentsview serve --no-browser --no-update-check --port <port> --replace`.
+  `<port>` is the one port set in `config.toml` (§5): 8080, or another when 8080 is taken on the desktop. The unit's
+  `--port` and every client's `--server http://127.0.0.1:<port>` use it. The port is explicit because without
+  `--port` agentsview moves to the next free port when it's taken (seen on the desktop in phase 0) and its clients
+  miss it; with it, the unit fails and retries every 30 s. `--replace` because otherwise `serve` defers to a running
+  daemon of the same version (prints "already running", exits 0) and the unit stays down while that unconfined
+  daemon captures.
 - Sources used (defaults verified in its source): Codex `~/.codex/sessions` + `archived_sessions`, Copilot CLI
   `~/.copilot`, VS Code Copilot Chat `~/.config/Code/User` (workspaceStorage `chatSessions` + global empty-window
   chats), Cursor CLI `~/.cursor/projects`, Cursor IDE `state.vscdb` (override `CURSOR_IDE_DIR` if needed).
@@ -169,8 +174,10 @@ limited to its data dir. Initial sync and the REST API worked, appended Codex li
 
 ```ini
 [Service]
-ExecStart=/home/<me>/.local/bin/agentsview serve --no-browser --no-update-check
+ExecStart=/home/<me>/.local/bin/agentsview serve --no-browser --no-update-check --port <port> --replace
 Environment=AGENTSVIEW_TELEMETRY_ENABLED=0
+Restart=on-failure
+RestartSec=30
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/<me>/.agentsview
@@ -196,11 +203,10 @@ the list of Copilot and Cursor credential files to add to `InaccessiblePaths`. C
 tokens too, but agentsview has to read it.
 
 **Query path.** `agentsview mcp` talks to the daemon over HTTP, and if none answers it starts one itself, outside
-the sandbox. Register it with `--server http://127.0.0.1:8080` so it fails instead. MCP servers are started by the
-agent app rather than in the agent's shell sandbox, so they reach loopback. A CLI call from a sandboxed shell
-cannot: Codex `workspace-write` has no network. This is why `kb` reads files instead of calling a daemon.
-`index.db` uses `journal_mode=DELETE` so read-only readers inside agent sandboxes never need to create a `-shm`
-file.
+the sandbox. Register it with `--server http://127.0.0.1:<port>` (§4.1) so it fails instead. MCP servers are started
+by the agent app rather than in the agent's shell sandbox, so they reach loopback. A CLI call from a sandboxed shell
+cannot: Codex `workspace-write` has no network. This is why `kb` reads files instead of calling a daemon. `index.db`
+uses `journal_mode=DELETE` so read-only readers inside agent sandboxes never need to create a `-shm` file.
 
 **Adapter.** All agentsview access goes through one module with this surface:
 
@@ -535,7 +541,7 @@ Project defaults to the git root of the current directory. MCP results are label
 content), mirroring OpenHands' `<UNTRUSTED_CONTENT>` wrapping.
 
 Registration (manual, once): Codex `~/.codex/config.toml` `[mcp_servers.kb]`, Cursor `~/.cursor/mcp.json`, VS Code
-user `mcp.json`; each gets `kb` and `agentsview` (`mcp --profile memory --server http://127.0.0.1:8080`, §4.1).
+user `mcp.json`; each gets `kb` and `agentsview` (`mcp --profile memory --server http://127.0.0.1:<port>`, §4.1).
 The manual trigger is me telling the agent "run `kb catchup`" or "check kb for …"; per-agent slash commands can
 wrap that later.
 
@@ -543,7 +549,7 @@ wrap that later.
 
 | Unit (systemd --user) | Command | Bind |
 |---|---|---|
-| `agentsview.service` (sandboxed; user or system unit, §4.1) | `agentsview serve --no-browser --no-update-check` | 127.0.0.1:8080 |
+| `agentsview.service` (sandboxed; user or system unit, §4.1) | `agentsview serve --no-browser --no-update-check --port <port> --replace` | `127.0.0.1:<port>` (8080 by default) |
 | `fabricd.service` | tracker, observer, digester, panel | 127.0.0.1:8090 |
 | `llama-panel.service` | `llama-server` with E4B | 127.0.0.1:8091 |
 | `fabric-ingest.timer` | `kb ingest` at 03:00 (starts a 26B llama-server on 8092 if `--backend local`) | — |
@@ -599,7 +605,7 @@ mypy and pytest join it with the Python core).
 | agentsview down | no new events | panel shows "capture offline"; agents still write files; agentsview catches up on restart |
 | agentsview upgrade changes API | adapter errors | pinned version; contract tests gate upgrades |
 | sandbox blocks a read agentsview needs | an agent's sessions missing | `agentsview doctor` and per-agent session counts in `kb doctor`; widen only that path |
-| MCP client starts its own daemon | unconfined second daemon | `--server` in every MCP registration |
+| MCP client starts its own daemon | unconfined second daemon | `--server` in every MCP registration; the unit's `--replace` takes over from one that started first |
 | Cursor IDE updates lag | panel late for Cursor | measure in spike; add Cursor hooks (`afterAgentResponse`, `afterFileEdit`) as a second source if needed |
 | llama-server down/slow | no SLM bullets | rules-only mode, flagged in panel header |
 | gitleaks hit | digest not committed | quarantine + panel notice |
