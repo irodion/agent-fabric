@@ -77,8 +77,11 @@ short-lived job. The `kb` CLI and `kb mcp` read the same local files.
 
 - Built once per version on CI from a pinned tag (below) and installed as a checksummed binary. Upgrade
   deliberately: bump the pin, CI rebuilds, the adapter contract tests pass, then release it with a manual run.
-- Run sandboxed under systemd (below): `agentsview serve --no-browser --no-update-check`. Binds `127.0.0.1:8080`
-  (default).
+- Run sandboxed under systemd (below): `agentsview serve --no-browser --no-update-check --port 8080`. Binds
+  `127.0.0.1:8080`. The port is passed explicitly: without `--port`, agentsview moves to the next free port when
+  8080 is taken (seen on the desktop in phase 0) and its clients miss it; with it, the unit fails instead.
+  `serve` also exits 0 with "already running" when another agentsview daemon owns `~/.agentsview`, which leaves
+  the unit down: nothing else may start one (query path below).
 - Sources used (defaults verified in its source): Codex `~/.codex/sessions` + `archived_sessions`, Copilot CLI
   `~/.copilot`, VS Code Copilot Chat `~/.config/Code/User` (workspaceStorage `chatSessions` + global empty-window
   chats), Cursor CLI `~/.cursor/projects`, Cursor IDE `state.vscdb` (override `CURSOR_IDE_DIR` if needed).
@@ -169,7 +172,7 @@ limited to its data dir. Initial sync and the REST API worked, appended Codex li
 
 ```ini
 [Service]
-ExecStart=/home/<me>/.local/bin/agentsview serve --no-browser --no-update-check
+ExecStart=/home/<me>/.local/bin/agentsview serve --no-browser --no-update-check --port 8080
 Environment=AGENTSVIEW_TELEMETRY_ENABLED=0
 ProtectSystem=strict
 ProtectHome=read-only
@@ -543,7 +546,7 @@ wrap that later.
 
 | Unit (systemd --user) | Command | Bind |
 |---|---|---|
-| `agentsview.service` (sandboxed; user or system unit, §4.1) | `agentsview serve --no-browser --no-update-check` | 127.0.0.1:8080 |
+| `agentsview.service` (sandboxed; user or system unit, §4.1) | `agentsview serve --no-browser --no-update-check --port 8080` | 127.0.0.1:8080 |
 | `fabricd.service` | tracker, observer, digester, panel | 127.0.0.1:8090 |
 | `llama-panel.service` | `llama-server` with E4B | 127.0.0.1:8091 |
 | `fabric-ingest.timer` | `kb ingest` at 03:00 (starts a 26B llama-server on 8092 if `--backend local`) | — |

@@ -211,7 +211,8 @@ MODELS_DIR=${MODELS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/agent-fabric/model
 REC=$SPIKE_DIR/recordings
 ENV_FILE=$SPIKE_DIR/state.env
 BIN=${BIN_DIR:-$HOME/.local/bin}/agentsview
-API=http://127.0.0.1:8080 # agentsview's default bind, which the unit uses
+# The unit's API: agentsview's default 8080, or the port s_unit saved as AV_PORT when 8080 was taken.
+API=http://127.0.0.1:8080
 PROBE_FILE=$HOME/.agent-fabric-probe
 PROBE_PORT=18089
 COPILOT_SETTINGS=$HOME/.copilot/settings.json
@@ -618,7 +619,7 @@ unit_file() {
   local p i
   printf '[Unit]\nDescription=agentsview session capture for agent-fabric (sandboxed)\n\n[Service]\n'
   [[ ${UNIT_MODE:-} == system ]] && printf 'User=%s\n' "$USER"
-  printf 'ExecStart=%s serve --no-browser --no-update-check\n' "$BIN"
+  printf 'ExecStart=%s serve --no-browser --no-update-check --port %s\n' "$BIN" "${AV_PORT:-8080}"
   printf 'Environment=AGENTSVIEW_TELEMETRY_ENABLED=0\nRestart=on-failure\n'
   for ((i = 1; i < ${#SANDBOX_PROPS[@]}; i += 2)); do printf '%s\n' "${SANDBOX_PROPS[i]}"; done
   printf 'ReadWritePaths=%s/.agentsview\n' "$HOME"
@@ -662,6 +663,44 @@ stray_daemons() {
   done
 }
 
+# port_holders PORT [SKIP_PID]: the processes listening on PORT on any address, as "pid name" lines
+# ("? ?" for a process ss can't name, such as another user's); nothing when the port is free.
+port_holders() {
+  ss -Hltnp "sport = :$1" 2>/dev/null | awk -v skip="${2:-}" '{
+    if (match($0, /\("[^"]+",pid=[0-9]+/)) {
+      split(substr($0, RSTART + 2, RLENGTH - 2), a, "\",pid=")
+      if (a[2] != skip) print a[2], a[1]
+    } else print "? ?"
+  }' | sort -u
+}
+
+# pick_port: sets AV_PORT and API for the unit. Keeps the saved port (8080 at first) when it's free or
+# only the unit holds it (the unit restarts); otherwise offers the next free one. Without --port
+# agentsview moves to the next free port by itself, so the unit passes --port to fail instead.
+pick_port() {
+  local p=${AV_PORT:-8080} q unit_pid held
+  unit_pid=$(sctl show -p MainPID --value agentsview.service 2>/dev/null || true)
+  held=$(port_holders "$p" "$unit_pid")
+  if [[ -n $held ]]; then
+    warn "port $p is taken by: $(paste -sd ',' - <<<"$held" | sed 's/,/, /g') (pid name)"
+    q=$p
+    while [[ -n $(port_holders "$q" "$unit_pid") ]]; do
+      if ((++q > p + 99)); then
+        warn "no free port in $p-$((p + 99)): free port $p, or set AV_PORT=<port> in $ENV_FILE and re-run"
+        return 1
+      fi
+    done
+    if ! confirm "Run agentsview on port $q instead (the unit gets --port $q, Codex's MCP --server)"; then
+      note "free port $p, or set AV_PORT=<port> in $ENV_FILE, then re-run"
+      return 1
+    fi
+    p=$q
+  fi
+  AV_PORT=$p
+  API=http://127.0.0.1:$p
+  write_env AV_PORT "$p" >/dev/null
+}
+
 # ── stages ────────────────────────────────────────────────────────────────
 
 s_preflight() {
@@ -674,7 +713,7 @@ s_preflight() {
     warn "glibc $glibc is older than 2.39 (Ubuntu 24.04): the CI-built agentsview won't start here"
     return 1
   fi
-  for c in curl jq gh git python3 systemd-run sha256sum; do
+  for c in curl jq gh git python3 systemd-run sha256sum ss; do
     command -v "$c" >/dev/null 2>&1 || missing+=("$c")
   done
   if ((${#missing[@]})); then
@@ -881,15 +920,19 @@ s_unit() {
     return 1
   fi
   mkdir -p "$HOME/.agentsview"
-  if api_up && ! sctl is-active --quiet agentsview.service 2>/dev/null; then
-    warn "something already answers on $API, and it isn't the unit (an agentsview started by hand or by an MCP client?)"
-    say "Stop it (agentsview daemon stop, or quit what started it), then press Enter."
+  # serve exits 0 with "already running" when another daemon owns ~/.agentsview, leaving the unit down.
+  stray=$(stray_daemons)
+  if [[ -n $stray ]]; then
+    warn "agentsview runs outside the unit (started by hand or by an MCP client?): $stray"
+    say "The unit would defer to it and exit. Stop it (agentsview daemon stop, or quit what started it), then press Enter."
     pause
-    if api_up; then
-      warn "it still answers, so the unit couldn't bind $API"
+    stray=$(stray_daemons)
+    if [[ -n $stray ]]; then
+      warn "still running: $stray"
       return 1
     fi
   fi
+  pick_port || return 1
   f=$SPIKE_DIR/agentsview.service
   unit_file >"$f"
   say "Unit ($UNIT_MODE), saved as $f:"
@@ -933,7 +976,7 @@ s_unit() {
   [[ -z $stray ]] || warn "agentsview running outside the unit: $stray"
   record "06-unit" "## Sandboxed unit
 
-$UNIT_MODE unit, active (pid $pid). Inside it $(dirname "$HOME") is mounted \`${home_opts:-?}\` and ~/.agentsview \`${data_opts:-?}\`.
+$UNIT_MODE unit, active (pid $pid), API on port $AV_PORT. Inside it $(dirname "$HOME") is mounted \`${home_opts:-?}\` and ~/.agentsview \`${data_opts:-?}\`.
 Existing sessions per agent after the first sync: $(paste -sd ',' - <<<"$counts" | sed 's/,/, /g').
 agentsview processes outside the unit: ${stray:-none}
 "
@@ -1284,6 +1327,7 @@ TOTAL_STAGES=15
 mkdir -p "$SPIKE_DIR" && chmod 700 "$SPIKE_DIR"
 # shellcheck disable=SC1090
 [[ -f $ENV_FILE ]] && source "$ENV_FILE"
+API=http://127.0.0.1:${AV_PORT:-8080}
 
 banner "agent-fabric phase 0 spike"
 
