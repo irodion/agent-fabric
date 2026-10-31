@@ -608,7 +608,7 @@ matter (`sessions`, `files`, `commands`, `tests`, `loops`, `notes`).
 | `kb loops [--all]` | `open_loops(project?)` | loops with evidence |
 | `kb loop close <id>` | — | (CLI only; agents can't close loops) |
 | `kb note --kind K [--ref R]… "text"`, `kb note --resolve <id>` | — | id and path of the new note (CLI only, §4.10) |
-| `kb inbox [--project] [--since] [--kind] [--all]` | `list_notes(project?, since?, kind?, all?)` | unresolved notes not yet ingested (`--all`: every note) |
+| `kb inbox [--project P \| --all-projects] [--since] [--kind] [--all]` | `list_notes(project?, since?, kind?, all?)` | unresolved notes not yet ingested, under an "unchecked" header (`--all`: resolved ones too) |
 | `kb ingest`, `kb lint`, `kb prune`, `kb retro`, `kb reindex`, `kb doctor` | — | maintenance (§4.7) |
 
 Project defaults to the git root of the current directory. MCP results are labelled as historical notes (untrusted
@@ -691,35 +691,23 @@ to `raw/notes/<project>/<yyyy>/<mm>/` in the wiki repo, after the redaction gate
 the merge, every note the run used or dropped, and every resolved `status` note, moves to `inbox/done/<yyyy>/<mm>/`,
 so the inbox holds only notes still to act on. Notes from projects not on the allow list stay local.
 
-**Skill.** `skills/kb-note/SKILL.md` in this repo, copied into each agent's user skills folder: `~/.claude/skills/`,
-`~/.codex/skills/`, and the Copilot CLI and Cursor CLI equivalents (paths to confirm, §11). Only the name and
-description sit in the agent's context; the body loads when the agent decides to use it. `kb doctor` checks that
-every copy matches the repo.
+**Skill.** `src/agent_fabric/skills/kb-note/SKILL.md`, shipped in the package, copied into two user skills folders
+that between them reach all four CLI agents: `~/.claude/skills/` (read by Claude Code, Copilot CLI and Cursor CLI)
+and `~/.codex/skills/` (Codex and Cursor CLI). Only the name and description sit in the agent's context; the body
+loads when the agent decides to use it. `kb doctor` checks every copy against the package, for each agent whose
+home folder exists, and `kb doctor --fix` adds missing copies and updates outdated ones.
 
-```markdown
----
-name: kb-note
-description: Leave a short note for other agents and later sessions when you find something they must know: a
-  broken or flaky state, a trap in the code or tools, an error and its fix, or a decision and its reason.
----
-Most sessions need no note. Write one only when the next agent would otherwise lose time or make a mistake.
-
-    kb note --kind <status|gotcha|fix|decision> --ref <path[:line]|command|commit|url> "<1-3 sentences>"
-
-- status: something true now that others must know (tests broken, CI flaky). When it stops being true:
-  kb note --resolve <id> "<what changed>"
-- gotcha: a trap or surprising behaviour. fix: an error and what fixed it. decision: a choice and why.
-- Write for an agent with none of your context: name the file, command or error. Facts, not plans or progress.
-- Give the evidence with --ref. For text with quotes or backticks: kb note --kind fix - <<'EOF' ... EOF
-- If kb asks for --agent, give your tool's name (Claude Code, Codex, Copilot CLI, Cursor CLI), not your model's.
-- One finding per note. Never include secrets, tokens or customer data.
-```
+The file is the one copy of the skill text: when to write a note (rarely), the four kinds, `--ref`, `--resolve`, stdin
+for quoted text, `--agent` as the tool's name, the 500-character limit, no secrets, and what exit 1 and 2 mean.
 
 **Setup per agent.** Claude Code's and Codex's sandboxes allow writes only in the project and temp folders, so the
-inbox folder goes on each one's write list once (Codex: `sandbox_workspace_write.writable_roots`). Cursor CLI's
-sandbox needs the same where it runs (it doesn't start on the devbox); Copilot CLI has no OS sandbox. So that
-`kb note` doesn't ask for approval every time, it also goes on each agent's command allow list (Claude Code:
-`Bash(kb note:*)`). `kb doctor` checks both settings where it can read them.
+inbox folder goes on each one's write list once (Claude Code: `sandbox.filesystem.allowWrite`; Codex:
+`sandbox_workspace_write.writable_roots`). A sandbox can only grant writes to a folder that exists, so
+`kb doctor --fix` creates the inbox first. Cursor CLI's sandbox needs the same where it runs (it doesn't start on the
+devbox); Copilot CLI has no OS sandbox. So that `kb note` doesn't ask for approval every time, it also goes on each
+agent's command allow list, except in Claude Code with `sandbox.autoAllowBashIfSandboxed`, which runs sandboxed
+commands without asking. Later `kb doctor` also checks these settings where it can read them; today it checks the
+inbox and the skill copies.
 
 ## 5. Processes, ports, locations
 
@@ -750,7 +738,7 @@ Python 3.13+ with uv; `httpx` + `httpx-sse` (adapter), `starlette` + `uvicorn` (
 server), `pydantic` (schemas), stdlib `sqlite3` (FTS5). External binaries: agentsview (CI-built, pinned),
 llama.cpp `llama-server` (SYCL or Vulkan build), `gitleaks`, `git`, `codex`. Dev: ruff, mypy, pytest, pinned per
 project. CI: GitHub Actions with the `vet` gate (§4.1) and `lint` (shellcheck, shfmt, actionlint, zizmor; ruff,
-mypy and pytest join it with the Python core).
+mypy and pytest on Python 3.13 and 3.14).
 
 ## 7. Security and privacy
 
@@ -799,7 +787,7 @@ mypy and pytest join it with the Python core).
 | ingest branch left unmerged | wiki stale | nightly appends to same branch; `kb doctor` warns after 7 days |
 | vendor prunes/migrates history | source files gone | agentsview archive + daily backup keep the raw layer |
 | own automated runs captured | feedback loop | `codex exec --ephemeral`; ignore `is_automated` sessions |
-| sandbox blocks the inbox write | `kb note` exits 1, the note is lost | the error names the folder to add; `kb doctor` checks the write lists (§4.10) |
+| sandbox blocks the inbox write | `kb note` exits 1, the note is lost | the error names the folder to add to the sandbox's write list; `kb doctor` reports a missing or unwritable inbox (§4.10) |
 | agents note routine progress | inbox noise | the skill says most sessions need none; ingest drops it; tighten the description |
 | `status` note never resolved | later agents warned about a fixed problem | `kb inbox` marks it possibly stale after 14 days; `kb lint` lists it |
 | agent misnames itself (model name for tool name) | wrong `agent` on the note | environment wins over `--agent` where the agent sets one (§4.10) |
@@ -886,14 +874,14 @@ the prototype session (§4.8); the minimum desktop is Ubuntu 24.04 (§4.1, glibc
 `origin` remote, then the main checkout, then agentsview's project, with aliases in config (§4.4); Copilot
 session sync is off (§7). Decided 2026-10-31: the CLI agents come first, the IDE agents in phase 3 (§2); headless
 runs get a local digest only unless the project is on `[publish] headless` (§4.3); agents leave notes with
-`kb note` and the `kb-note` skill, independent of agentsview (§4.10).
+`kb note` and the `kb-note` skill, independent of agentsview (§4.10), with the skill in `~/.claude/skills/`
+and `~/.codex/skills/`, which Copilot CLI and Cursor CLI also read.
 
 Open (2026-10-31):
 
 - What marks a Copilot or Cursor run as headless (§4.1).
 - Which variables Codex, Copilot CLI and Cursor CLI set that identify the agent and session, so that `kb note`
   needs no `--agent` there (§4.10).
-- The user skills folders of Copilot CLI and Cursor CLI (§4.10).
 - The Cursor CLI reader: message order from the `store.db` blob tree, timestamps, and encrypted blobs (§4.1).
 
 The phase 0 spike (§9) settles the remaining unknowns.

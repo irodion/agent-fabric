@@ -1,0 +1,46 @@
+[project]
+name = "agent-fabric"
+version = "0.1.0"
+description = "Cross-agent session memory: digests, notes and a wiki for coding agents (docs/design.md)"
+license = "MIT"
+authors = [
+    { name = "irodion", email = "9167139+irodion@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+kb = "agent_fabric.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "ruff>=0.17.1",
+]
+
+[tool.uv]
+# The vet gate fails packages published less than 14 days ago (.github/vet/policy.yml); resolve against an older
+# snapshot of PyPI. Move this date forward when upgrading.
+exclude-newer = "2026-10-17T00:00:00Z"
+
+[tool.ruff]
+line-length = 118
+target-version = "py313"
+extend-exclude = ["docs", ".claude"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PL", "PT"]
+ignore = ["PLR2004"]
+
+[tool.mypy]
+strict = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-q", "--strict-markers"]

@@ -1,4 +1,4 @@
-# Lint for this repo's shell scripts and workflows. ruff, mypy and pytest join it with the Python core
+# Lint for this repo's shell scripts and workflows, and ruff, mypy and pytest for the Python core
 # (docs/design.md §6).
 name: lint
 
@@ -73,3 +73,53 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: zizmor --format=github .
+
+  python:
+    name: Python ${{ matrix.python }} (ruff, mypy, pytest)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest version pyproject.toml allows, and the one .python-version pins for development.
+        python: ["3.13", "3.14"]
+    env:
+      UV_PYTHON: ${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Pinned by SHA-256 and checked against its build provenance, like the linters above.
+      - name: Install uv
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/uv/bin"
+          mkdir -p "$bin"
+          cd "$RUNNER_TEMP/uv"
+          asset=uv-x86_64-unknown-linux-gnu.tar.gz
+          gh release download 0.13.1 --repo astral-sh/uv --pattern "$asset"
+          echo "eadd9d27c134ab5ac1ffd4473b97a741407f3ea238288f03121fc4deddf90220  $asset" | sha256sum -c -
+          gh attestation verify "$asset" --repo astral-sh/uv
+          tar -xzf "$asset" -C "$bin" --strip-components=1 uv-x86_64-unknown-linux-gnu/uv
+          echo "$bin" >>"$GITHUB_PATH"
+
+      # --locked fails if uv.lock is out of date with pyproject.toml.
+      - name: Sync
+        run: uv sync --locked
+
+      - name: ruff format
+        run: uv run ruff format --check
+
+      - name: ruff check
+        run: uv run ruff check --output-format=github
+
+      - name: mypy
+        run: uv run mypy
+
+      - name: pytest
+        run: uv run pytest
