@@ -1,7 +1,7 @@
 # agent-fabric — design
 
-Status: draft v0.4, 2026-10-31 (v0.3 had two review rounds; v0.4 puts the CLI agents first and adds the CLI
-capture check, §4.1). Name: agent-fabric; CLI: `kb`.
+Status: draft v0.5, 2026-10-31 (v0.3 had two review rounds; v0.4 put the CLI agents first and added the CLI
+capture check, §4.1; v0.5 adds agent notes, §4.10). Name: agent-fabric; CLI: `kb`.
 Background research: `~/code/reports/Cross agent coding memory harness.md`.
 
 ## 1. Goal
@@ -13,8 +13,10 @@ Switch freely between coding agents without losing the history of what was done 
 2. A **live panel** beside the agent lists decisions, risky actions and open loops ("disabled test, claimed
    temporary — verify later") while the session runs.
 3. An LLM periodically folds digests into curated **wiki pages** (manual trigger + nightly), reviewed before merge.
-4. Agents and I **pull** history on demand through one CLI (`kb`) and one MCP server. Nothing is injected into
-   agent prompts automatically.
+4. Agents and I **pull** history on demand through one CLI (`kb`) and one MCP server. No history is injected into
+   agent prompts automatically; the one standing instruction is the `kb-note` skill (item 5).
+5. Agents leave short **notes** for each other and for me with `kb note` when they find something the next agent
+   must know (broken tests, a surprising fix, a decision and its reason); a skill tells them when and how (§4.10).
 
 ### Non-goals
 
@@ -36,6 +38,7 @@ Switch freely between coding agents without losing the history of what was done 
 | Session end | Idle timeout, not session-end hooks | Cursor's `sessionEnd` is unreliable; Codex/Claude give hooks 1–3 s |
 | Compaction | Deterministic extraction; no LLM in the digest | Facts are extractable; only "why" needs a model |
 | Retrieval | Pull only (CLI/MCP), manually triggered | Avoids context pollution and memory-poisoning via injection |
+| Agent notes | `kb note` CLI + `kb-note` skill → local inbox; the wiki only through ingest (§4.10) | Agents notice things no digest records; a CLI works in every agent, and a skill loads only when used |
 | Wiki ingest | Manual (`kb ingest`) and nightly, onto a review branch | Review gate before anything becomes canon |
 | Live panel | Rules detect, small model only phrases and extracts decisions | Rules measurably work; LLM judgement alone did not |
 | OpenHands | Not used; event model borrowed | It cannot observe IDE sessions |
@@ -67,11 +70,13 @@ Switch freely between coding agents without losing the history of what was done 
                 │ push (timer)
              GitHub
 
- Query: kb CLI / `kb mcp` (wiki, digests, loops)  +  `agentsview mcp --profile memory` (raw transcripts)
+ Query: kb CLI / `kb mcp` (wiki, digests, loops, notes)  +  `agentsview mcp --profile memory` (raw transcripts)
+ Notes: agents run `kb note` (skill `kb-note`) → ~/.local/share/agent-fabric/inbox/ → kb inbox · search · ingest
 ```
 
 One long-running Python daemon (`fabricd`) hosts tracker, observer, digester and panel. Ingest is a separate
-short-lived job. The `kb` CLI and `kb mcp` read the same local files.
+short-lived job. The `kb` CLI and `kb mcp` read the same local files. `kb note` writes to the inbox directly; it
+needs neither agentsview nor fabricd (§4.10).
 
 ## 4. Components
 
@@ -433,6 +438,7 @@ AGENTS.md          schema + rules for the ingest LLM (page types, linking, citat
 index.md           generated catalogue (never hand-edited)
 log.md             append-only, one line per digest/ingest (merge=union in .gitattributes)
 raw/sessions/...   digests (§4.4)
+raw/notes/...      agent notes that ingest used (§4.10)
 wiki/projects/<project>.md       overview, current state, conventions, recurring problems
 wiki/decisions/<project>/<slug>.md   decision, alternatives, rationale, sessions that support it
 wiki/concepts/<slug>.md          cross-project knowledge ("pnpm workspace quirks")
@@ -448,7 +454,8 @@ via the year/month sharding. The wiki only grows unless it is pruned; lint and p
 `kb ingest [--project P] [--since DATE] [--backend codex|local] [--dry-run]`; `fabric-ingest.timer` runs it at
 03:00.
 
-1. Pending = digests whose `(path, revision)` is not yet in a merged ingest (ledger in `state.db`).
+1. Pending = digests whose `(path, revision)` is not yet in a merged ingest (ledger in `state.db`), plus the
+   `gotcha`, `fix` and `decision` notes in the inbox from allowed projects (§4.10).
 2. Use worktree `~/.local/share/agent-fabric/ingest-wt` on branch `ingest/<yyyy-mm-dd>`. If an unmerged ingest
    branch exists, keep appending to it instead of starting a new one.
 3. Run the backend with `AGENTS.md` as instructions and the pending digests as input. It may only touch `wiki/`,
@@ -461,7 +468,9 @@ via the year/month sharding. The wiki only grows unless it is pruned; lint and p
 5. I review (tuicr or the PR) and merge. On merge the ledger marks those digests ingested. A deleted, unmerged
    branch returns its digests to pending.
 
-The ingest LLM sees digests only, plus the existing wiki pages; for detail it can call `agentsview mcp`.
+The ingest LLM sees digests and notes only, plus the existing wiki pages; for detail it can call `agentsview mcp`.
+It treats a note as one agent's claim: it checks the note against its refs, the digests and the code before a page
+cites it.
 
 **Lint and prune.** Without pruning the wiki fills up with stale and duplicate pages. This follows the "lint"
 operation in Karpathy's gist, in two steps:
@@ -586,18 +595,20 @@ agent created them. That is for me to read; nothing goes to the agent unless I p
 
 ### 4.9 Query: `kb` CLI and MCP
 
-`index.db` (rebuildable from the wiki repo + `state.db`): FTS5 tables over digests and wiki pages (porter tokenizer
-for prose, trigram for paths/commands/errors), plus relational tables from digest front matter (`sessions`,
-`files`, `commands`, `tests`, `loops`).
+`index.db` (rebuildable from the wiki repo, the inbox and `state.db`): FTS5 tables over digests, wiki pages and notes
+(porter tokenizer for prose, trigram for paths/commands/errors), plus relational tables from digest and note front
+matter (`sessions`, `files`, `commands`, `tests`, `loops`, `notes`).
 
 | CLI | MCP tool (`kb mcp`, stdio, read-only) | Returns |
 |---|---|---|
-| `kb catchup [--project .]` | `catchup(project)` | open loops + last 3 digests' summaries + project page excerpt |
+| `kb catchup [--project .]` | `catchup(project)` | open loops + unresolved `status` notes + latest notes + last 3 digests' summaries + project page excerpt |
 | `kb search <q> [--project] [--since] [--kind]` | `search(query, project?, since?, kind?)` | ranked snippets with paths |
 | `kb sessions [--file F] [--failing-tests] [--since]` | `list_sessions(...)` | structured session rows |
 | `kb show <path\|session[#ordinal]>` | `get_page(path)` | full digest or wiki page; with `#ordinal`, that message's full output from agentsview |
 | `kb loops [--all]` | `open_loops(project?)` | loops with evidence |
 | `kb loop close <id>` | — | (CLI only; agents can't close loops) |
+| `kb note --kind K [--ref R]… "text"`, `kb note --resolve <id>` | — | id and path of the new note (CLI only, §4.10) |
+| `kb inbox [--project] [--since] [--kind] [--all]` | `list_notes(project?, since?, kind?, all?)` | unresolved notes not yet ingested (`--all`: every note) |
 | `kb ingest`, `kb lint`, `kb prune`, `kb retro`, `kb reindex`, `kb doctor` | — | maintenance (§4.7) |
 
 Project defaults to the git root of the current directory. MCP results are labelled as historical notes (untrusted
@@ -607,6 +618,108 @@ Registration (manual, once): Codex `~/.codex/config.toml` `[mcp_servers.kb]`, Cu
 user `mcp.json`; each gets `kb` and `agentsview` (`mcp --profile memory --server http://127.0.0.1:<port>`, §4.1).
 The manual trigger is me telling the agent "run `kb catchup`" or "check kb for …"; per-agent slash commands can
 wrap that later.
+
+### 4.10 Agent notes: `kb note`
+
+Digests record what happened in a session. Some things only the agent notices: the tests on `main` are broken, an
+error has a non-obvious fix, a choice was made for a reason that isn't in the code. For those every agent gets a CLI
+command and a skill that says when to use it. Neither needs agentsview or fabricd: the command writes a file, and
+`kb` reads it.
+
+```text
+kb note --kind <status|gotcha|fix|decision> [--ref R]... [--agent NAME] "text"
+kb note --kind <kind> [--ref R]... - <<'EOF'     # text on stdin: quotes, backticks and $ need no escaping
+kb note --resolve <id> ["what changed"]
+```
+
+The kind says what the next agent should do with the note, and decides how long it stays true:
+
+| Kind | For | Example | Lifetime |
+|---|---|---|---|
+| `status` | a current state the next agent must know | integration tests fail on `main` since the httpx bump; not your change | until `--resolve` |
+| `gotcha` | a trap or surprising behaviour | `uv run` in the sandbox needs `--cache-dir "$TMPDIR/uv"` | until ingest |
+| `fix` | an error and what fixed it | `pytest` hangs in the sandbox: the DB fixture needs a socket; run `-m 'not db'` | until ingest |
+| `decision` | a choice and its reason, when the code doesn't show it | retries use tenacity, because httpx ignores `Retry-After` | until ingest |
+
+- **Text.** One to three sentences, at most 500 characters, written for an agent with none of the writer's context.
+  Longer detail belongs in the repo (a doc, a comment, an issue), linked with `--ref`.
+- **`--ref`** (repeatable): the evidence, such as a path (with `:line`), a command, a commit, an error message or a
+  URL. The next agent and ingest check the note against it, the way Copilot Memory checks a memory's citations
+  before using it. Optional, but a note without one counts for less in ingest. A path that doesn't exist gets a
+  warning, not a failure.
+- **Agent.** `kb` takes the agent from its environment where it can: Claude Code 2.1.316 sets `AI_AGENT`
+  (`claude-code_2-1-316_agent`), `CLAUDE_CODE_SESSION_ID` and `CLAUDE_CODE_ENTRYPOINT` (`cli` or `sdk-cli`) inside
+  its sandbox, which also links the note to its session's digest. What Codex, Copilot CLI and Cursor CLI set is
+  still to check (§11). Where nothing is set, `kb` asks for `--agent` with the tool's name, not the model's (Cursor
+  running a Claude model is still Cursor CLI). When both are present the environment wins.
+- **`--resolve <id>`** closes an earlier note, usually a `status` once the tests pass again. It writes a new note
+  that points at the old one, so the inbox stays append-only; resolved notes drop out of `kb inbox` and
+  `kb catchup`.
+- **Repeats.** The same kind and text in the same project within 24 h writes nothing and prints the existing id, so a
+  retried command doesn't duplicate a note.
+- **Result.** The note's id and path, exit 0. Bad input exits 2 and says what to change (the kinds, the length
+  limit, a missing `--agent`); an inbox it can't write exits 1 and names the folder (setup, below). Each note is a
+  new file, created exclusively; `kb` never edits or deletes one.
+
+```markdown
+~/.local/share/agent-fabric/inbox/2026-10-31-n3f9a2c.md
+---
+schema: fabric.note/1
+id: n3f9a2c
+kind: status
+agent: {name: Claude Code, from: env, session: 5b1e…, entrypoint: cli}
+project: billing-api             # project id (§4.4) of the current folder
+cwd: ~/code/billing-api
+branch: feat/retry
+commit: 9d8e7f6
+time: 2026-10-31T17:05:12Z
+refs: [pytest tests/integration, tests/integration/test_client.py]
+resolves: null
+---
+The integration tests fail on `main` since the httpx 0.29 bump (connection pool API changed). Failures there are
+not caused by your change.
+```
+
+**Reading notes.** `kb inbox` lists the unresolved notes not yet ingested, and marks `status` notes older than 14
+days as possibly stale. `kb catchup` (§4.9) includes the project's unresolved `status` notes and its latest other
+notes; `kb search --kind note` searches all of them; `kb mcp` offers the same. Like all `kb` output they are labelled
+untrusted: an agent wrote them and nobody has checked them yet.
+
+**Into the wiki.** `kb ingest` (§4.7) takes the `gotcha`, `fix` and `decision` notes of allowed projects along with
+the digests. `status` notes stay out: they describe a moment, and end with `--resolve`. A note ingest uses is copied
+to `raw/notes/<project>/<yyyy>/<mm>/` in the wiki repo, after the redaction gate (§4.5), so pages can cite it. After
+the merge, every note the run used or dropped, and every resolved `status` note, moves to `inbox/done/<yyyy>/<mm>/`,
+so the inbox holds only notes still to act on. Notes from projects not on the allow list stay local.
+
+**Skill.** `skills/kb-note/SKILL.md` in this repo, copied into each agent's user skills folder: `~/.claude/skills/`,
+`~/.codex/skills/`, and the Copilot CLI and Cursor CLI equivalents (paths to confirm, §11). Only the name and
+description sit in the agent's context; the body loads when the agent decides to use it. `kb doctor` checks that
+every copy matches the repo.
+
+```markdown
+---
+name: kb-note
+description: Leave a short note for other agents and later sessions when you find something they must know: a
+  broken or flaky state, a trap in the code or tools, an error and its fix, or a decision and its reason.
+---
+Most sessions need no note. Write one only when the next agent would otherwise lose time or make a mistake.
+
+    kb note --kind <status|gotcha|fix|decision> --ref <path[:line]|command|commit|url> "<1-3 sentences>"
+
+- status: something true now that others must know (tests broken, CI flaky). When it stops being true:
+  kb note --resolve <id> "<what changed>"
+- gotcha: a trap or surprising behaviour. fix: an error and what fixed it. decision: a choice and why.
+- Write for an agent with none of your context: name the file, command or error. Facts, not plans or progress.
+- Give the evidence with --ref. For text with quotes or backticks: kb note --kind fix - <<'EOF' ... EOF
+- If kb asks for --agent, give your tool's name (Claude Code, Codex, Copilot CLI, Cursor CLI), not your model's.
+- One finding per note. Never include secrets, tokens or customer data.
+```
+
+**Setup per agent.** Claude Code's and Codex's sandboxes allow writes only in the project and temp folders, so the
+inbox folder goes on each one's write list once (Codex: `sandbox_workspace_write.writable_roots`). Cursor CLI's
+sandbox needs the same where it runs (it doesn't start on the devbox); Copilot CLI has no OS sandbox. So that
+`kb note` doesn't ask for approval every time, it also goes on each agent's command allow list (Claude Code:
+`Bash(kb note:*)`). `kb doctor` checks both settings where it can read them.
 
 ## 5. Processes, ports, locations
 
@@ -627,6 +740,7 @@ wrap that later.
 | `~/.local/share/agent-fabric/index.db` | search index | no (rebuildable) |
 | `~/.local/share/agent-fabric/quarantine/` | digests blocked by gitleaks | no |
 | `~/.local/share/agent-fabric/local/` | digests of projects not on the allow list | no (backed up) |
+| `~/.local/share/agent-fabric/inbox/` | notes from `kb note`; `done/` once ingested (§4.10) | no (backed up) |
 | `~/.agentsview/` | agentsview config + archive | no (backed up) |
 | `~/wiki/` | wiki repo | yes |
 
@@ -646,7 +760,10 @@ mypy and pytest join it with the Python core).
 - The code repo is public: no session data, config, digests or wiki content ever goes into it, and its CI has no
   access to the wiki repo. Fixtures for tests are synthetic or scrubbed recordings.
 - Untrusted content: the ingest LLM is sandboxed to its worktree; MCP output is labelled historical; nothing is
-  auto-injected.
+  auto-injected (the `kb-note` skill is an instruction, not history).
+- Agent notes (§4.10) can carry a prompt injection from whatever the agent read. They are labelled untrusted, never
+  injected into prompts, and reach the wiki only through reviewed ingest. The inbox is writable from the agents'
+  sandboxes, so a note is not tamper-proof; that is acceptable for advice that is checked before it becomes canon.
 - SLM tools: none at first. Read-only tools may follow, such as reading the project's docs or `kb search`, with
   these limits: read-only; paths limited to the project root and `~/wiki`; secret-looking files denied (`.env*`,
   `*.pem`, `id_*`, `*credentials*`); size caps; no shell, no network. Tool output is untrusted, like the
@@ -682,6 +799,12 @@ mypy and pytest join it with the Python core).
 | ingest branch left unmerged | wiki stale | nightly appends to same branch; `kb doctor` warns after 7 days |
 | vendor prunes/migrates history | source files gone | agentsview archive + daily backup keep the raw layer |
 | own automated runs captured | feedback loop | `codex exec --ephemeral`; ignore `is_automated` sessions |
+| sandbox blocks the inbox write | `kb note` exits 1, the note is lost | the error names the folder to add; `kb doctor` checks the write lists (§4.10) |
+| agents note routine progress | inbox noise | the skill says most sessions need none; ingest drops it; tighten the description |
+| `status` note never resolved | later agents warned about a fixed problem | `kb inbox` marks it possibly stale after 14 days; `kb lint` lists it |
+| agent misnames itself (model name for tool name) | wrong `agent` on the note | environment wins over `--agent` where the agent sets one (§4.10) |
+| agents never call `kb note` | no notes | measured in the phase 1 trial; reword the skill description |
+| injected or wrong note | bad advice | untrusted label; ingest checks it against digests and code; review gate |
 
 ## 9. Phases
 
@@ -710,14 +833,15 @@ The CLI agents come first (§2). Items 1 and 7 for them ran on the devbox on 202
 Claude Code, Codex and Copilot CLI; no-go for Cursor CLI, which gets its own reader in phase 1. Item 2 (watch lag) and
 item 3 (cross-agent search) are still to do for the CLIs. Items 1–3 and 7 for the IDE agents move to phase 3.
 
-**Phase 1 — digests and query.** CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.x
-(from 2026-11-06, §4.1); adapter, normalizer, tracker, digester with allow list/redaction/gate/commit/push, for
-the CLI agents: agentsview for Claude Code, Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo
-skeleton, `kb` CLI + `kb mcp`; a prototype session for the panel layout, then the panel with rules only (incl. open
-loops and carry-over).
+**Phase 1 — digests and query.** First `kb note`, `kb inbox` and the `kb-note` skill (§4.10): they need neither
+agentsview nor fabricd, so a one-week trial in one or two projects runs while the rest is built. Then CI with the
+`vet` gate for this repo; the agentsview pin bumped to v0.46.x (from 2026-11-06, §4.1); adapter, normalizer,
+tracker, digester with allow list/redaction/gate/commit/push, for the CLI agents: agentsview for Claude Code, Codex
+and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI + `kb mcp`; a prototype session
+for the panel layout, then the panel with rules only (incl. open loops and carry-over).
 
 **Phase 2 — models.** SLM bullets in the panel after it passes the eval (§10); `kb ingest` manual + nightly with
-`codex` backend; two-week comparison with `local` backend; `kb lint`, `kb prune` and `kb retro`.
+`codex` backend, digests and notes; two-week comparison with `local` backend; `kb lint`, `kb prune` and `kb retro`.
 
 **Phase 3 — breadth.** The IDE agents (Cursor IDE, VS Code Copilot Chat), starting with phase 0 items 1–3 and 7 for
 them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag demands it, semantic search
@@ -737,6 +861,14 @@ them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag 
   the reader must give the same messages and tool results as the JSON blobs, in conversation order.
 - Headless runs: fixtures of `claude -p`, `codex exec` and `copilot -p` sessions; each gets a local digest only unless
   its project is on `[publish] headless`.
+- `kb note`: each kind; no or unknown `--kind` and text over 500 characters (exit 2 with what to change); text on
+  stdin with quotes, backticks and `$`; the same note twice within 24 h (one file, same id); two different notes in
+  the same second (both kept); `--resolve` hides the note from `kb inbox` and `kb catchup`; agent from the
+  environment, from `--agent`, both (environment wins) and neither (exit 2); a git repo, a linked worktree and a
+  folder outside git. Inside the Claude Code and Codex sandboxes with and without the inbox on the write list: the
+  note is written, or exit 1 names the folder.
+- Notes trial (phase 1, one week, one or two projects): notes per session, how many I rate useful, duplicates, and
+  sessions where an agent should have left a note and didn't.
 - Project identity: the same repo as a main checkout, a linked worktree, a second clone, an SSH and an HTTPS remote,
   and a folder with no remote, each resolving to the expected id; an alias merges two ids.
 - Redaction: fixture corpus of fake secrets in every supported shape; test fails if gitleaks finds anything after
@@ -753,11 +885,15 @@ list decides what is published (§4.5); the idle timeout is a config value (§4.
 the prototype session (§4.8); the minimum desktop is Ubuntu 24.04 (§4.1, glibc); project ids come from the
 `origin` remote, then the main checkout, then agentsview's project, with aliases in config (§4.4); Copilot
 session sync is off (§7). Decided 2026-10-31: the CLI agents come first, the IDE agents in phase 3 (§2); headless
-runs get a local digest only unless the project is on `[publish] headless` (§4.3).
+runs get a local digest only unless the project is on `[publish] headless` (§4.3); agents leave notes with
+`kb note` and the `kb-note` skill, independent of agentsview (§4.10).
 
 Open (2026-10-31):
 
 - What marks a Copilot or Cursor run as headless (§4.1).
+- Which variables Codex, Copilot CLI and Cursor CLI set that identify the agent and session, so that `kb note`
+  needs no `--agent` there (§4.10).
+- The user skills folders of Copilot CLI and Cursor CLI (§4.10).
 - The Cursor CLI reader: message order from the `store.db` blob tree, timestamps, and encrypted blobs (§4.1).
 
 The phase 0 spike (§9) settles the remaining unknowns.
