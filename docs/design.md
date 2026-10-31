@@ -752,11 +752,11 @@ Decided in review (2026-10-23): the name is agent-fabric with the CLI `kb`; prom
 list decides what is published (§4.5); the idle timeout is a config value (§4.3); the panel layout is settled in
 the prototype session (§4.8); the minimum desktop is Ubuntu 24.04 (§4.1, glibc); project ids come from the
 `origin` remote, then the main checkout, then agentsview's project, with aliases in config (§4.4); Copilot
-session sync is off (§7). Decided 2026-10-31: the CLI agents come first, the IDE agents in phase 3 (§2).
+session sync is off (§7). Decided 2026-10-31: the CLI agents come first, the IDE agents in phase 3 (§2); headless
+runs get a local digest only unless the project is on `[publish] headless` (§4.3).
 
 Open (2026-10-31):
 
-- Headless runs stay local unless a project opts in (§4.3). Proposed, not yet confirmed.
 - What marks a Copilot or Cursor run as headless (§4.1).
 - The Cursor CLI reader: message order from the `store.db` blob tree, timestamps, and encrypted blobs (§4.1).
 
