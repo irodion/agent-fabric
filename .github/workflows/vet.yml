@@ -1,5 +1,5 @@
-# SafeDep vet gate over this repo's own dependencies: the actions in its workflows now, and
-# uv.lock once the Python core exists (docs/design.md §4.1).
+# SafeDep vet gate over this repo's own dependencies: the actions in its workflows and the Python
+# packages in uv.lock (docs/design.md §4.1).
 name: vet
 
 on:
