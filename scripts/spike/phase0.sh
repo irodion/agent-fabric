@@ -244,6 +244,8 @@ MODELS=(
 now() { date +%s.%N; }
 # secs START END: seconds between two epoch times, one decimal.
 secs() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.1f", b - a }'; }
+# in_s VALUE: VALUE with " s" when it's a number or ">N"; words such as "none" stay as they are.
+in_s() { if [[ ${1#>} =~ ^[0-9.]+$ ]]; then printf '%s s' "$1"; else printf '%s' "$1"; fi; }
 # iso_epoch TIMESTAMP: epoch seconds of an RFC 3339 timestamp; nothing for an empty or bad one.
 iso_epoch() { [[ -n $1 ]] && date -d "$1" +%s.%N 2>/dev/null || true; }
 uri() { jq -rn --arg s "$1" '$s | @uri'; }
@@ -471,7 +473,7 @@ lag_round() {
   base=${mu:-$t0}
   LAG_WATCH=$(awk -v t="$base" '$1 + 0 >= t + 0 && /session_updated/ { printf "%.1f", $1 - t; found = 1; exit }
     END { if (!found) print "none" }' "$3")
-  say "prompt captured after ${LAG_USER} s · first watch event ${LAG_WATCH} s · reply captured after ${LAG_REPLY} s"
+  say "prompt captured: $(in_s "$LAG_USER") · first watch event: $(in_s "$LAG_WATCH") · reply captured: $(in_s "$LAG_REPLY")"
 }
 
 # max_of VALUES...: largest number, or the first non-number (">180", "none") if there is one.
@@ -594,9 +596,9 @@ and whether the sandbox hides the agent's files (\`agentsview doctor\`).
 |---|---|
 | Captured | yes, \`$sid\` |
 | Capture lag, first prompt | $lag_first s |
-| Capture lag, prompts (rounds 1, 2) | $u1 s, $u2 s |
-| First \`session watch\` event after the prompt | $w1 s, $w2 s |
-| Capture lag, replies (from the reply's timestamp, which may be when it started) | $r1 s, $r2 s |
+| Capture lag, prompts (rounds 1, 2) | $(in_s "$u1"), $(in_s "$u2") |
+| First \`session watch\` event after the prompt | $(in_s "$w1"), $(in_s "$w2") |
+| Capture lag, replies (from the reply's timestamp, which may be when it started) | $(in_s "$r1"), $(in_s "$r2") |
 | Lags measured from | $basis |
 | Failing command detected | ${cmd_hit:-no} |
 | Failed edit detected | ${edit_hit:-no} |
@@ -661,6 +663,27 @@ stray_daemons() {
       printf '%s %s\n' "$pid" "$cmd"
     fi
   done
+}
+
+# mount_opts PID PATH: options of the mount that holds PATH in PID's mount namespace, in backticks,
+# with "(through `MOUNTPOINT`)" when PATH has no mount of its own there: under ProtectSystem=strict
+# / is already read-only, so systemd adds no mount for ProtectHome=read-only. The kernel resolves the
+# path through /proc/PID/root, so stacked mounts count the way the unit sees them. "?" when it can't.
+mount_opts() {
+  # shellcheck disable=SC2016
+  python3 -I -c '
+import os, sys
+pid, path = sys.argv[1:]
+try:
+    fd = os.open(f"/proc/{pid}/root{path}", os.O_PATH)
+    with open(f"/proc/self/fdinfo/{fd}") as f:
+        mnt = next(l.split()[1] for l in f if l.startswith("mnt_id:"))
+    with open(f"/proc/{pid}/mountinfo") as f:
+        at, opts = next(l.split()[4:6] for l in f if l.split()[0] == mnt)
+except (OSError, StopIteration):
+    print("?")
+else:
+    print(f"`{opts}`" + ("" if at == path else f" (through `{at}`)"))' "$1" "$2"
 }
 
 # in_unit_cgroup CGROUP: true for the cgroup of this UNIT_MODE's unit; a unit of the other mode, left
@@ -962,7 +985,7 @@ Cursor \`state.vscdb\` journal mode: $mode
 }
 
 s_unit() {
-  local f pid home_opts data_opts counts prev stray i
+  local f pid home_mnt data_mnt counts prev stray i
   if [[ -z ${UNIT_MODE:-} ]]; then
     warn "run the sandbox probes stage first: it decides between a user and a system unit"
     return 1
@@ -1012,9 +1035,9 @@ s_unit() {
     jctl -n 20 --no-pager 2>/dev/null || true
     return 1
   fi
-  home_opts=$(awk -v h="$(dirname "$HOME")" '$5 == h { o = $6 } END { print o }' "/proc/$pid/mountinfo" 2>/dev/null || true)
-  data_opts=$(awk -v d="$HOME/.agentsview" '$5 == d { o = $6 } END { print o }' "/proc/$pid/mountinfo" 2>/dev/null || true)
-  say "inside the unit: $(dirname "$HOME") mounted ${home_opts:-?}, ~/.agentsview ${data_opts:-?}"
+  home_mnt=$(mount_opts "$pid" "$(dirname "$HOME")")
+  data_mnt=$(mount_opts "$pid" "$HOME/.agentsview")
+  say "inside the unit: $(dirname "$HOME") mounted ${home_mnt//\`/}, ~/.agentsview ${data_mnt//\`/}"
   note "waiting for the first sync to settle (counts unchanged for 10 s, up to 5 min)…"
   prev=""
   for i in $(seq 1 30); do
@@ -1028,7 +1051,7 @@ s_unit() {
   [[ -z $stray ]] || warn "agentsview running outside the unit: $stray"
   record "06-unit" "## Sandboxed unit
 
-$UNIT_MODE unit, active (pid $pid), API on port $AV_PORT. Inside it $(dirname "$HOME") is mounted \`${home_opts:-?}\` and ~/.agentsview \`${data_opts:-?}\`.
+$UNIT_MODE unit, active (pid $pid), API on port $AV_PORT. Inside it $(dirname "$HOME") is mounted $home_mnt and ~/.agentsview $data_mnt.
 Existing sessions per agent after the first sync: $(paste -sd ',' - <<<"$counts" | sed 's/,/, /g').
 agentsview processes outside the unit: ${stray:-none}
 "
@@ -1209,7 +1232,7 @@ Not needed: journal mode $mode.
   step "Quit Cursor completely (every window)."
   pause "Press Enter when it has quit"
   files=""
-  for p in "$db-wal" "$db-shm"; do [[ -e $p ]] && files+="${p##*/} "; done
+  for p in "$db-wal" "$db-shm"; do [[ -e $p ]] && files+="${files:+ }${p##*/}"; done
   say "WAL files left: ${files:-none}"
   py="import sqlite3, sys; c = sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True); print(c.execute('select count(*) from sqlite_master').fetchone()[0])"
   if [[ $UNIT_MODE == user ]]; then
@@ -1253,9 +1276,10 @@ Not run yet. Devices:
       fi
       mkdir -p "$dir" && tar -xzf "$tgz" -C "$dir" --strip-components=1 && rm -f "$tgz"
     fi
-    missing=$(ldd "$dir/llama-bench" 2>/dev/null | awk '/not found/ { print $1 }' | paste -sd ' ' - || true)
+    # Each library once: ldd lists a missing one for every library that needs it.
+    missing=$(ldd "$dir/llama-bench" 2>/dev/null | awk '/not found/ && !seen[$1]++ { print $1 }' | paste -sd ' ' - || true)
     if [[ -n $missing && $v == sycl-fp16 && -f $setvars ]]; then
-      missing=$(run_llama "$v" ldd "$dir/llama-bench" 2>/dev/null | awk '/not found/ { print $1 }' | paste -sd ' ' - || true)
+      missing=$(run_llama "$v" ldd "$dir/llama-bench" 2>/dev/null | awk '/not found/ && !seen[$1]++ { print $1 }' | paste -sd ' ' - || true)
     fi
     if [[ -n $missing ]]; then
       warn "$v: missing libraries: $missing"
@@ -1352,7 +1376,7 @@ s_results() {
       verdict=go
       awk -v a="$lag" -v b="$watch" 'BEGIN { exit !(a ~ /^[0-9.]+$/ && a <= 10 && b ~ /^[0-9.]+$/ && b <= 10) }' || verdict="check lag"
       [[ ${!fc:-} == yes ]] || verdict="$verdict, check failures"
-      row="| $label | yes | $lag s | $watch s | ${!fc:-no} | ${!fe:-no} | $verdict |"
+      row="| $label | yes | $(in_s "$lag") | $(in_s "$watch") | ${!fc:-no} | ${!fe:-no} | $verdict |"
     fi
     rows+=$row$'\n'
   done
