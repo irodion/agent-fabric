@@ -1,12 +1,13 @@
 # agent-fabric — design
 
-Status: draft v0.3, 2026-10-23 (two review rounds applied). Name: agent-fabric; CLI: `kb`.
+Status: draft v0.4, 2026-10-31 (v0.3 had two review rounds; v0.4 puts the CLI agents first and adds the CLI
+capture check, §4.1). Name: agent-fabric; CLI: `kb`.
 Background research: `~/code/reports/Cross agent coding memory harness.md`.
 
 ## 1. Goal
 
-Switch freely between Cursor, VS Code + Copilot and Codex (Claude Code later) without losing the history of what
-was done and decided. Concretely:
+Switch freely between coding agents without losing the history of what was done and decided: first the CLI agents
+(Claude Code, Codex, Copilot CLI, Cursor CLI), later the IDE agents (Cursor IDE, VS Code Copilot Chat). Concretely:
 
 1. Every session leaves a deterministic, redacted **digest** in a Markdown wiki repo on GitHub.
 2. A **live panel** beside the agent lists decisions, risky actions and open loops ("disabled test, claimed
@@ -27,7 +28,8 @@ was done and decided. Concretely:
 | Topic | Decision | Why |
 |---|---|---|
 | Host | Linux desktop (Ubuntu 24.04 or newer), Core Ultra 7 265H (Arc 140T iGPU), 64 GB RAM; all agents run locally on it | IDE chat history lives where the IDE runs |
-| Capture | agentsview, built on CI from a pinned tag, sandboxed, behind an adapter | It already parses Cursor IDE, VS Code Copilot Chat, Copilot CLI and Codex on Linux |
+| Agents first | The CLI agents: Claude Code, Codex, Copilot CLI, Cursor CLI; the IDE agents in phase 3 | Current focus (2026-10-31) |
+| Capture | agentsview, built on CI from a pinned tag, sandboxed, behind an adapter; Cursor CLI through its own reader | agentsview parses Claude Code, Codex, Copilot CLI, Cursor IDE and VS Code Copilot Chat on Linux; for Cursor CLI it drops tool results and fails under a read-only home (§4.1) |
 | Supply chain | SafeDep `vet` gate on agentsview's dependencies and on ours from the first commit | One reviewed build per version; malware and fresh-package checks before anything runs on the desktop |
 | Publishing | Allow list of projects; everything else stays local | Client work never reaches GitHub by default |
 | Repos | `agent-fabric` (code) public, MIT; the wiki repo private | Code is shareable; session data never is |
@@ -41,14 +43,14 @@ was done and decided. Concretely:
 ## 3. Architecture
 
 ```
- Cursor IDE · VS Code Copilot Chat · Codex (CLI/IDE) · [Claude Code, phase 3]
-        │ each agent writes its own files (~/.config/Cursor, ~/.config/Code, ~/.codex, ~/.copilot)
+ Claude Code · Codex · Copilot CLI · Cursor CLI · [Cursor IDE, VS Code Copilot Chat: phase 3]
+        │ each agent writes its own files (~/.claude, ~/.codex, ~/.copilot, ~/.cursor)
         ▼
  ┌──────────────────────────────┐
  │ agentsview  127.0.0.1:8080   │  file watch + 1.5 s poll → SQLite archive (raw layer)
  │ REST /api/v1 · SSE · MCP     │
  └──────────────┬───────────────┘
-                │ adapter (REST + watch)
+                │ adapter (REST + watch); Cursor CLI: own reader of ~/.cursor/chats (§4.1)
  ┌──────────────▼───────────────────────────────────────────────┐
  │ fabricd (Python)                                              │
  │  tracker ── session lifecycle (active → idle → finalized)     │
@@ -84,9 +86,11 @@ short-lived job. The `kb` CLI and `kb mcp` read the same local files.
   miss it; with it, the unit fails and retries every 30 s. `--replace` because otherwise `serve` defers to a running
   daemon of the same version (prints "already running", exits 0) and the unit stays down while that unconfined
   daemon captures.
-- Sources used (defaults verified in its source): Codex `~/.codex/sessions` + `archived_sessions`, Copilot CLI
-  `~/.copilot`, VS Code Copilot Chat `~/.config/Code/User` (workspaceStorage `chatSessions` + global empty-window
-  chats), Cursor CLI `~/.cursor/projects`, Cursor IDE `state.vscdb` (override `CURSOR_IDE_DIR` if needed).
+- Sources used (defaults verified in its source and with `agentsview doctor sync` on the devbox): Claude Code
+  `~/.claude/projects` (subagent transcripts in `<session>/subagents/`), Codex `~/.codex/sessions` +
+  `archived_sessions`, Copilot CLI `~/.copilot`, Cursor CLI `~/.cursor/projects` (the thin transcripts only; see the
+  capture check below), VS Code Copilot Chat `~/.config/Code/User` (workspaceStorage `chatSessions` + global
+  empty-window chats), Cursor IDE `state.vscdb` (override `CURSOR_IDE_DIR` if needed).
 - Do **not** install its Memory plugin: it adds a session-start hook that injects memory.
 - Its SQLite archive is the raw layer and, over time, the only full copy (vendors prune and migrate their files).
   Back it up with SQLite's online backup (`sqlite3 … ".backup"`) or its DuckDB/PG push, never by copying the
@@ -202,6 +206,43 @@ succeed, so expect a system unit on the desktop too. Two more spike checks: Curs
 the list of Copilot and Cursor credential files to add to `InaccessiblePaths`. Cursor's own `state.vscdb` holds
 tokens too, but agentsview has to read it.
 
+**Capture check (CLI agents, devbox, 2026-10-31).** agentsview v0.45.0 ran `sync` over the real home folders with
+its own data dir, inside Claude Code's sandbox, so the agents' folders were read-only as under the unit. Existing
+sessions were compared with each agent's own files, counts only. Then one test session per agent (a greeting, a test
+run that fails, an edit that fails) was compared with the agent's own record; Codex and Cursor ran interactively in
+tmux as well as headless.
+
+| Agent (version) | Sessions archived | Tool calls and results | Failure status | Gaps |
+|---|---|---|---|---|
+| Claude Code 2.1.316 | all: 1,359 sessions + 4,960 subagent transcripts | 75,541 of 75,637 calls; the rest were written after the snapshot, or are a resumed session's copies of earlier messages, filed under the original | `errored` | Read and Glob results are stored as length and digest only, failed ones included |
+| Codex 0.162.1 | all: 72 `codex exec` + 1 interactive | 784 of 784, with output | none: a failed script is `completed` | tools are code-mode scripts (§4.2) |
+| Copilot CLI 1.0.105 | the test session (`-p`) | all, with output | `errored` on the failed edit | the error text stays in `events.jsonl` |
+| Cursor CLI 2026.10.22 | **none** under a read-only home | calls only, no results | none | see below |
+
+- **Headless runs.** agentsview files `codex exec` (`session_kind = non-interactive`) and `claude -p`/SDK runs
+  (`entrypoint = sdk-cli`) as `relationship_type = subagent` with no parent, so the session list hides them unless
+  `include_children=true`, and `is_automated` is 0 for all of them. `copilot -p` sessions are filed as ordinary
+  sessions. Neither Copilot nor Cursor records anything found so far that marks a headless run. The rule is in §4.3.
+- **Cursor CLI.** It writes two records per chat: a thin `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl`
+  (role and content parts; no tool results, ids or timestamps) and the full `~/.cursor/chats/<hash>/<id>/store.db`
+  (tables `blobs` and `meta`, `journal_mode=delete`), next to a `meta.json` with `cwd`, `createdAtMs`, `updatedAtMs`
+  and `hasConversation`. agentsview parses the transcript but also opens `store.db`, and when `~/.cursor/chats` is
+  read-only the whole session fails (`1 failed`, `local sync processing incomplete`). The unit's
+  `ProtectHome=read-only` has the same effect. With write access it archives the prompts, replies and tool calls, but
+  no tool results: the failed edit and two commands the allowlist rejected are invisible. Only 2 of 8–10 messages get
+  a timestamp and 1 gets reasoning, in `-p` and interactive sessions alike. `store.db` holds the whole conversation as
+  plain JSON blobs shaped like AI SDK messages: `system`, `user`, `assistant` with `reasoning`/`text`/`tool-call`
+  parts, and `tool` with `tool-result` parts, rejections included. The other blobs are protobuf, and `meta` key `0`
+  is hex-encoded JSON (`agentId`, `latestRootBlobId`, `createdAt`, `mode`, `isRunEverything`, `blobEncryptionKey`).
+  The JSON blobs carry no timestamps. v0.46.0 and v0.46.1 change none of this. Cursor CLI therefore gets its own
+  `CaptureSource` (Adapter, below) that opens `store.db` read-only, rather than write access for agentsview to
+  Cursor's data; the bug also goes upstream.
+- **Upgrade.** v0.46.0 (2026-10-23) reads Codex rollouts after Codex compresses them to `.jsonl.zst` (none on the
+  devbox yet), and keeps archived Claude Code tool output after Claude Code deletes its tool-result files. It clears
+  the 14-day rule on 2026-11-06; bump the pin then.
+- **Cost.** The first full sync of 6,391 sessions took 5 min 39 s on 2 vCPU and made a 497 MB archive; incremental
+  syncs take about 1 s.
+
 **Query path.** `agentsview mcp` talks to the daemon over HTTP, and if none answers it starts one itself, outside
 the sandbox. Register it with `--server http://127.0.0.1:<port>` (§4.1) so it fails instead. MCP servers are started
 by the agent app rather than in the agent's shell sandbox, so they reach loopback. A CLI call from a sandboxed shell
@@ -224,6 +265,13 @@ and `GET /api/v1/sessions/{id}/watch` (SSE; emits a change signal, not content).
 against recorded responses validated with the pinned `openapi.yaml`. If agentsview fails for one agent, that agent
 gets its own `CaptureSource` (direct transcript reader) without touching the rest.
 
+Cursor CLI is the first such agent. `CursorChatSource` lists `~/.cursor/chats/*/*/meta.json`, watches each
+`store.db`, opens it read-only and decodes the JSON message blobs; `cwd` and the times come from `meta.json`, the
+project from `cwd` (§4.4). Still to work out from synthetic sessions: message order from the blob tree
+(`latestRootBlobId` and the protobuf blobs; row order matched the conversation in the check, which isn't a
+guarantee), timestamps (the blobs have none, so the watcher stamps each message when it first sees it), and whether
+`blobEncryptionKey` means some blobs are encrypted (none of the JSON ones were).
+
 Verify in spike: what `/api/v1/events` emits (could replace session-list polling), and end-to-end lag for Cursor
 IDE (agentsview re-reads some `state.vscdb` changes only on a scheduled reconcile).
 
@@ -237,18 +285,26 @@ Borrowed from OpenHands/Pi: typed, append-only, addressed by `(session_id, ordin
 | `agent`, `project`, `cwd`, `git_branch`, `parent_session_id` | `DbSession` |
 | `ordinal`, `ts`, `role`, `model` | `DbMessage` |
 | `text`, `thinking` | `content`, `thinking_text` |
-| `tool_calls[]`: `tool`, `category`, `input`, `result` (full output), `result_status` | `ToolCall.result_content` (stored in full) + `result_events[].status` (`completed`, `errored`, `running`, …) |
+| `tool_calls[]`: `tool`, `category`, `input`, `result` (full output), `result_status` | `ToolCall.result_content` (stored in full, except Claude Code's Read and Glob results, §4.1) + `result_events[].status` (`completed`, `errored`, `running`, …) |
 | `kind` (derived) | `user` · `assistant` · `shell` · `edit` · `read` · `search` · `other` |
 | `command`, `exit_code` (derived, shell only) | parsed from `input_json` / `result_content` per agent |
-| `failed` (derived) | `result_status = errored`, a non-zero `exit_code`, or an error pattern in the result (traceback, `error:`, `FAILED`, `permission denied`, patch did not apply) |
+| `failed` (derived) | `result_status = errored`, a non-zero `exit_code`, or an error pattern in the result (traceback, `error:`, `FAILED`, `permission denied`, patch did not apply, `Script failed`, `apply_patch verification failed`, `Failed to apply patch`) |
 
 The per-agent mapping of tool names to `kind` and of shell results to exit codes lives in a small table per agent,
-covered by fixture tests. Sessions with `is_automated = true` are ignored.
+covered by fixture tests. Sessions with `is_automated = true` are ignored; headless runs follow §4.3.
 
-Failed calls keep their full output in the event model. In v0.45.0 agentsview sets `errored` only for a few
-agents, none of ours, so failure comes from the exit code and the error patterns. The digest stores an excerpt and
-the message ordinal (§4.4); `kb show <session>#<ordinal>` or `agentsview mcp` `get_messages` return the full output
-from the local archive.
+Codex 0.162 runs every tool through one code-mode tool, `exec`, whose input is a JavaScript program that calls
+`tools.exec_command({cmd: …})` or `tools.apply_patch("*** Begin Patch …")`. agentsview files both as `exec`, category
+Bash. The Codex mapping takes `kind` and `command` from the calls inside the script, and a result that starts with
+`Script failed` counts as failed.
+
+Failed calls keep the output agentsview stores. In v0.45.0 it sets `errored` for Claude Code and Copilot CLI, but
+not for Codex or Cursor, so failure also comes from the exit code and the error patterns. Agents often append
+`; echo EXIT:$?` to a command (Copilot and Cursor both did in the capture check), so the shell's own exit code is 0;
+the error patterns still catch the failing test. Copilot stores a failed call's status but not its error text, so
+the adapter takes that text from the session's `events.jsonl` (`tool.execution_complete`, `error`). The digest
+stores an excerpt and the message ordinal (§4.4); `kb show <session>#<ordinal>` or `agentsview mcp` `get_messages`
+return the full output from the local archive.
 
 ### 4.3 Session lifecycle
 
@@ -260,7 +316,13 @@ from the local archive.
 - **Why a timeout:** no agent gives a reliable session-end signal (§2), so "finished" means "quiet for N
   minutes". The value is low-stakes: too short and a paused session finalizes and later reopens (one extra commit
   to the same file); too long and its digest arrives late. Config value, default 30 min.
-- `tracker` lists sessions updated in the last 24 h every 10 s and opens a `watch` for each ACTIVE one.
+- `tracker` lists sessions updated in the last 24 h every 10 s, with `include_children=true` because agentsview files
+  headless runs as children (§4.1), and opens a `watch` for each ACTIVE one.
+- **Headless runs** (`claude -p` and SDK runs, `codex exec`, `copilot -p`, `cursor-agent -p`) get a local digest
+  only, indexed for `kb` and never committed, unless the project is also on the `[publish] headless` list (§4.5).
+  Scripts and benchmarks make them in bulk: 1,324 of the 1,359 Claude Code sessions on the devbox are headless, most
+  from one benchmark project. Detection: `entrypoint = sdk-cli` (Claude Code) and `session_kind = non-interactive`
+  (Codex). Copilot and Cursor show no marker yet (§4.1), so their `-p` runs count as interactive until one is found.
 - **Turn end** (heuristic, verify in spike): last message is assistant text with no pending tool call, and no
   change for 5 s.
 - **Finalize**: write the digest, commit it. A reopened session rewrites the same digest file on its next
@@ -343,6 +405,7 @@ never committed. The list starts empty, so nothing is published until I add a pr
 # ~/.config/agent-fabric/config.toml
 [publish]
 allow = ["github.com/me/agent-fabric", "github.com/me/billing-api"]   # project ids, §4.4
+headless = []   # allowed projects whose headless runs (§4.3) are published too
 ```
 
 For every file written into the wiki repo, in order:
@@ -559,7 +622,7 @@ wrap that later.
 
 | Path | Contents | In git |
 |---|---|---|
-| `~/.config/agent-fabric/config.toml` | settings (allow list, idle timeout, ports, backends, project aliases) | no |
+| `~/.config/agent-fabric/config.toml` | settings (allow lists, idle timeout, ports, backends, project aliases) | no |
 | `~/.local/share/agent-fabric/state.db` | cursors, loops, ingest ledger, flags | no (backed up) |
 | `~/.local/share/agent-fabric/index.db` | search index | no (rebuildable) |
 | `~/.local/share/agent-fabric/quarantine/` | digests blocked by gitleaks | no |
@@ -594,9 +657,11 @@ mypy and pytest join it with the Python core).
 - Copilot session sync is off. By default Copilot CLI and the Copilot app copy local sessions to the GitHub
   account, unredacted and outside the allow list. Set `"remoteExport": false` in `~/.copilot/settings.json`
   (phase 0) and don't turn on remote control (`remoteSessions` or `/remote on`), which re-enables export whatever
-  that setting says. Repo-level Copilot settings can't override it: keys not on their list are ignored. `kb doctor`
-  warns if the setting is missing or `true`. The docs don't say whether turning sync off deletes copies already
-  synced, so check github.com once.
+  that setting says. Repo-level Copilot settings can't override it: keys not on their list are ignored. Copilot CLI
+  1.0.105 on the devbox keeps the key in `~/.copilot/config.json`, a file whose header says it is managed
+  automatically, so `kb doctor` checks both files and warns if the setting is missing or `true`. Test and scripted
+  runs also pass `--no-remote-export`. The docs don't say whether turning sync off deletes copies already synced, so
+  check github.com once.
 
 ## 8. Failure modes
 
@@ -605,6 +670,10 @@ mypy and pytest join it with the Python core).
 | agentsview down | no new events | panel shows "capture offline"; agents still write files; agentsview catches up on restart |
 | agentsview upgrade changes API | adapter errors | pinned version; contract tests gate upgrades |
 | sandbox blocks a read agentsview needs | an agent's sessions missing | `agentsview doctor` and per-agent session counts in `kb doctor`; widen only that path |
+| agentsview can't write `~/.cursor/chats` | every Cursor CLI session fails to sync | Cursor CLI's own `CaptureSource` (§4.1); never give agentsview write access to agent data |
+| Codex compresses old rollouts to `.jsonl.zst` | v0.45.0 can't read them; sessions not yet synced are missed | pin v0.46.0 or newer (§4.1) |
+| Claude Code deletes its tool-result files | archived output can be lost on a re-parse in v0.45.0 | pin v0.46.0 or newer |
+| headless runs in bulk (benchmarks, scripts) | wiki flooded with digests nobody reads | local-only unless the project opts in (§4.3) |
 | MCP client starts its own daemon | unconfined second daemon | `--server` in every MCP registration; the unit's `--replace` takes over from one that started first |
 | Cursor IDE updates lag | panel late for Cursor | measure in spike; add Cursor hooks (`afterAgentResponse`, `afterFileEdit`) as a second source if needed |
 | llama-server down/slow | no SLM bullets | rules-only mode, flagged in panel header |
@@ -637,15 +706,22 @@ sessions' recordings stay in `spike/recordings/` for the phase 1 fixtures, scrub
 
 Exit: go/no-go on agentsview per agent; chosen GPU backend.
 
-**Phase 1 — digests and query.** CI with the `vet` gate for this repo; adapter, normalizer, tracker, digester
-with allow list/redaction/gate/commit/push, wiki repo skeleton, `kb` CLI + `kb mcp`; a prototype session for the
-panel layout, then the panel with rules only (incl. open loops and carry-over).
+The CLI agents come first (§2). Items 1 and 7 for them ran on the devbox on 2026-10-31 (capture check, §4.1): go for
+Claude Code, Codex and Copilot CLI; no-go for Cursor CLI, which gets its own reader in phase 1. Item 2 (watch lag) and
+item 3 (cross-agent search) are still to do for the CLIs. Items 1–3 and 7 for the IDE agents move to phase 3.
+
+**Phase 1 — digests and query.** CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.x
+(from 2026-11-06, §4.1); adapter, normalizer, tracker, digester with allow list/redaction/gate/commit/push, for
+the CLI agents: agentsview for Claude Code, Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo
+skeleton, `kb` CLI + `kb mcp`; a prototype session for the panel layout, then the panel with rules only (incl. open
+loops and carry-over).
 
 **Phase 2 — models.** SLM bullets in the panel after it passes the eval (§10); `kb ingest` manual + nightly with
 `codex` backend; two-week comparison with `local` backend; `kb lint`, `kb prune` and `kb retro`.
 
-**Phase 3 — breadth.** Claude Code (agentsview already reads `~/.claude/projects`), per-agent slash commands for
-catch-up, Cursor hooks if lag demands it, semantic search (agentsview's or qmd) if FTS isn't enough.
+**Phase 3 — breadth.** The IDE agents (Cursor IDE, VS Code Copilot Chat), starting with phase 0 items 1–3 and 7 for
+them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag demands it, semantic search
+(agentsview's or qmd) if FTS isn't enough.
 
 ## 10. Testing and evaluation
 
@@ -654,7 +730,13 @@ catch-up, Cursor hooks if lag demands it, semantic search (agentsview's or qmd) 
   of panel false positives.
 - Loops: fixtures where the same skip appears in two sessions (one loop, two evidence entries), a marked line moves
   (same loop), a marker is removed (closed), and a closed marker comes back (reopened).
-- Failure detection: per-agent fixtures of failing shell commands, failed edits and MCP tool errors.
+- Failure detection: per-agent fixtures of failing shell commands, failed edits and MCP tool errors, including
+  Codex code-mode scripts (`Script failed`), Copilot's `errored` edits with no stored error text, and commands that
+  end in `; echo EXIT:$?`.
+- Cursor CLI: `store.db` fixtures from synthetic sessions (the capture check's three turns, `-p` and interactive);
+  the reader must give the same messages and tool results as the JSON blobs, in conversation order.
+- Headless runs: fixtures of `claude -p`, `codex exec` and `copilot -p` sessions; each gets a local digest only unless
+  its project is on `[publish] headless`.
 - Project identity: the same repo as a main checkout, a linked worktree, a second clone, an SSH and an HTTPS remote,
   and a folder with no remote, each resolving to the expected id; an alias merges two ids.
 - Redaction: fixture corpus of fake secrets in every supported shape; test fails if gitleaks finds anything after
@@ -670,6 +752,12 @@ Decided in review (2026-10-23): the name is agent-fabric with the CLI `kb`; prom
 list decides what is published (§4.5); the idle timeout is a config value (§4.3); the panel layout is settled in
 the prototype session (§4.8); the minimum desktop is Ubuntu 24.04 (§4.1, glibc); project ids come from the
 `origin` remote, then the main checkout, then agentsview's project, with aliases in config (§4.4); Copilot
-session sync is off (§7).
+session sync is off (§7). Decided 2026-10-31: the CLI agents come first, the IDE agents in phase 3 (§2).
 
-None are open. The phase 0 spike (§9) settles the remaining unknowns.
+Open (2026-10-31):
+
+- Headless runs stay local unless a project opts in (§4.3). Proposed, not yet confirmed.
+- What marks a Copilot or Cursor run as headless (§4.1).
+- The Cursor CLI reader: message order from the `store.db` blob tree, timestamps, and encrypted blobs (§4.1).
+
+The phase 0 spike (§9) settles the remaining unknowns.
