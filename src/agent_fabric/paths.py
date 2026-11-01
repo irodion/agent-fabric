@@ -4,11 +4,34 @@ from collections.abc import Mapping
 from pathlib import Path
 
 
-def inbox_dir(env: Mapping[str, str]) -> Path:
+def _data_home(env: Mapping[str, str]) -> Path:
     data_home = Path(env.get("XDG_DATA_HOME") or "")
     if not data_home.is_absolute():  # the XDG spec says to ignore a relative value
         data_home = Path(env["HOME"]) / ".local" / "share"
-    return data_home / "agent-fabric" / "inbox"
+    return data_home
+
+
+def inbox_dir(env: Mapping[str, str]) -> Path:
+    return _data_home(env) / "agent-fabric" / "inbox"
+
+
+def uv_tool_dir(env: Mapping[str, str]) -> Path:
+    """Where `uv tool install` puts each tool's own folder, as `uv tool dir` prints it."""
+    tool_dir = Path(env.get("UV_TOOL_DIR") or "")
+    return tool_dir if tool_dir.is_absolute() else _data_home(env) / "uv" / "tools"
+
+
+def config_file(env: Mapping[str, str]) -> Path:
+    """kb's own settings (docs/design.md §5)."""
+    config_home = Path(env.get("XDG_CONFIG_HOME") or "")
+    if not config_home.is_absolute():  # the XDG spec says to ignore a relative value
+        config_home = Path(env["HOME"]) / ".config"
+    return config_home / "agent-fabric" / "config.toml"
+
+
+def hooks_dir(env: Mapping[str, str]) -> Path:
+    """The stop hook's markers, one per agent session (docs/design.md §4.10)."""
+    return inbox_dir(env).parent / "hooks"
 
 
 def tilde(path: Path, env: Mapping[str, str]) -> str:
