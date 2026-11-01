@@ -649,9 +649,13 @@ The kind says what the next agent should do with the note, and decides how long 
   warning, not a failure.
 - **Agent.** `kb` takes the agent from its environment where it can: Claude Code 2.1.316 sets `AI_AGENT`
   (`claude-code_2-1-316_agent`), `CLAUDE_CODE_SESSION_ID` and `CLAUDE_CODE_ENTRYPOINT` (`cli` or `sdk-cli`) inside
-  its sandbox, which also links the note to its session's digest. What Codex, Copilot CLI and Cursor CLI set is
-  still to check (§11). Where nothing is set, `kb` asks for `--agent` with the tool's name, not the model's (Cursor
-  running a Claude model is still Cursor CLI). When both are present the environment wins.
+  its sandbox, and Codex sets `CODEX_THREAD_ID` on every shell command it runs (source, 2026-10-31); either links
+  the note to its session's digest. What Copilot CLI and Cursor CLI set is still to check (§11). Where nothing is
+  set, `kb` asks for `--agent` with the tool's name, not the model's (Cursor running a Claude model is still Cursor
+  CLI). An agent started by another (Codex run from Claude Code) inherits its variables, so `--agent` naming a tool
+  wins over them, and with two agents' variables set `kb` asks for it; a flag naming no tool, such as a model name,
+  loses to the environment. Copilot CLI or Cursor CLI started from Claude Code without `--agent` is still recorded
+  as Claude Code.
 - **`--resolve <id>`** closes an earlier note, usually a `status` once the tests pass again. It writes a new note
   that points at the old one, so the inbox stays append-only; resolved notes drop out of `kb inbox` and
   `kb catchup`.
@@ -681,7 +685,8 @@ not caused by your change.
 ```
 
 **Reading notes.** `kb inbox` lists the unresolved notes not yet ingested, and marks `status` notes older than 14
-days as possibly stale. `kb catchup` (§4.9) includes the project's unresolved `status` notes and its latest other
+days as possibly stale. `--project` takes a project id or a folder, which names its project as `kb note` would
+there. A note file `kb` can't read, or with a field of the wrong type or form, is skipped. `kb catchup` (§4.9) includes the project's unresolved `status` notes and its latest other
 notes; `kb search --kind note` searches all of them; `kb mcp` offers the same. Like all `kb` output they are labelled
 untrusted: an agent wrote them and nobody has checked them yet.
 
@@ -694,8 +699,12 @@ so the inbox holds only notes still to act on. Notes from projects not on the al
 **Skill.** `src/agent_fabric/skills/kb-note/SKILL.md`, shipped in the package, copied into two user skills folders
 that between them reach all four CLI agents: `~/.claude/skills/` (read by Claude Code, Copilot CLI and Cursor CLI)
 and `~/.codex/skills/` (Codex and Cursor CLI). Only the name and description sit in the agent's context; the body
-loads when the agent decides to use it. `kb doctor` checks every copy against the package, for each agent whose
-home folder exists, and `kb doctor --fix` adds missing copies and updates outdated ones.
+loads when the agent decides to use it. `CLAUDE_CONFIG_DIR` and `CODEX_HOME` move Claude Code's and Codex's
+folders, settings and skills with them; Copilot CLI and Cursor CLI are assumed to keep reading `~/.claude/skills/`,
+which then gets a copy of its own. `kb doctor` checks every copy against the package, for each agent it finds
+installed: Claude Code by its `.claude.json` or `settings.json` (not by `~/.claude`, which a copy for Copilot CLI
+or Cursor CLI creates), Codex by its folder, Copilot CLI and Cursor CLI by `~/.copilot` and `~/.cursor`. It decides
+once, before `--fix` writes anything; `kb doctor --fix` adds missing copies and updates outdated ones.
 
 The file is the one copy of the skill text: when to write a note (rarely), the four kinds, `--ref`, `--resolve`, stdin
 for quoted text, `--agent` as the tool's name, the 500-character limit, no secrets, and what exit 1 and 2 mean.
@@ -710,8 +719,9 @@ later, shows its checks.
 inbox folder goes on each one's write list (Claude Code: `sandbox.filesystem.allowWrite` in
 `~/.claude/settings.json`; Codex: `sandbox_workspace_write.writable_roots` in `~/.codex/config.toml`). A sandbox can
 only grant writes to a folder that exists, so `kb doctor --fix` creates the inbox first, then adds it to both lists
-and changes nothing else in either file. The JSON is rewritten whole; the TOML only gains lines, and the result
-must read back with the inbox in it before it is written. A file it can't read, or a `writable_roots` that already
+and changes nothing else in either file; an entry for a folder that holds the inbox already covers it. The JSON is
+rewritten whole; the TOML only gains lines, in the file's own line endings, and the result must read back with the
+inbox in it before it is written. Either is replaced in one step, through a private (0600) temporary copy. A file it can't read, or a `writable_roots` that already
 lists other folders, it reports with the path to add by hand. Cursor CLI's sandbox needs the same where it runs (it
 doesn't start on the devbox); Copilot CLI has no OS sandbox. So that `kb note` doesn't ask for approval every time,
 it also goes on each agent's command allow list, except in Claude Code with `sandbox.autoAllowBashIfSandboxed`, which
@@ -798,7 +808,7 @@ mypy and pytest on Python 3.13 and 3.14).
 | sandbox blocks the inbox write | `kb note` exits 1, the note is lost | the error names the folder to add to the sandbox's write list; `kb doctor` reports a missing or unwritable inbox and a write list without it, and `--fix` adds it (§4.10) |
 | agents note routine progress | inbox noise | the skill says most sessions need none; ingest drops it; tighten the description |
 | `status` note never resolved | later agents warned about a fixed problem | `kb inbox` marks it possibly stale after 14 days; `kb lint` lists it |
-| agent misnames itself (model name for tool name) | wrong `agent` on the note | environment wins over `--agent` where the agent sets one (§4.10) |
+| agent misnames itself (model name for tool name) | wrong `agent` on the note | the environment wins over a model name in `--agent`; a tool name in `--agent` wins, for an agent started by another (§4.10) |
 | agents never call `kb note` | no notes | measured in the phase 1 trial; reword the skill description |
 | injected or wrong note | bad advice | untrusted label; ingest checks it against digests and code; review gate |
 
@@ -859,14 +869,24 @@ them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag 
   its project is on `[publish] headless`.
 - `kb note`: each kind; no or unknown `--kind` and text over 500 characters (exit 2 with what to change); text on
   stdin with quotes, backticks and `$`; the same note twice within 24 h (one file, same id); two different notes in
-  the same second (both kept); `--resolve` hides the note from `kb inbox` and `kb catchup`; agent from the
-  environment, from `--agent`, both (environment wins) and neither (exit 2); a git repo, a linked worktree and a
-  folder outside git. Inside the Claude Code and Codex sandboxes with and without the inbox on the write list: the
-  note is written, or exit 1 names the folder.
+  the same second (both kept); `--resolve` hides the note from `kb inbox` and `kb catchup`, even when worded like
+  the note; `--kind` with `--resolve`, and an empty `--resolve` (exit 2); an id used on an earlier day is not drawn
+  again; agent from Claude Code's or Codex's environment, from `--agent`, a model name in `--agent` (environment
+  wins), a tool name over an inherited environment (flag wins), two agents' variables without `--agent` and neither
+  (exit 2); dotted names such as `json.loads` or `example.com` as refs (no warning); a git repo, a linked worktree
+  and a folder outside git. Inside the Claude Code and Codex sandboxes with and without the inbox on the write list:
+  the note is written, or exit 1 names the folder.
+- `kb inbox`: `--project` as an id and as an absolute, relative or `.` folder; a `--since` it can't read or too long
+  ago (exit 2); note files with a field of the wrong type, or an id with control characters, skipped without
+  crashing `kb inbox` or `kb note`.
 - `kb doctor`: the inbox and each skill copy missing, outdated or unwritable, and `--fix` for each. Claude Code's
   `settings.json` and Codex's `config.toml` missing, without the inbox, with it, broken, or the wrong shape; for
   Codex also no `[sandbox_workspace_write]` table, a table without `writable_roots`, one listing other folders, and
   a table `--fix` can't extend by adding lines (dotted keys): every other byte kept, or the file left alone.
+  Claude Code counts as installed by `~/.claude.json` or its settings file, not by `~/.claude`, which the skill
+  copy creates for Copilot CLI or Cursor CLI alone: no Claude Code settings are written for them, and Claude Code
+  known only by `~/.claude.json` gets its copy. An entry for a folder holding the inbox; CRLF line endings kept; an
+  unreadable skill copy; `CLAUDE_CONFIG_DIR` and `CODEX_HOME`.
 - Notes trial (phase 1, one week, one or two projects): notes per session, how many I rate useful, duplicates, and
   sessions where an agent should have left a note and didn't.
 - Project identity: the same repo as a main checkout, a linked worktree, a second clone, an SSH and an HTTPS remote,
@@ -892,8 +912,11 @@ and `~/.codex/skills/`, which Copilot CLI and Cursor CLI also read.
 Open (2026-10-31):
 
 - What marks a Copilot or Cursor run as headless (§4.1).
-- Which variables Codex, Copilot CLI and Cursor CLI set that identify the agent and session, so that `kb note`
-  needs no `--agent` there (§4.10).
+- Which variables Copilot CLI and Cursor CLI set that identify the agent and session, so that `kb note` needs no
+  `--agent` there (§4.10). Codex: `CODEX_THREAD_ID` (2026-11-01).
+- Codex still reads `$CODEX_HOME/skills/` but calls it deprecated in favour of `~/.agents/skills/`. Codex's copy
+  moves there before the old folder goes; whether Cursor CLI reads `~/.agents/skills/` too is unchecked (§4.10).
+- Whether Copilot CLI and Cursor CLI follow `CLAUDE_CONFIG_DIR` (§4.10 assumes they don't).
 - The Cursor CLI reader: message order from the `store.db` blob tree, timestamps, and encrypted blobs (§4.1).
 
 The phase 0 spike (§9) settles the remaining unknowns.

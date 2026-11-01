@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from agent_fabric.paths import tilde
+from agent_fabric.paths import expand, tilde
 
 CLAUDE_KEY = "sandbox.filesystem.allowWrite"
 CODEX_KEY = "sandbox_workspace_write.writable_roots"
@@ -35,23 +35,22 @@ def _cant_write(shown: str, e: OSError) -> tuple[str, str]:
 
 
 def _write(path: Path, text: str) -> None:
-    """Replace the file in one step, through a symlink and keeping its mode: the agent may read it any time."""
+    """Replace the file in one step, through a symlink and keeping its mode: the agent may read it any time. The new
+    copy is private from the start, since agent settings can hold tokens, and removed if the replace fails."""
     target = path.resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     new = target.with_name(f".{target.name}.kb-new")
-    new.write_text(text, encoding="utf-8")
-    if target.exists():
-        shutil.copymode(target, new)
-    else:
-        new.chmod(0o600)
-    os.replace(new, target)
-
-
-def _expand(entry: str, home: Path) -> Path:
-    """Claude Code's sandbox paths: `~/` is the home folder, `/` an absolute path."""
-    if entry == "~" or entry.startswith("~/"):
-        return home / entry[2:]
-    return Path(entry)
+    new.unlink(missing_ok=True)
+    with os.fdopen(os.open(new, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as f:
+        try:
+            f.write(text.encode("utf-8"))
+            f.flush()
+            if target.exists():
+                shutil.copymode(target, new)
+            os.replace(new, target)
+        except BaseException:
+            new.unlink(missing_ok=True)
+            raise
 
 
 def _claude_roots(settings: Any) -> list[str]:
@@ -67,15 +66,16 @@ def _claude_roots(settings: Any) -> list[str]:
     return _paths(node.setdefault("allowWrite", []), CLAUDE_KEY)
 
 
-def claude_code(home: Path, inbox: Path, env: Mapping[str, str], *, fix: bool) -> tuple[str, str]:
-    path = home / ".claude" / "settings.json"
+def claude_code(path: Path, inbox: Path, env: Mapping[str, str], *, fix: bool) -> tuple[str, str]:
+    """Claude Code's `settings.json`; the JSON is rewritten whole."""
+    home = Path(env["HOME"])
     shown = tilde(path, env)
     try:
         settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         roots = _claude_roots(settings)
     except (OSError, ValueError) as e:
         return _cant_read(shown, e)
-    if any(_expand(root, home) == inbox for root in roots):
+    if any(inbox.is_relative_to(expand(root, env)) for root in roots):  # `~/` is the home folder, `/` absolute
         return "ok", f"{shown} lets Claude Code write the inbox"
     if not fix:
         return "missing", f"{shown}: the inbox is not in {CLAUDE_KEY}; `kb doctor --fix` adds it"
@@ -101,32 +101,32 @@ def _codex_table(text: str) -> dict[str, Any] | None:
 
 
 def _codex_lists(table: dict[str, Any] | None, inbox: Path) -> bool:
-    return any(Path(root) == inbox for root in (table or {}).get("writable_roots", []))
+    return any(inbox.is_relative_to(root) for root in (table or {}).get("writable_roots", []))
 
 
 def _codex_edit(text: str, table: dict[str, Any] | None, inbox: Path) -> str | None:
     """The config with the inbox added, or None where adding lines can't do it (the user edits it by hand)."""
     if table is not None and "writable_roots" in table:
         return None
-    line = f"writable_roots = [{json.dumps(str(inbox), ensure_ascii=False)}]\n"
-    new = text if not text or text.endswith("\n") else text + "\n"
+    nl = "\r\n" if "\r\n" in text else "\n"
+    line = f"writable_roots = [{json.dumps(str(inbox), ensure_ascii=False)}]{nl}"
+    new = text if not text or text.endswith("\n") else text + nl
     if table is not None and (header := CODEX_TABLE.search(new)):
         new = new[: header.end()] + line + new[header.end() :]
     else:
-        new += f"{'\n' if new else ''}[sandbox_workspace_write]\n{line}"
+        new += f"{nl if new else ''}[sandbox_workspace_write]{nl}{line}"
     try:
         return new if _codex_lists(_codex_table(new), inbox) else None
     except ValueError:
         return None
 
 
-def codex(home: Path, inbox: Path, env: Mapping[str, str], *, fix: bool) -> tuple[str, str]:
+def codex(path: Path, inbox: Path, env: Mapping[str, str], *, fix: bool) -> tuple[str, str]:
     """Codex's config is TOML, which the standard library only reads: a fix adds lines, keeps every other byte,
     and writes only if the result reads back with the inbox in it."""
-    path = home / ".codex" / "config.toml"
     shown = tilde(path, env)
     try:
-        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        text = path.read_bytes().decode("utf-8") if path.exists() else ""  # bytes: keeps CRLF line endings
         table = _codex_table(text)
     except (OSError, ValueError) as e:
         return _cant_read(shown, e)

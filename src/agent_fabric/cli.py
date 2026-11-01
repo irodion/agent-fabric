@@ -15,9 +15,9 @@ from typing import TextIO
 from agent_fabric.agents import detect_agent
 from agent_fabric.doctor import doctor
 from agent_fabric.gitinfo import git_facts
-from agent_fabric.inbox import Inbox
+from agent_fabric.inbox import Inbox, Snapshot
 from agent_fabric.notes import KINDS, MAX_TEXT, Note, missing_ref, new_id
-from agent_fabric.paths import inbox_dir, tilde
+from agent_fabric.paths import expand, inbox_dir, tilde
 
 
 @dataclass(frozen=True)
@@ -65,7 +65,7 @@ def run(argv: list[str], *, env: Mapping[str, str], cwd: Path, stdin: TextIO, no
     inbox_cmd.add_argument("--since", type=_age, metavar="AGE", help="e.g. 7d or 24h")
     inbox_cmd.add_argument("--all", action="store_true", help="also resolved notes and their resolutions")
     scope = inbox_cmd.add_mutually_exclusive_group()
-    scope.add_argument("--project", help="a project id, or a folder outside git (default: the current one)")
+    scope.add_argument("--project", help="a project id, or a folder (default: the current one)")
     scope.add_argument("--all-projects", action="store_true", help="every project's notes")
     doctor_cmd = commands.add_parser("doctor")
     doctor_cmd.add_argument(
@@ -85,20 +85,31 @@ def run(argv: list[str], *, env: Mapping[str, str], cwd: Path, stdin: TextIO, no
         return Result(2, "", f"kb: {e}\n")
 
 
+def _kind(args: argparse.Namespace, snapshot: Snapshot, inbox: Inbox) -> str | Result:
+    """The new note's kind: `--kind`, or for `--resolve` the resolved note's; a retried resolve's result instead."""
+    if args.resolve is None:
+        if args.kind not in KINDS:
+            raise UsageError(f"--kind must be one of: {', '.join(KINDS)}")
+        return str(args.kind)
+    if not args.resolve:
+        raise UsageError("--resolve needs the id of the note it resolves; `kb inbox` lists the open ones")
+    if args.kind is not None:
+        raise UsageError("drop --kind: a resolution takes the kind of the note it resolves")
+    target = snapshot.find(args.resolve)
+    if target is None or target.resolves:
+        raise UsageError(f"no note {args.resolve} in {inbox.path}; `kb inbox` lists the open ones")
+    if done := snapshot.resolved_by.get(args.resolve):
+        path, resolution = done
+        return Result(0, f"{resolution.id} {path}\n", f"kb: {args.resolve} was already resolved\n")
+    return target.kind
+
+
 def _note(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
     env, cwd = ctx.env, ctx.cwd
     snapshot = inbox.read()
-    kind = args.kind
-    if args.resolve:
-        target = snapshot.find(args.resolve)
-        if target is None or target.resolves:
-            raise UsageError(f"no note {args.resolve} in {inbox.path}; `kb inbox` lists the open ones")
-        if done := snapshot.resolved_by.get(args.resolve):
-            path, resolution = done
-            return Result(0, f"{resolution.id} {path}\n", f"kb: {args.resolve} was already resolved\n")
-        kind = target.kind
-    elif kind not in KINDS:
-        raise UsageError(f"--kind must be one of: {', '.join(KINDS)}")
+    kind = _kind(args, snapshot, inbox)
+    if isinstance(kind, Result):
+        return kind
     text = (ctx.stdin.read() if args.text == "-" else args.text).strip()
     if args.resolve and not text:
         text = "resolved"
@@ -159,13 +170,21 @@ def _age(value: str) -> timedelta:
     if not match:
         raise argparse.ArgumentTypeError(f"{value!r} is not an age like 7d or 24h")
     amount, unit = int(match[1]), match[2]
-    return timedelta(days=amount) if unit == "d" else timedelta(hours=amount)
+    try:
+        return timedelta(days=amount) if unit == "d" else timedelta(hours=amount)
+    except OverflowError:
+        raise argparse.ArgumentTypeError(f"{value!r} is too long ago") from None
 
 
 def _inbox(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
     snapshot = inbox.read()
     resolved_by = {note_id: resolution.id for note_id, (_, resolution) in snapshot.resolved_by.items()}
-    scope = None if args.all_projects else args.project or git_facts(ctx.cwd).project or tilde(ctx.cwd, ctx.env)
+    if args.all_projects:
+        scope = None
+    elif args.project:
+        scope = _project(args.project, ctx)
+    else:
+        scope = git_facts(ctx.cwd).project or tilde(ctx.cwd, ctx.env)
     notes = [
         note
         for _, note in (snapshot.notes if args.all else snapshot.open())
@@ -177,6 +196,14 @@ def _inbox(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
         return Result(0, "", "")
     entries = "\n".join(_entry(note, ctx.now, resolved_by.get(note.id)) for note in notes)
     return Result(0, f"{UNTRUSTED}\n\n{entries}", "")
+
+
+def _project(value: str, ctx: Context) -> str:
+    """`--project`: a folder names its project as `kb note` would there; anything else is a project id."""
+    folder = Path(os.path.normpath(ctx.cwd / expand(value, ctx.env)))
+    if not folder.is_dir():
+        return value
+    return git_facts(folder).project or tilde(folder, ctx.env)
 
 
 def _shown(value: str) -> str:

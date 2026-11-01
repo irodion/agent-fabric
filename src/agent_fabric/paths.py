@@ -15,3 +15,10 @@ def tilde(path: Path, env: Mapping[str, str]) -> str:
     """`/home/me/code/x` → `~/code/x`, so notes and output don't carry the user name."""
     home = Path(env["HOME"])
     return "~/" + str(path.relative_to(home)) if path.is_relative_to(home) else str(path)
+
+
+def expand(path: str, env: Mapping[str, str]) -> Path:
+    """`~/x` → x in the home folder (from `env`, like `tilde`); any other path as it is."""
+    if path == "~" or path.startswith("~/"):
+        return Path(env["HOME"]) / path[2:]
+    return Path(path)
