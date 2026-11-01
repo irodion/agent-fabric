@@ -700,14 +700,22 @@ home folder exists, and `kb doctor --fix` adds missing copies and updates outdat
 The file is the one copy of the skill text: when to write a note (rarely), the four kinds, `--ref`, `--resolve`, stdin
 for quoted text, `--agent` as the tool's name, the 500-character limit, no secrets, and what exit 1 and 2 mean.
 
+**Setup.** `scripts/install.sh` installs `kb` from the clone with `uv tool install`, then runs `kb doctor --fix`.
+The install is not editable, so agents keep the installed `kb` while the clone switches branches; rerunning the
+script after a pull updates `kb` and the skill copies. It runs in the user's own terminal, because an agent's sandbox
+can't write the agents' settings. `kb doctor` is the one place that knows what setup means: a setup UI, if one comes
+later, shows its checks.
+
 **Setup per agent.** Claude Code's and Codex's sandboxes allow writes only in the project and temp folders, so the
-inbox folder goes on each one's write list once (Claude Code: `sandbox.filesystem.allowWrite`; Codex:
-`sandbox_workspace_write.writable_roots`). A sandbox can only grant writes to a folder that exists, so
-`kb doctor --fix` creates the inbox first. Cursor CLI's sandbox needs the same where it runs (it doesn't start on the
-devbox); Copilot CLI has no OS sandbox. So that `kb note` doesn't ask for approval every time, it also goes on each
-agent's command allow list, except in Claude Code with `sandbox.autoAllowBashIfSandboxed`, which runs sandboxed
-commands without asking. Later `kb doctor` also checks these settings where it can read them; today it checks the
-inbox and the skill copies.
+inbox folder goes on each one's write list (Claude Code: `sandbox.filesystem.allowWrite` in
+`~/.claude/settings.json`; Codex: `sandbox_workspace_write.writable_roots` in `~/.codex/config.toml`). A sandbox can
+only grant writes to a folder that exists, so `kb doctor --fix` creates the inbox first, then adds it to both lists
+and changes nothing else in either file. The JSON is rewritten whole; the TOML only gains lines, and the result
+must read back with the inbox in it before it is written. A file it can't read, or a `writable_roots` that already
+lists other folders, it reports with the path to add by hand. Cursor CLI's sandbox needs the same where it runs (it
+doesn't start on the devbox); Copilot CLI has no OS sandbox. So that `kb note` doesn't ask for approval every time,
+it also goes on each agent's command allow list, except in Claude Code with `sandbox.autoAllowBashIfSandboxed`, which
+runs sandboxed commands without asking; `kb doctor` doesn't check the allow lists yet.
 
 ## 5. Processes, ports, locations
 
@@ -787,7 +795,7 @@ mypy and pytest on Python 3.13 and 3.14).
 | ingest branch left unmerged | wiki stale | nightly appends to same branch; `kb doctor` warns after 7 days |
 | vendor prunes/migrates history | source files gone | agentsview archive + daily backup keep the raw layer |
 | own automated runs captured | feedback loop | `codex exec --ephemeral`; ignore `is_automated` sessions |
-| sandbox blocks the inbox write | `kb note` exits 1, the note is lost | the error names the folder to add to the sandbox's write list; `kb doctor` reports a missing or unwritable inbox (§4.10) |
+| sandbox blocks the inbox write | `kb note` exits 1, the note is lost | the error names the folder to add to the sandbox's write list; `kb doctor` reports a missing or unwritable inbox and a write list without it, and `--fix` adds it (§4.10) |
 | agents note routine progress | inbox noise | the skill says most sessions need none; ingest drops it; tighten the description |
 | `status` note never resolved | later agents warned about a fixed problem | `kb inbox` marks it possibly stale after 14 days; `kb lint` lists it |
 | agent misnames itself (model name for tool name) | wrong `agent` on the note | environment wins over `--agent` where the agent sets one (§4.10) |
@@ -855,6 +863,10 @@ them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag 
   environment, from `--agent`, both (environment wins) and neither (exit 2); a git repo, a linked worktree and a
   folder outside git. Inside the Claude Code and Codex sandboxes with and without the inbox on the write list: the
   note is written, or exit 1 names the folder.
+- `kb doctor`: the inbox and each skill copy missing, outdated or unwritable, and `--fix` for each. Claude Code's
+  `settings.json` and Codex's `config.toml` missing, without the inbox, with it, broken, or the wrong shape; for
+  Codex also no `[sandbox_workspace_write]` table, a table without `writable_roots`, one listing other folders, and
+  a table `--fix` can't extend by adding lines (dotted keys): every other byte kept, or the file left alone.
 - Notes trial (phase 1, one week, one or two projects): notes per session, how many I rate useful, duplicates, and
   sessions where an agent should have left a note and didn't.
 - Project identity: the same repo as a main checkout, a linked worktree, a second clone, an SSH and an HTTPS remote,

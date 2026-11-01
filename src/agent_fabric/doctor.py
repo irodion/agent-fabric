@@ -6,6 +6,7 @@ from importlib.resources import files
 from pathlib import Path
 
 from agent_fabric.paths import inbox_dir, tilde
+from agent_fabric.sandboxes import claude_code, codex
 
 # User skills folders: (folder, the agents that read it, the agent home folders that make it worth checking).
 # Copilot CLI and Cursor CLI read Claude Code's folder too, so these two copies cover all four CLI agents; Cursor
@@ -14,6 +15,8 @@ SKILL_FOLDERS = (
     (".claude/skills", "Claude Code, Copilot CLI, Cursor CLI", (".claude", ".copilot", ".cursor")),
     (".codex/skills", "Codex, Cursor CLI", (".codex",)),
 )
+# Agents whose sandbox needs the inbox on its write list, by home folder (Copilot CLI has no OS sandbox).
+SANDBOXES = ((".claude", claude_code), (".codex", codex))
 
 
 def skill_source() -> str:
@@ -25,30 +28,30 @@ def _writable(folder: Path) -> bool:
     return os.access(existing, os.W_OK | os.X_OK)
 
 
-def doctor(env: Mapping[str, str], *, fix: bool = False) -> tuple[int, str]:
-    """Check the inbox and the skill copies; with `fix`, add missing and update outdated copies."""
-    lines: list[tuple[str, str, str]] = []
-    inbox = inbox_dir(env)
+Line = tuple[str, str, str]  # status, what, detail
+
+
+def _inbox(inbox: Path, env: Mapping[str, str], *, fix: bool) -> Line:
     shown = tilde(inbox, env)
     if not _writable(inbox):
-        lines.append(("problem", "inbox", f"{shown} is not writable"))
-    elif inbox.is_dir():
-        lines.append(("ok", "inbox", f"{shown} is writable"))
-    elif fix:
-        try:
-            inbox.mkdir(parents=True)
-            lines.append(("fixed", "inbox", f"{shown}: created"))
-        except OSError as e:
-            lines.append(("problem", "inbox", f"{shown}: can't create it ({e.strerror or e})"))
-    else:
-        lines.append(
-            (
-                "missing",
-                "inbox",
-                f"{shown}: `kb doctor --fix` creates it (a sandbox can only grant writes to a folder that exists)",
-            )
+        return "problem", "inbox", f"{shown} is not writable"
+    if inbox.is_dir():
+        return "ok", "inbox", f"{shown} is writable"
+    if not fix:
+        return (
+            "missing",
+            "inbox",
+            f"{shown}: `kb doctor --fix` creates it (a sandbox can only grant writes to a folder that exists)",
         )
-    home = Path(env["HOME"])
+    try:
+        inbox.mkdir(parents=True)
+    except OSError as e:
+        return "problem", "inbox", f"{shown}: can't create it ({e.strerror or e})"
+    return "fixed", "inbox", f"{shown}: created"
+
+
+def _skills(home: Path, env: Mapping[str, str], *, fix: bool) -> list[Line]:
+    lines: list[Line] = []
     source = skill_source()
     for folder, readers, agent_homes in SKILL_FOLDERS:
         if not any((home / agent_home).is_dir() for agent_home in agent_homes):
@@ -69,5 +72,17 @@ def doctor(env: Mapping[str, str], *, fix: bool = False) -> tuple[int, str]:
             lines.append(("missing", "skill", f"{where}: `kb doctor --fix` adds it"))
         else:
             lines.append(("outdated", "skill", f"{where}: `kb doctor --fix` updates it"))
-    report = "".join(f"{status:<8} {what:<6} {detail}\n" for status, what, detail in lines)
+    return lines
+
+
+def doctor(env: Mapping[str, str], *, fix: bool = False) -> tuple[int, str]:
+    """Check the inbox, the skill copies and the sandboxes' write lists; with `fix`, set up what's missing."""
+    home = Path(env["HOME"])
+    inbox = inbox_dir(env)
+    lines = [_inbox(inbox, env, fix=fix), *_skills(home, env, fix=fix)]
+    for agent_home, check in SANDBOXES:
+        if (home / agent_home).is_dir():
+            status, detail = check(home, inbox, env, fix=fix)
+            lines.append((status, "sandbox", detail))
+    report = "".join(f"{status:<8} {what:<7} {detail}\n" for status, what, detail in lines)
     return (0 if all(status in ("ok", "fixed") for status, _, _ in lines) else 1), report
