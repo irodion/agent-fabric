@@ -29,7 +29,10 @@ class Snapshot:
         return next((note for _, note in self.notes if note.id == note_id), None)
 
     def repeat_of(self, note: Note) -> tuple[Path, Note] | None:
-        """An open note with the same scope, kind and text from the last 24 h."""
+        """An open note with the same scope, kind and text from the last 24 h. A resolution is never a repeat: its
+        text may match the note it resolves, and a retried resolve is caught by `resolved_by`."""
+        if note.resolves:
+            return None
         for file, old in self.open():
             same = (old.scope, old.kind, old.text) == (note.scope, note.kind, note.text)
             if same and timedelta(0) <= note.time - old.time <= REPEAT_WINDOW:
@@ -52,11 +55,14 @@ class Inbox:
         return Snapshot(sorted(found, key=lambda item: (item[1].time, item[1].id)))
 
     def add(self, note: Note) -> tuple[Path, Note]:
-        """Write a new note file; never overwrites, drawing a fresh id if the name is taken."""
+        """Write a new note file; never overwrites, drawing a fresh id if a note in the inbox already has it."""
         self.path.mkdir(parents=True, exist_ok=True)
         for _ in range(ID_ATTEMPTS):
             data = render(note).encode("utf-8")  # before the file exists: an encoding error leaves nothing behind
             file = self.path / note.filename
+            if any(self.path.glob(f"*-{note.id}.md")):  # ids name notes across days, the file name only within one
+                note = replace(note, id=new_id())
+                continue
             try:
                 with file.open("xb") as f:
                     f.write(data)

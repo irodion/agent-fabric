@@ -15,6 +15,7 @@ from typing import Any
 SCHEMA = "fabric.note/1"
 KINDS = ("status", "gotcha", "fix", "decision")
 MAX_TEXT = 500
+ID = re.compile(r"n[0-9a-f]{6}")
 
 
 @dataclass(frozen=True)
@@ -41,13 +42,80 @@ class Note:
         return f"{self.time:%Y-%m-%d}-{self.id}.md"
 
 
+# Extensions that make a bare name (no folder) a file name; `json.loads`, `example.com` and `v1.2` are not.
+FILE_EXTENSIONS = frozenset(
+    [
+        "bash",
+        "c",
+        "cc",
+        "cfg",
+        "cjs",
+        "conf",
+        "cpp",
+        "cs",
+        "css",
+        "csv",
+        "diff",
+        "dockerfile",
+        "env",
+        "ex",
+        "exs",
+        "go",
+        "gradle",
+        "graphql",
+        "h",
+        "hpp",
+        "html",
+        "ini",
+        "ipynb",
+        "java",
+        "js",
+        "json",
+        "jsonl",
+        "jsx",
+        "kt",
+        "lock",
+        "log",
+        "lua",
+        "md",
+        "mjs",
+        "mk",
+        "nix",
+        "patch",
+        "php",
+        "proto",
+        "py",
+        "pyi",
+        "rb",
+        "rs",
+        "rst",
+        "scss",
+        "sh",
+        "sql",
+        "svelte",
+        "swift",
+        "tf",
+        "toml",
+        "ts",
+        "tsx",
+        "txt",
+        "vue",
+        "xml",
+        "yaml",
+        "yml",
+        "zsh",
+    ]
+)
+
+
 def ref_path(ref: str) -> str | None:
     """The file a ref points at, if it looks like one: `src/x.py`, `src/x.rs:12:5`, `tests/t.py::test_a`,
-    `README.md`. None for commands, URLs, commits and dotted names such as `httpx.ConnectError`."""
+    `README.md`. None for commands, URLs, commits and dotted names such as `httpx.ConnectError` or `json.loads`."""
     if re.search(r"\s", ref) or "://" in ref or re.fullmatch(r"[0-9a-f]{7,40}", ref):
         return None
     path = re.sub(r"(:\d+)+(-\d+)?$", "", ref.split("::", 1)[0])
-    if "/" in path or re.fullmatch(r"[^/]+\.[a-z0-9]{1,8}", path):
+    stem, dot, extension = path.rpartition(".")
+    if "/" in path or (stem and dot and extension.lower() in FILE_EXTENSIONS):
         return path
     return None
 
@@ -70,7 +138,7 @@ def missing_ref(ref: str, bases: list[Path]) -> str | None:
 
 
 def new_id() -> str:
-    """A random id; `Inbox.add` draws another if the day's file name is already taken."""
+    """A random id; `Inbox.add` draws another if a note in the inbox already has it."""
     return "n" + secrets.token_hex(3)
 
 
@@ -84,7 +152,34 @@ def parse(text: str) -> Note:
     if fields.pop("schema", None) != SCHEMA:
         raise ValueError(f"not a {SCHEMA} note")
     fields["time"] = datetime.strptime(fields["time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
-    return Note(**fields, text=body.removesuffix("\n"))
+    note = Note(**fields, text=body.removesuffix("\n"))
+    _check(note)
+    return note
+
+
+def _is_id(value: object) -> bool:
+    return isinstance(value, str) and ID.fullmatch(value) is not None
+
+
+def _check(note: Note) -> None:
+    """Any agent can write the inbox, so a note read back is checked field by field before `kb` relies on it."""
+    strings: dict[str, object] = {"cwd": note.cwd, "text": note.text}
+    optional: dict[str, object] = {"project": note.project, "branch": note.branch, "commit": note.commit}
+    agent: object = note.agent
+    refs: object = note.refs
+    if not (
+        _is_id(note.id)
+        and note.kind in KINDS
+        and isinstance(agent, dict)
+        and isinstance(agent.get("name"), str)
+        and all(isinstance(value, str) for value in agent.values())
+        and all(isinstance(value, str) for value in strings.values())
+        and all(value is None or isinstance(value, str) for value in optional.values())
+        and isinstance(refs, list)
+        and all(isinstance(ref, str) for ref in refs)
+        and (note.resolves is None or _is_id(note.resolves))
+    ):
+        raise ValueError("a note field has the wrong type or form")
 
 
 def render(note: Note) -> str:

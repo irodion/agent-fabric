@@ -68,9 +68,13 @@ def test_a_path_ref_that_does_not_exist_is_kept_with_a_warning(kb: Kb) -> None:
         "9d8e7f6",
         "ModuleNotFoundError",
         "httpx.ConnectError",
+        "json.loads",
+        "os.path",
+        "example.com",
+        "v1.2",
         "origin/main",
     ],
-    ids=["command", "url", "commit", "error", "dotted-name", "git-ref"],
+    ids=["command", "url", "commit", "error", "dotted-name", "function", "module", "host", "version", "git-ref"],
 )
 def test_refs_that_are_not_paths_get_no_warning(kb: Kb, ref: str) -> None:
     assert kb("note", "--kind", "fix", "--agent", "Codex", "--ref", ref, "the fixture needs a socket").stderr == ""
@@ -101,6 +105,34 @@ def test_the_environment_wins_over_the_agent_flag(kb: Kb) -> None:
     kb.env.update(CLAUDE_CODE_ENV)
 
     assert '"name": "Claude Code", "from": "env"' in agent_line(kb, "--agent", "Claude Sonnet")
+
+
+CODEX_ENV = {"CODEX_THREAD_ID": "019a3f00-0000-7000-8000-000000000002"}
+
+
+def test_codex_is_recognised_from_its_environment(kb: Kb) -> None:
+    kb.env.update(CODEX_ENV)
+
+    assert (
+        agent_line(kb) == 'agent: {"name": "Codex", "from": "env", "session": "019a3f00-0000-7000-8000-000000000002"}'
+    )
+
+
+def test_a_tool_named_in_the_flag_wins_over_an_inherited_environment(kb: Kb) -> None:
+    kb.env.update(CLAUDE_CODE_ENV)  # e.g. Copilot CLI started from a Claude Code session
+
+    assert agent_line(kb, "--agent", "copilot cli") == 'agent: {"name": "Copilot CLI", "from": "flag"}'
+
+
+def test_two_agents_in_the_environment_need_the_flag_to_tell_which(kb: Kb) -> None:
+    kb.env.update(CLAUDE_CODE_ENV | CODEX_ENV)  # Codex started from Claude Code, or the other way round
+    unflagged = kb("note", "--kind", "gotcha", "uv needs --cache-dir in the sandbox")
+
+    assert (unflagged.exit_code, "--agent" in unflagged.stderr, agent_line(kb, "--agent", "Codex")) == (
+        2,
+        True,
+        'agent: {"name": "Codex", "from": "env", "session": "019a3f00-0000-7000-8000-000000000002"}',
+    )
 
 
 def test_an_unknown_agent_must_name_its_tool(kb: Kb) -> None:
@@ -163,6 +195,14 @@ def test_a_resolved_note_and_its_resolution_drop_out_of_the_inbox(kb: Kb) -> Non
     kb("note", "--agent", "Codex", "--resolve", broken, "they pass again after the pool fix")
 
     assert kb("inbox").stdout == ""
+
+
+def test_a_resolution_worded_like_its_note_still_resolves_it(kb: Kb) -> None:
+    broken = note_id(kb, "integration tests fail on main", kind="status")
+    kb.later(hours=2)
+    resolution = kb("note", "--agent", "Codex", "--resolve", broken, "integration tests fail on main")
+
+    assert (resolution.stdout.split()[0] != broken, kb("inbox").stdout) == (True, "")
 
 
 def test_resolving_an_unknown_note_is_refused(kb: Kb) -> None:
@@ -287,3 +327,26 @@ def test_a_missing_file_name_gets_a_warning(kb: Kb) -> None:
     result = kb("note", "--kind", "fix", "--agent", "Codex", "--ref", "CHANGELOG.md", "release notes are generated")
 
     assert "CHANGELOG.md" in result.stderr
+
+
+def test_an_id_used_on_an_earlier_day_is_not_drawn_again(kb: Kb, monkeypatch: pytest.MonkeyPatch) -> None:
+    drawn = iter(["aaaaaa", "aaaaaa", "bbbbbb"])
+    monkeypatch.setattr("agent_fabric.notes.secrets.token_hex", lambda _: next(drawn))
+    first = note_id(kb, "integration tests fail on main", kind="status")
+    kb.later(days=2)
+    second = note_id(kb, "the build needs node 22", kind="status")
+
+    assert (first, second) == ("naaaaaa", "nbbbbbb")
+
+
+def test_a_kind_given_with_resolve_is_refused(kb: Kb) -> None:
+    broken = note_id(kb, "integration tests fail on main", kind="status")
+    result = kb("note", "--kind", "gotcha", "--agent", "Codex", "--resolve", broken, "they pass again")
+
+    assert (result.exit_code, "--kind" in result.stderr) == (2, True)
+
+
+def test_an_empty_resolve_id_is_refused_as_such(kb: Kb) -> None:
+    result = kb("note", "--agent", "Codex", "--resolve", "", "they pass again")
+
+    assert (result.exit_code, "--resolve" in result.stderr) == (2, True)
