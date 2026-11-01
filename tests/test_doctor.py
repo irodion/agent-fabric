@@ -1,6 +1,8 @@
 """Seam D: `kb doctor`, through the in-process CLI with a fake home holding the agents' skills folders."""
 
+import json
 from importlib.resources import files
+from pathlib import Path
 
 import pytest
 from conftest import Kb
@@ -18,18 +20,36 @@ def make_inbox(kb: Kb) -> None:
     (kb.home / ".local" / "share" / "agent-fabric" / "inbox").mkdir(parents=True)
 
 
+def claude_settings(kb: Kb, settings: object) -> Path:
+    path = kb.home / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=2) + "\n")
+    return path
+
+
+def codex_config(kb: Kb, text: str) -> Path:
+    path = kb.home / ".codex" / "config.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
 def test_doctor_is_happy_with_a_writable_inbox_and_matching_skills(kb: Kb) -> None:
     make_inbox(kb)
     install_skill(kb, ".claude")
     install_skill(kb, ".codex")
+    claude_settings(kb, {"sandbox": {"filesystem": {"allowWrite": ["~/.local/share/agent-fabric/inbox"]}}})
+    codex_config(kb, f'[sandbox_workspace_write]\nwritable_roots = ["{kb.home}/.local/share/agent-fabric/inbox"]\n')
 
     result = kb("doctor")
 
     assert (result.exit_code, result.stdout) == (
         0,
-        "ok       inbox  ~/.local/share/agent-fabric/inbox is writable\n"
-        "ok       skill  ~/.claude/skills/kb-note/SKILL.md (Claude Code, Copilot CLI, Cursor CLI)\n"
-        "ok       skill  ~/.codex/skills/kb-note/SKILL.md (Codex, Cursor CLI)\n",
+        "ok       inbox   ~/.local/share/agent-fabric/inbox is writable\n"
+        "ok       skill   ~/.claude/skills/kb-note/SKILL.md (Claude Code, Copilot CLI, Cursor CLI)\n"
+        "ok       skill   ~/.codex/skills/kb-note/SKILL.md (Codex, Cursor CLI)\n"
+        "ok       sandbox ~/.claude/settings.json lets Claude Code write the inbox\n"
+        "ok       sandbox ~/.codex/config.toml lets Codex write the inbox\n",
     )
 
 
@@ -40,10 +60,10 @@ def test_doctor_reports_a_missing_skill_copy_and_how_to_add_it(kb: Kb) -> None:
 
     result = kb("doctor")
 
-    missing = [line for line in result.stdout.splitlines() if line.startswith("missing")]
+    missing = [line for line in result.stdout.splitlines() if line.startswith("missing  skill")]
     assert (result.exit_code, missing) == (
         1,
-        ["missing  skill  ~/.codex/skills/kb-note/SKILL.md (Codex, Cursor CLI): `kb doctor --fix` adds it"],
+        ["missing  skill   ~/.codex/skills/kb-note/SKILL.md (Codex, Cursor CLI): `kb doctor --fix` adds it"],
     )
 
 
@@ -52,7 +72,7 @@ def test_doctor_reports_an_outdated_skill_copy(kb: Kb) -> None:
 
     result = kb("doctor")
 
-    assert (result.exit_code, "outdated skill  ~/.claude/skills/kb-note/SKILL.md" in result.stdout) == (1, True)
+    assert (result.exit_code, "outdated skill   ~/.claude/skills/kb-note/SKILL.md" in result.stdout) == (1, True)
 
 
 def test_doctor_skips_agents_that_are_not_installed(kb: Kb) -> None:
@@ -73,7 +93,7 @@ def test_doctor_reports_an_inbox_it_cannot_write(kb: Kb) -> None:
 
     assert (
         result.exit_code,
-        "problem  inbox  ~/.local/share/agent-fabric/inbox is not writable" in result.stdout,
+        "problem  inbox   ~/.local/share/agent-fabric/inbox is not writable" in result.stdout,
     ) == (
         1,
         True,
@@ -95,7 +115,7 @@ def test_doctor_reports_a_missing_inbox_folder_because_sandboxes_need_it(kb: Kb)
 
     assert (result.exit_code, result.stdout.splitlines()[0]) == (
         1,
-        "missing  inbox  ~/.local/share/agent-fabric/inbox: `kb doctor --fix` creates it "
+        "missing  inbox   ~/.local/share/agent-fabric/inbox: `kb doctor --fix` creates it "
         "(a sandbox can only grant writes to a folder that exists)",
     )
 
@@ -112,7 +132,7 @@ def test_fix_reports_a_skills_folder_it_cannot_write(kb: Kb) -> None:
 
     assert (result.exit_code, result.stdout.splitlines()[1]) == (
         1,
-        "problem  skill  ~/.claude/skills/kb-note/SKILL.md (Claude Code, Copilot CLI, Cursor CLI): "
+        "problem  skill   ~/.claude/skills/kb-note/SKILL.md (Claude Code, Copilot CLI, Cursor CLI): "
         "can't write it (Permission denied)",
     )
 
@@ -127,7 +147,160 @@ def test_doctor_checks_the_claude_skills_folder_for_copilot_or_cursor_alone(kb: 
     assert (result.exit_code, result.stdout.splitlines()[1:]) == (
         1,
         [
-            "missing  skill  ~/.claude/skills/kb-note/SKILL.md (Claude Code, Copilot CLI, Cursor CLI): "
+            "missing  skill   ~/.claude/skills/kb-note/SKILL.md (Claude Code, Copilot CLI, Cursor CLI): "
             "`kb doctor --fix` adds it"
         ],
+    )
+
+
+def test_doctor_reports_that_claude_codes_sandbox_cannot_write_the_inbox(kb: Kb) -> None:
+    make_inbox(kb)
+    install_skill(kb, ".claude")
+    claude_settings(kb, {"sandbox": {"filesystem": {"allowWrite": ["~/.local/share/tuicr"]}}})
+
+    result = kb("doctor")
+
+    assert (result.exit_code, result.stdout.splitlines()[2]) == (
+        1,
+        "missing  sandbox ~/.claude/settings.json: the inbox is not in sandbox.filesystem.allowWrite; "
+        "`kb doctor --fix` adds it",
+    )
+
+
+def test_fix_adds_the_inbox_to_claude_codes_sandbox_and_keeps_the_other_settings(kb: Kb) -> None:
+    make_inbox(kb)
+    path = claude_settings(
+        kb,
+        {
+            "permissions": {"allow": ["Bash(tuicr review list *)"]},
+            "sandbox": {"enabled": True, "filesystem": {"allowWrite": ["~/.local/share/tuicr"]}},
+        },
+    )
+
+    fixed = kb("doctor", "--fix").stdout.splitlines()[-1]
+
+    assert (fixed, json.loads(path.read_text())) == (
+        "fixed    sandbox ~/.claude/settings.json: added ~/.local/share/agent-fabric/inbox to "
+        "sandbox.filesystem.allowWrite",
+        {
+            "permissions": {"allow": ["Bash(tuicr review list *)"]},
+            "sandbox": {
+                "enabled": True,
+                "filesystem": {"allowWrite": ["~/.local/share/tuicr", "~/.local/share/agent-fabric/inbox"]},
+            },
+        },
+    )
+
+
+def test_doctor_reports_that_codexs_sandbox_cannot_write_the_inbox(kb: Kb) -> None:
+    make_inbox(kb)
+    install_skill(kb, ".codex")
+    codex_config(kb, "[tui]\nscreen_reader_detection_done = true\n")
+
+    result = kb("doctor")
+
+    assert (result.exit_code, result.stdout.splitlines()[2]) == (
+        1,
+        "missing  sandbox ~/.codex/config.toml: the inbox is not in sandbox_workspace_write.writable_roots; "
+        "`kb doctor --fix` adds it",
+    )
+
+
+def test_fix_adds_a_write_table_for_the_inbox_to_codexs_config_and_keeps_the_rest(kb: Kb) -> None:
+    make_inbox(kb)
+    path = codex_config(kb, '# my settings\n[tui]\nscreen_reader_detection_done = true\n\n[tui.nux]\n"m" = 1\n')
+    inbox = kb.home / ".local" / "share" / "agent-fabric" / "inbox"
+
+    fixed = kb("doctor", "--fix").stdout.splitlines()[-1]
+
+    assert (fixed, path.read_text()) == (
+        f"fixed    sandbox ~/.codex/config.toml: added {inbox} to sandbox_workspace_write.writable_roots",
+        '# my settings\n[tui]\nscreen_reader_detection_done = true\n\n[tui.nux]\n"m" = 1\n'
+        f'\n[sandbox_workspace_write]\nwritable_roots = ["{inbox}"]\n',
+    )
+
+
+def test_fix_adds_writable_roots_under_codexs_existing_write_table(kb: Kb) -> None:
+    make_inbox(kb)
+    path = codex_config(kb, "[sandbox_workspace_write]  # writes\nnetwork_access = true\n\n[tui]\nx = 1\n")
+    inbox = kb.home / ".local" / "share" / "agent-fabric" / "inbox"
+
+    kb("doctor", "--fix")
+
+    assert path.read_text() == (
+        f'[sandbox_workspace_write]  # writes\nwritable_roots = ["{inbox}"]\nnetwork_access = true\n\n[tui]\nx = 1\n'
+    )
+
+
+def test_fix_leaves_codexs_existing_writable_roots_for_the_user_to_extend(kb: Kb) -> None:
+    make_inbox(kb)
+    config = '[sandbox_workspace_write]\nwritable_roots = [\n  "/srv/cache",\n]\n'
+    path = codex_config(kb, config)
+    inbox = kb.home / ".local" / "share" / "agent-fabric" / "inbox"
+
+    result = kb("doctor", "--fix")
+
+    assert (result.exit_code, result.stdout.splitlines()[-1], path.read_text()) == (
+        1,
+        f'problem  sandbox ~/.codex/config.toml: add "{inbox}" to sandbox_workspace_write.writable_roots by hand',
+        config,
+    )
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        "sandbox_workspace_write.network_access = true\n",
+        'note = """\n[sandbox_workspace_write]\n"""\n[sandbox_workspace_write]\nnetwork_access = true\n',
+    ],
+    ids=["dotted keys", "a header inside a string"],
+)
+def test_fix_leaves_a_codex_config_it_cannot_edit_safely_unchanged(kb: Kb, config: str) -> None:
+    make_inbox(kb)
+    path = codex_config(kb, config)
+
+    result = kb("doctor", "--fix")
+
+    assert (result.exit_code, result.stdout.splitlines()[-1].endswith("by hand"), path.read_text()) == (
+        1,
+        True,
+        config,
+    )
+
+
+@pytest.mark.parametrize(
+    ("file", "content"),
+    [
+        (".claude/settings.json", '{"sandbox": '),
+        (".claude/settings.json", '{"sandbox": {"filesystem": {"allowWrite": "~/.local/share/agent-fabric"}}}'),
+        (".claude/settings.json", '{"sandbox": true}'),
+        (".claude/settings.json", "[]"),
+        (".codex/config.toml", "[tui\n"),
+        (".codex/config.toml", "sandbox_workspace_write = 1\n"),
+    ],
+    ids=[
+        "broken JSON",
+        "a string for the list",
+        "a value for the object",
+        "not an object",
+        "broken TOML",
+        "a value for the table",
+    ],
+)
+def test_fix_reports_and_keeps_an_agent_settings_file_it_cannot_read(kb: Kb, file: str, content: str) -> None:
+    make_inbox(kb)
+    path = kb.home / file
+    path.parent.mkdir(parents=True)
+    path.write_text(content)
+
+    result = kb("doctor", "--fix")
+
+    assert (
+        result.exit_code,
+        result.stdout.splitlines()[-1].startswith(f"problem  sandbox ~/{file}: can't read it ("),
+        path.read_text(),
+    ) == (
+        1,
+        True,
+        content,
     )

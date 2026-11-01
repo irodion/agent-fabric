@@ -68,7 +68,11 @@ def run(argv: list[str], *, env: Mapping[str, str], cwd: Path, stdin: TextIO, no
     scope.add_argument("--project", help="a project id, or a folder outside git (default: the current one)")
     scope.add_argument("--all-projects", action="store_true", help="every project's notes")
     doctor_cmd = commands.add_parser("doctor")
-    doctor_cmd.add_argument("--fix", action="store_true", help="add missing and update outdated skill copies")
+    doctor_cmd.add_argument(
+        "--fix",
+        action="store_true",
+        help="set up what is missing: the inbox, the skill copies, the sandbox write lists",
+    )
     try:
         args = parser.parse_args(argv)
         if args.command == "doctor":
