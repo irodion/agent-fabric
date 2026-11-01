@@ -705,8 +705,9 @@ that between them reach all four CLI agents: `~/.claude/skills/` (read by Claude
 `~/.agents/skills/` (Codex and Copilot CLI). Copilot CLI stopped reading `~/.claude/` in 1.0.36 and reads personal
 skills from `~/.copilot/skills/` and `~/.agents/skills/` (`copilot skill --help`, 1.0.105); Codex still reads
 `$CODEX_HOME/skills/` but calls it deprecated in favour of `~/.agents/skills/` (source, 0.162.1). The first setup
-put the second copy in `~/.codex/skills/`, where Copilot CLI never saw it (corrected 2026-11-01); `kb doctor --fix`
-removes that copy once `~/.agents/skills/` has one, so Codex doesn't load the skill twice. Only the name and
+put the second copy in `$CODEX_HOME/skills/` (`~/.codex/skills/` by default), where Copilot CLI never saw it
+(corrected 2026-11-01); `kb doctor --fix` removes that copy, wherever `CODEX_HOME` puts it, once
+`~/.agents/skills/` has one, so Codex doesn't load the skill twice. Only the name and
 description sit in the agent's context; the body loads when the agent decides to use it. `CLAUDE_CONFIG_DIR` moves
 Claude Code's folder, settings and skills with it; Cursor CLI is assumed to keep reading `~/.claude/skills/`, which
 then gets a copy of its own. With `COPILOT_HOME` set, Copilot CLI reads `$COPILOT_HOME/skills/` instead of
@@ -750,6 +751,9 @@ kb hook stop --agent <claude-code|codex|copilot|cursor>    # end of a turn: the 
 | Codex 0.162.1 | `~/.codex/hooks.json` | `SessionStart` | `Stop` | the same as Claude Code |
 | Copilot CLI 1.0.105 | `~/.copilot/hooks/kb.json` (kb's own file) | `sessionStart` | `agentStop` | `additionalContext`; `decision: "block"` with `reason` |
 | Cursor CLI 2026.10.22 | `~/.cursor/hooks.json` | `sessionStart` | `stop` | `additional_context`; `followup_message` |
+
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `COPILOT_HOME` move the first three files with their folders, as they move
+the settings and skills: `$CLAUDE_CONFIG_DIR/settings.json`, `$CODEX_HOME/hooks.json`, `$COPILOT_HOME/hooks/kb.json`.
 
 From each agent's hooks reference, and Codex's source at `rust-v0.162.1` (2026-11-01); the trial checks each in a
 live session (§11). Each sends the hook its input as JSON on stdin and runs user hooks in every project. Claude
@@ -951,12 +955,13 @@ them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag 
   Codex also no `[sandbox_workspace_write]` table, a table without `writable_roots`, one listing other folders, and
   a table `--fix` can't extend by adding lines (dotted keys): every other byte kept, or the file left alone.
   Claude Code counts as installed by `~/.claude.json` or its settings file, not by `~/.claude`, which the skill
-  copy creates for Copilot CLI or Cursor CLI alone: no Claude Code settings are written for them, and Claude Code
-  known only by `~/.claude.json` gets its copy. An entry for a folder holding the inbox; CRLF line endings kept; an
-  unreadable skill copy; `CLAUDE_CONFIG_DIR` and `CODEX_HOME`. The copy in `~/.agents/skills/` for Codex and
-  Copilot CLI, the old `~/.codex/skills/` copy removed only once the new one is in place, and `COPILOT_HOME`. Each
-  agent's hooks file missing, without kb's entries, with them, with an outdated one, broken or the wrong shape, and
-  with other hooks, which are kept; `--hooks start`, `stop` and `none` recorded, and the left-out entries removed.
+  copy creates for Cursor CLI alone: no Claude Code settings are written for it, and Claude Code known only by
+  `~/.claude.json` gets its copy. An entry for a folder holding the inbox; CRLF line endings kept; an unreadable
+  skill copy; `CLAUDE_CONFIG_DIR` and `CODEX_HOME`. The copy in `~/.agents/skills/` for Codex and Copilot CLI, the
+  old copy in `$CODEX_HOME/skills/` (default and moved) removed only once the new one is in place, and
+  `COPILOT_HOME`. Each agent's hooks file missing, without kb's entries, with them, with an outdated one, broken or
+  the wrong shape, and with other hooks, which are kept; the hooks files under `CLAUDE_CONFIG_DIR`, `CODEX_HOME`
+  and `COPILOT_HOME`; `--hooks start`, `stop` and `none` recorded, and the left-out entries removed.
 - `kb hook start`: no notes, open notes, only resolved ones, and outside git; each agent's output format. `kb hook
   stop`: before 10 minutes (silent), the first turn after (asks), later turns (silent), `stop_hook_active`
   (silent), a marker it can't write (silent), old markers removed. Both: Cursor's input to the `claude-code` entry,
