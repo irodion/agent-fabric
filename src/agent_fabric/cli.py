@@ -13,8 +13,11 @@ from pathlib import Path
 from typing import TextIO
 
 from agent_fabric.agents import detect_agent
+from agent_fabric.context import Context
 from agent_fabric.doctor import doctor
-from agent_fabric.gitinfo import git_facts
+from agent_fabric.gitinfo import git_facts, git_project
+from agent_fabric.hooks import AGENTS, HOOKS
+from agent_fabric.hooks import run as run_hook
 from agent_fabric.inbox import Inbox, Snapshot
 from agent_fabric.notes import KINDS, MAX_TEXT, Note, missing_ref, new_id
 from agent_fabric.paths import expand, inbox_dir, tilde
@@ -25,16 +28,6 @@ class Result:
     exit_code: int
     stdout: str
     stderr: str
-
-
-@dataclass(frozen=True)
-class Context:
-    """What a command sees of the world; `main` fills it from the process, tests pass their own."""
-
-    env: Mapping[str, str]
-    cwd: Path
-    stdin: TextIO
-    now: datetime
 
 
 STALE_AFTER = timedelta(days=14)
@@ -71,17 +64,32 @@ def run(argv: list[str], *, env: Mapping[str, str], cwd: Path, stdin: TextIO, no
     doctor_cmd.add_argument(
         "--fix",
         action="store_true",
-        help="set up what is missing: the inbox, the skill copies, the sandbox write lists",
+        help="set up what is missing: the inbox, the skill copies, the sandbox write lists, the hooks",
     )
+    doctor_cmd.add_argument(
+        "--hooks",
+        type=_hooks,
+        metavar="start,stop|start|stop|none",
+        help="with --fix: which hooks to install, recorded for later runs (default: both)",
+    )
+    hook_cmd = commands.add_parser("hook", help="run by the agents' hooks (docs/design.md §4.10)")
+    hook_cmd.add_argument("event", choices=HOOKS)
+    hook_cmd.add_argument("--agent", choices=AGENTS, required=True)
+    ctx = Context(env=env, cwd=cwd, stdin=stdin, now=now)
     try:
         args = parser.parse_args(argv)
+        if args.command == "hook":
+            return Result(0, run_hook(args.event, args.agent, ctx), "")
         if args.command == "doctor":
-            exit_code, report = doctor(env, fix=args.fix)
+            if args.hooks is not None and not args.fix:
+                raise UsageError("--hooks goes with --fix, which records the choice")
+            exit_code, report = doctor(env, fix=args.fix, hooks=args.hooks)
             return Result(exit_code, report, "")
         inbox = Inbox(inbox_dir(env))
-        ctx = Context(env=env, cwd=cwd, stdin=stdin, now=now)
         return _note(args, inbox, ctx) if args.command == "note" else _inbox(args, inbox, ctx)
     except UsageError as e:
+        if argv[:1] == ["hook"]:
+            return Result(0, "", "")  # an agent's hook never fails (docs/design.md §4.10)
         return Result(2, "", f"kb: {e}\n")
 
 
@@ -165,6 +173,13 @@ def _note(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
     return Result(0, f"{note.id} {path}\n", "".join(warnings))
 
 
+def _hooks(value: str) -> tuple[str, ...]:
+    chosen = [] if value == "none" else value.split(",")
+    if not set(chosen) <= set(HOOKS) or len(set(chosen)) < len(chosen):
+        raise argparse.ArgumentTypeError(f"{value!r}: give start,stop, start, stop or none")
+    return tuple(hook for hook in HOOKS if hook in chosen)
+
+
 def _age(value: str) -> timedelta:
     match = re.fullmatch(r"(\d+)([dh])", value)
     if not match:
@@ -184,7 +199,7 @@ def _inbox(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
     elif args.project:
         scope = _project(args.project, ctx)
     else:
-        scope = git_facts(ctx.cwd).project or tilde(ctx.cwd, ctx.env)
+        scope = git_project(ctx.cwd) or tilde(ctx.cwd, ctx.env)
     notes = [
         note
         for _, note in (snapshot.notes if args.all else snapshot.open())
@@ -203,7 +218,7 @@ def _project(value: str, ctx: Context) -> str:
     folder = Path(os.path.normpath(ctx.cwd / expand(value, ctx.env)))
     if not folder.is_dir():
         return value
-    return git_facts(folder).project or tilde(folder, ctx.env)
+    return git_project(folder) or tilde(folder, ctx.env)
 
 
 def _shown(value: str) -> str:

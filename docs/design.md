@@ -42,6 +42,7 @@ Switch freely between coding agents without losing the history of what was done 
 | Retrieval | Pull only (CLI/MCP), manually triggered | Avoids context pollution and memory-poisoning via injection |
 | Agent notes | `kb note` CLI + `kb-note` skill → local inbox; the wiki only through ingest (§4.10) | Agents notice things no digest records; a CLI works in every agent, and a skill loads only when used |
 | Note reminders | A session-start hook (reminder + count of open notes) and an end-of-turn hook (asks once per session), installed by `scripts/install.sh`; either can be left out (§4.10) | A skill alone waits for the agent to think of it; at session end the agent can no longer act |
+| Setup report | `kb doctor` (and so `install.sh`) prints one TOON document after AXI: counts, a row per check, next steps for the user (§4.10) | Agents run `kb doctor` and must tell me what to do; their sandbox can't do setup |
 | Wiki ingest | Manual (`kb ingest`) and nightly, onto a review branch | Review gate before anything becomes canon |
 | Live panel | Rules detect, small model only phrases and extracts decisions | Rules measurably work; LLM judgement alone did not |
 | OpenHands | Not used; event model borrowed | It cannot observe IDE sessions |
@@ -739,9 +740,11 @@ kb hook stop --agent <claude-code|codex|copilot|cursor>    # end of a turn: the 
   flaky state, a trap, an error and its fix, a decision and its reason)? If so, leave it with `kb note`. If not,
   just stop. kb asks this once per session."* The answer costs one turn; shorter sessions aren't asked, and the
   trial (§10) tunes the 10 minutes. A marker per session in `~/.local/share/agent-fabric/hooks/` records when it
-  started and that it was asked; markers older than 7 days are removed. Where the marker can't be written, the
+  started and that it was asked; markers older than 7 days are removed. A marker is written whole or not at all;
+  one kb can't read starts the session over rather than leave it unasked. Where the marker can't be written, the
   hook stays silent rather than ask every turn. It also stays silent when the agent is already continuing because
-  of a stop hook (`stop_hook_active`).
+  of a stop hook (`stop_hook_active`), and when the turn didn't complete: Cursor's `status` is `aborted` or `error`,
+  or Copilot CLI's `stopReason` isn't `end_turn` (Claude Code runs no Stop hook on an interrupt).
 - **Never in the way.** Any error, such as unreadable input or a missing inbox, prints nothing and exits 0, and
   each hook entry has a 10-second timeout: a session never fails or waits because of `kb`.
 
@@ -773,7 +776,51 @@ can't write the agents' settings. `kb doctor` is the one place that knows what s
 later, shows its checks. `scripts/install.sh --hooks start,stop` (the default), `start`, `stop` or `none` chooses
 the hooks: it passes the choice to `kb doctor --fix --hooks`, which records it as `hooks` under `[notes]` in
 `~/.config/agent-fabric/config.toml`, installs those hooks and removes kb's entries for the others. Later
-`kb doctor` runs check against the recorded choice.
+`kb doctor` runs, and the script rerun without `--hooks`, keep to the recorded choice; with none recorded, both.
+`kb doctor` changes only that one line of the file, in the file's own line endings, and leaves the file and the
+hooks alone where it can't. In the agents' hooks files, kb knows its handlers by their command (a program named
+`kb`, by name or by path, with `hook` first) and changes no other: where one shares a Claude Code or Codex group
+with the user's handlers, `--fix` takes it out of that group and keeps theirs.
+
+**What `kb doctor` prints.** An agent reads the report as often as I do: it runs `kb doctor` when a note fails (the
+checks only read, so they work in its sandbox), or reads what `install.sh` printed. So the report follows AXI's
+principles for agent-facing CLIs ([axi.md](https://axi.md/)): one TOON document (spec 4.4) with the counts first,
+one row per check, an explicit "nothing to do", and next steps that say who takes them. Setup steps are always the
+user's, because an agent's sandbox can't change the agents' settings; the closing `help` line asks the agent to
+explain them in plain words. TOON quotes a value with a comma, a colon or a quote in it.
+
+```text
+summary: "3 of 9 checks need fixing: 2 by kb doctor --fix, 1 by hand"
+checks[9]{status,check,path,detail}:
+  ok,kb,~/.local/bin/kb,on PATH
+  ok,inbox,~/.local/share/agent-fabric/inbox,writable
+  ok,skill,~/.claude/skills/kb-note/SKILL.md,for Claude Code and Cursor CLI
+  missing,skill,~/.agents/skills/kb-note/SKILL.md,for Codex and Copilot CLI
+  ok,sandbox,~/.claude/settings.json,Claude Code can write the inbox
+  problem,sandbox,~/.codex/config.toml,kb can't add the inbox to sandbox_workspace_write.writable_roots without changing other lines
+  ok,hooks,~/.claude/settings.json,start and stop
+  missing,hooks,~/.codex/hooks.json,start and stop
+  ok,hooks,~/.cursor/hooks.json,start and stop
+next[2]{by,step}:
+  user,"In your own terminal, not in an agent's session, run kb doctor --fix (or rerun scripts/install.sh)"
+  user,Add /home/me/.local/share/agent-fabric/inbox to sandbox_workspace_write.writable_roots in ~/.codex/config.toml
+help: "These steps are for the user: an agent's sandbox can't change the agents' settings. Agents: explain them to the user in plain words."
+```
+
+- **Statuses:** `ok`, `fixed`, `missing` and `outdated` (both of which `--fix` fixes), and `problem` (by hand).
+- **Next steps:** one step to run `kb doctor --fix` for every `missing` or `outdated` row; one by-hand step per
+  `problem`; after `--fix` installs or changes Codex's hooks (not when it only removes one), approving them in
+  `/hooks`; with `kb` not on `PATH`, adding its folder (`uv tool update-shell`); with another `kb` first on `PATH`,
+  taking it off; and after a `--fix` that left rows `missing` or `outdated` behind a problem, running it again once
+  the problem is fixed. Nothing to do is `next: []` and a summary that says so.
+- **`kb` row:** whether the first `kb` on `PATH`, where agents look for it, is the one `install.sh` installed: uv's
+  link into its tool folder (`UV_TOOL_DIR`, or `uv/tools` under the XDG data folder). Another, such as a
+  virtualenv's, is a `problem`, since agents would run it. It replaces `install.sh`'s own warning.
+- **Hooks rows** name every kind of trouble in a file (*"start missing; stop differs from this kb's"*), and a
+  `fixed` row what changed (*"installed start; updated stop"*, *"removed start"*).
+- **`install.sh`** keeps uv quiet, so what it prints is this report; its one error of its own, uv not installed,
+  comes in the same shape. Bad arguments print its usage and exit 2. Exit codes stay: 0 when every row is `ok` or
+  `fixed`, 1 otherwise.
 
 **Setup per agent.** Claude Code's and Codex's sandboxes allow writes only in the project and temp folders, so the
 inbox folder goes on each one's write list (Claude Code: `sandbox.filesystem.allowWrite` in
@@ -961,11 +1008,19 @@ them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag 
   old copy in `$CODEX_HOME/skills/` (default and moved) removed only once the new one is in place, and
   `COPILOT_HOME`. Each agent's hooks file missing, without kb's entries, with them, with an outdated one, broken or
   the wrong shape, and with other hooks, which are kept; the hooks files under `CLAUDE_CONFIG_DIR`, `CODEX_HOME`
-  and `COPILOT_HOME`; `--hooks start`, `stop` and `none` recorded, and the left-out entries removed.
-- `kb hook start`: no notes, open notes, only resolved ones, and outside git; each agent's output format. `kb hook
-  stop`: before 10 minutes (silent), the first turn after (asks), later turns (silent), `stop_hook_active`
-  (silent), a marker it can't write (silent), old markers removed. Both: Cursor's input to the `claude-code` entry,
-  and unreadable input or a missing inbox (silent, exit 0).
+  and `COPILOT_HOME`; `--hooks start`, `stop` and `none` recorded, and the left-out entries removed. kb's handler
+  in a group with the user's (theirs kept), run by path, and a user command that only starts with `kb hook`
+  (`kb hookshot`, left alone). kb's config: CRLF kept, a table right after `[notes]`, a `[notes]` header on the
+  last line, and a `notes` or `hooks` of the wrong shape (a `problem`, never a crash). Another `kb` first on `PATH`,
+  and `UV_TOOL_DIR`.
+- `kb doctor` report: read back with the official TOON decoder (`toon-format`); the summary's counts, a row per
+  check, and the next steps for `missing`, `outdated`, `problem`, Codex hooks just installed and `kb` not on
+  `PATH`; `next: []` when nothing is left to do; values with commas, colons and quotes. `install.sh` without uv.
+- `kb hook start`: no notes, open notes, only resolved ones, outside git, and in a git repo with and without a
+  remote; each agent's output format. `kb hook stop`: before 10 minutes (silent), the first turn after (asks),
+  later turns (silent), `stop_hook_active` (silent), a turn Cursor or Copilot CLI says didn't complete (silent), a
+  marker it can't write (silent), a broken marker (the session starts over), old markers removed. Both: Cursor's
+  input to the `claude-code` entry, and unreadable or too deeply nested input or a missing inbox (silent, exit 0).
 - Notes trial (phase 1, one week, one or two projects): notes per session, how many I rate useful, duplicates,
   sessions where an agent should have left a note and didn't, and how often the stop hook's question led to a
   useful note.

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_fabric.paths import expand, tilde
+from agent_fabric.report import Row
 
 CLAUDE_KEY = "sandbox.filesystem.allowWrite"
 CODEX_KEY = "sandbox_workspace_write.writable_roots"
@@ -25,16 +26,16 @@ def _paths(value: object, key: str) -> list[str]:
     return value
 
 
-def _cant_read(shown: str, e: Exception) -> tuple[str, str]:
+def cant_read(check: str, shown: str, e: Exception) -> Row:
     reason = (e.strerror or e) if isinstance(e, OSError) else e
-    return "problem", f"{shown}: can't read it ({reason})"
+    return Row("problem", check, shown, f"can't read it ({reason})")
 
 
-def _cant_write(shown: str, e: OSError) -> tuple[str, str]:
-    return "problem", f"{shown}: can't write it ({e.strerror or e})"
+def cant_write(check: str, shown: str, e: OSError) -> Row:
+    return Row("problem", check, shown, f"can't write it ({e.strerror or e})")
 
 
-def _write(path: Path, text: str) -> None:
+def replace_file(path: Path, text: str) -> None:
     """Replace the file in one step, through a symlink and keeping its mode: the agent may read it any time. The new
     copy is private from the start, since agent settings can hold tokens, and removed if the replace fails."""
     target = path.resolve()
@@ -66,7 +67,7 @@ def _claude_roots(settings: Any) -> list[str]:
     return _paths(node.setdefault("allowWrite", []), CLAUDE_KEY)
 
 
-def claude_code(path: Path, inbox: Path, env: Mapping[str, str], *, fix: bool) -> tuple[str, str]:
+def claude_code(path: Path, inbox: Path, env: Mapping[str, str], *, fix: bool) -> Row:
     """Claude Code's `settings.json`; the JSON is rewritten whole."""
     home = Path(env["HOME"])
     shown = tilde(path, env)
@@ -74,18 +75,18 @@ def claude_code(path: Path, inbox: Path, env: Mapping[str, str], *, fix: bool) -
         settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         roots = _claude_roots(settings)
     except (OSError, ValueError) as e:
-        return _cant_read(shown, e)
+        return cant_read("sandbox", shown, e)
     if any(inbox.is_relative_to(expand(root, env)) for root in roots):  # `~/` is the home folder, `/` absolute
-        return "ok", f"{shown} lets Claude Code write the inbox"
+        return Row("ok", "sandbox", shown, "Claude Code can write the inbox")
     if not fix:
-        return "missing", f"{shown}: the inbox is not in {CLAUDE_KEY}; `kb doctor --fix` adds it"
+        return Row("missing", "sandbox", shown, f"the inbox is not in {CLAUDE_KEY}")
     entry = f"~/{inbox.relative_to(home)}" if inbox.is_relative_to(home) else str(inbox)
     roots.append(entry)
     try:
-        _write(path, json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
+        replace_file(path, json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
     except OSError as e:
-        return _cant_write(shown, e)
-    return "fixed", f"{shown}: added {entry} to {CLAUDE_KEY}"
+        return cant_write("sandbox", shown, e)
+    return Row("fixed", "sandbox", shown, f"added {entry} to {CLAUDE_KEY}")
 
 
 def _codex_table(text: str) -> dict[str, Any] | None:
@@ -121,7 +122,7 @@ def _codex_edit(text: str, table: dict[str, Any] | None, inbox: Path) -> str | N
         return None
 
 
-def codex(path: Path, inbox: Path, env: Mapping[str, str], *, fix: bool) -> tuple[str, str]:
+def codex(path: Path, inbox: Path, env: Mapping[str, str], *, fix: bool) -> Row:
     """Codex's config is TOML, which the standard library only reads: a fix adds lines, keeps every other byte,
     and writes only if the result reads back with the inbox in it."""
     shown = tilde(path, env)
@@ -129,16 +130,22 @@ def codex(path: Path, inbox: Path, env: Mapping[str, str], *, fix: bool) -> tupl
         text = path.read_bytes().decode("utf-8") if path.exists() else ""  # bytes: keeps CRLF line endings
         table = _codex_table(text)
     except (OSError, ValueError) as e:
-        return _cant_read(shown, e)
+        return cant_read("sandbox", shown, e)
     if _codex_lists(table, inbox):
-        return "ok", f"{shown} lets Codex write the inbox"
-    if not fix:
-        return "missing", f"{shown}: the inbox is not in {CODEX_KEY}; `kb doctor --fix` adds it"
-    new = _codex_edit(text, table, inbox)
+        return Row("ok", "sandbox", shown, "Codex can write the inbox")
+    new = _codex_edit(text, table, inbox)  # first, so that without `fix` it says what `fix` would do
     if new is None:
-        return "problem", f"{shown}: add {json.dumps(str(inbox), ensure_ascii=False)} to {CODEX_KEY} by hand"
+        return Row(
+            "problem",
+            "sandbox",
+            shown,
+            f"kb can't add the inbox to {CODEX_KEY} without changing other lines",
+            step=f"Add {inbox} to {CODEX_KEY} in {shown}",
+        )
+    if not fix:
+        return Row("missing", "sandbox", shown, f"the inbox is not in {CODEX_KEY}")
     try:
-        _write(path, new)
+        replace_file(path, new)
     except OSError as e:
-        return _cant_write(shown, e)
-    return "fixed", f"{shown}: added {inbox} to {CODEX_KEY}"
+        return cant_write("sandbox", shown, e)
+    return Row("fixed", "sandbox", shown, f"added {inbox} to {CODEX_KEY}")

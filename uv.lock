@@ -19,6 +19,7 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "toon-format" },
 ]
 
 [package.metadata]
@@ -28,6 +29,7 @@ dev = [
     { name = "mypy", specifier = ">=2.4.0" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.17.1" },
+    { name = "toon-format", specifier = ">=1.1.0" },
 ]
 
 [[package]]
@@ -330,6 +332,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/0a/e8/1e186578076aff7a80735f625005fde678412ab609cd323ed182eb7d6b87/ruff-0.17.1-py3-none-win32.whl", hash = "sha256:1de0030a8aa78c65c5fecb84b2e5c390ac684c0452875a02afc7c083d49a496a", size = 9895093, upload-time = "2026-10-15T15:23:10.582Z" },
     { url = "https://files.pythonhosted.org/packages/6a/2e/da3d9589bae8e8b58f3a48bd5bc0b980232fb14a83bf02c3be7660f87c1b/ruff-0.17.1-py3-none-win_amd64.whl", hash = "sha256:5df76f16580fab58d0f6c98a3ac254a4abceb7b2489b8b678335869cff77b3d7", size = 10097955, upload-time = "2026-10-15T15:23:13.309Z" },
     { url = "https://files.pythonhosted.org/packages/df/c9/0f2a4dea06a5e12c1191ee3d96b1e1233797d0d5e18f97a2b909a95a9836/ruff-0.17.1-py3-none-win_arm64.whl", hash = "sha256:42400b9a6ff8515ff27796f07f92e0195be011c86e81e381606f58ea5502fef4", size = 9853542, upload-time = "2026-10-15T15:23:16.05Z" },
+]
+
+[[package]]
+name = "toon-format"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/90/38/4e7ab42e063558b5efb5a2fe798b6f28b14865efa52049a364efe2c957ec/toon_format-1.1.0.tar.gz", hash = "sha256:adef326cec9d162a6e512a004761aa6a60713c83471ca8874a3ea07a4f27ba3b", size = 20550, upload-time = "2026-10-06T11:58:44.338Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/f7/b2b3d79f578c3359f15591db1ab988b42a7ab7b3954e100ad4ebc1b1f793/toon_format-1.1.0-py3-none-any.whl", hash = "sha256:ffeac67f2990986c07e03df69c89ef6aab4d638c04a4ddba41daeae3bee55eb7", size = 23329, upload-time = "2026-10-06T11:58:43.181Z" },
 ]
 
 [[package]]
