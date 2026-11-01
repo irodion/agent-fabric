@@ -14,9 +14,11 @@ Switch freely between coding agents without losing the history of what was done 
    temporary — verify later") while the session runs.
 3. An LLM periodically folds digests into curated **wiki pages** (manual trigger + nightly), reviewed before merge.
 4. Agents and I **pull** history on demand through one CLI (`kb`) and one MCP server. No history is injected into
-   agent prompts automatically; the one standing instruction is the `kb-note` skill (item 5).
+   agent prompts automatically; the standing instructions are the `kb-note` skill and two hooks that remind the
+   agent of it, with a count of open notes but never their text (item 5).
 5. Agents leave short **notes** for each other and for me with `kb note` when they find something the next agent
-   must know (broken tests, a surprising fix, a decision and its reason); a skill tells them when and how (§4.10).
+   must know (broken tests, a surprising fix, a decision and its reason); a skill tells them when and how, and hooks
+   at session start and at the end of a turn remind them (§4.10).
 
 ### Non-goals
 
@@ -39,6 +41,7 @@ Switch freely between coding agents without losing the history of what was done 
 | Compaction | Deterministic extraction; no LLM in the digest | Facts are extractable; only "why" needs a model |
 | Retrieval | Pull only (CLI/MCP), manually triggered | Avoids context pollution and memory-poisoning via injection |
 | Agent notes | `kb note` CLI + `kb-note` skill → local inbox; the wiki only through ingest (§4.10) | Agents notice things no digest records; a CLI works in every agent, and a skill loads only when used |
+| Note reminders | A session-start hook (reminder + count of open notes) and an end-of-turn hook (asks once per session), installed by `scripts/install.sh`; either can be left out (§4.10) | A skill alone waits for the agent to think of it; at session end the agent can no longer act |
 | Wiki ingest | Manual (`kb ingest`) and nightly, onto a review branch | Review gate before anything becomes canon |
 | Live panel | Rules detect, small model only phrases and extracts decisions | Rules measurably work; LLM judgement alone did not |
 | OpenHands | Not used; event model borrowed | It cannot observe IDE sessions |
@@ -609,6 +612,7 @@ matter (`sessions`, `files`, `commands`, `tests`, `loops`, `notes`).
 | `kb loop close <id>` | — | (CLI only; agents can't close loops) |
 | `kb note --kind K [--ref R]… "text"`, `kb note --resolve <id>` | — | id and path of the new note (CLI only, §4.10) |
 | `kb inbox [--project P \| --all-projects] [--since] [--kind] [--all]` | `list_notes(project?, since?, kind?, all?)` | unresolved notes not yet ingested, under an "unchecked" header (`--all`: resolved ones too) |
+| `kb hook start\|stop --agent A` | — | the hooks' reminder in agent A's format (CLI only, run by the agents' hooks, §4.10) |
 | `kb ingest`, `kb lint`, `kb prune`, `kb retro`, `kb reindex`, `kb doctor` | — | maintenance (§4.7) |
 
 Project defaults to the git root of the current directory. MCP results are labelled as historical notes (untrusted
@@ -697,23 +701,75 @@ the merge, every note the run used or dropped, and every resolved `status` note,
 so the inbox holds only notes still to act on. Notes from projects not on the allow list stay local.
 
 **Skill.** `src/agent_fabric/skills/kb-note/SKILL.md`, shipped in the package, copied into two user skills folders
-that between them reach all four CLI agents: `~/.claude/skills/` (read by Claude Code, Copilot CLI and Cursor CLI)
-and `~/.codex/skills/` (Codex and Cursor CLI). Only the name and description sit in the agent's context; the body
-loads when the agent decides to use it. `CLAUDE_CONFIG_DIR` and `CODEX_HOME` move Claude Code's and Codex's
-folders, settings and skills with them; Copilot CLI and Cursor CLI are assumed to keep reading `~/.claude/skills/`,
-which then gets a copy of its own. `kb doctor` checks every copy against the package, for each agent it finds
-installed: Claude Code by its `.claude.json` or `settings.json` (not by `~/.claude`, which a copy for Copilot CLI
-or Cursor CLI creates), Codex by its folder, Copilot CLI and Cursor CLI by `~/.copilot` and `~/.cursor`. It decides
-once, before `--fix` writes anything; `kb doctor --fix` adds missing copies and updates outdated ones.
+that between them reach all four CLI agents: `~/.claude/skills/` (read by Claude Code and Cursor CLI) and
+`~/.agents/skills/` (Codex and Copilot CLI). Copilot CLI stopped reading `~/.claude/` in 1.0.36 and reads personal
+skills from `~/.copilot/skills/` and `~/.agents/skills/` (`copilot skill --help`, 1.0.105); Codex still reads
+`$CODEX_HOME/skills/` but calls it deprecated in favour of `~/.agents/skills/` (source, 0.162.1). The first setup
+put the second copy in `~/.codex/skills/`, where Copilot CLI never saw it (corrected 2026-11-01); `kb doctor --fix`
+removes that copy once `~/.agents/skills/` has one, so Codex doesn't load the skill twice. Only the name and
+description sit in the agent's context; the body loads when the agent decides to use it. `CLAUDE_CONFIG_DIR` moves
+Claude Code's folder, settings and skills with it; Cursor CLI is assumed to keep reading `~/.claude/skills/`, which
+then gets a copy of its own. With `COPILOT_HOME` set, Copilot CLI reads `$COPILOT_HOME/skills/` instead of
+`~/.agents/skills/`, and that folder gets a copy. `kb doctor` checks every copy against the package, for each agent
+it finds installed: Claude Code by its `.claude.json` or `settings.json` (not by `~/.claude`, which a copy for
+Cursor CLI creates), Codex by its folder, Copilot CLI by `~/.copilot` (or `COPILOT_HOME`), Cursor CLI by
+`~/.cursor`. It decides once, before `--fix` writes anything; `kb doctor --fix` adds missing copies and updates
+outdated ones.
 
 The file is the one copy of the skill text: when to write a note (rarely), the four kinds, `--ref`, `--resolve`, stdin
 for quoted text, `--agent` as the tool's name, the 500-character limit, no secrets, and what exit 1 and 2 mean.
+
+**Hooks.** The skill waits for the agent to think of it. Two hooks remind it, at the start of a session and at the
+end of a turn. Like the skill, they carry an instruction and a count, never a note's text (§7): the agent reads the
+notes with `kb inbox`, under its "unchecked" header.
+
+```text
+kb hook start --agent <claude-code|codex|copilot|cursor>   # session start: the reminder, in that agent's format
+kb hook stop --agent <claude-code|codex|copilot|cursor>    # end of a turn: the question, once per session
+```
+
+- **Start** runs when a session starts, resumes, is cleared or is compacted (the last two drop the earlier
+  reminder). It prints: *"kb: 2 open notes from earlier sessions for github.com/irodion/escape-velocity, unchecked.
+  Run `kb inbox` before relying on the repo's state. When you find something the next agent must know, leave a note
+  with `kb note` (skill kb-note)."* With no open notes, the first sentence says so.
+- **Stop** runs at the end of each turn, not at session end: when the session ends, the agent can no longer act.
+  Once per session, at the first end of a turn at least 10 minutes after the session started, it makes the agent
+  continue with: *"kb: before you finish: did this session find something the next agent must know (a broken or
+  flaky state, a trap, an error and its fix, a decision and its reason)? If so, leave it with `kb note`. If not,
+  just stop. kb asks this once per session."* The answer costs one turn; shorter sessions aren't asked, and the
+  trial (§10) tunes the 10 minutes. A marker per session in `~/.local/share/agent-fabric/hooks/` records when it
+  started and that it was asked; markers older than 7 days are removed. Where the marker can't be written, the
+  hook stays silent rather than ask every turn. It also stays silent when the agent is already continuing because
+  of a stop hook (`stop_hook_active`).
+- **Never in the way.** Any error, such as unreadable input or a missing inbox, prints nothing and exits 0, and
+  each hook entry has a 10-second timeout: a session never fails or waits because of `kb`.
+
+| Agent | Hooks file | Start | End of turn | Output |
+|---|---|---|---|---|
+| Claude Code 2.1.316 | `~/.claude/settings.json` (`hooks`) | `SessionStart` | `Stop` | `hookSpecificOutput.additionalContext`; `decision: "block"` with `reason` |
+| Codex 0.162.1 | `~/.codex/hooks.json` | `SessionStart` | `Stop` | the same as Claude Code |
+| Copilot CLI 1.0.105 | `~/.copilot/hooks/kb.json` (kb's own file) | `sessionStart` | `agentStop` | `additionalContext`; `decision: "block"` with `reason` |
+| Cursor CLI 2026.10.22 | `~/.cursor/hooks.json` | `sessionStart` | `stop` | `additional_context`; `followup_message` |
+
+From each agent's hooks reference, and Codex's source at `rust-v0.162.1` (2026-11-01); the trial checks each in a
+live session (§11). Each sends the hook its input as JSON on stdin and runs user hooks in every project. Claude
+Code and Codex run hooks outside their sandboxes (Claude Code's docs, Codex's source), and Copilot CLI has none, so
+the hook can write its marker. Two agents need more:
+
+- Cursor CLI also runs Claude Code's user hooks (its "third-party configs" setting, on by default), so in Cursor
+  both entries fire. `kb hook --agent claude-code` stays silent when its input comes from Cursor, which adds
+  `cursor_version`. Copilot CLI runs Claude Code's hooks only from a repo's `.claude/`, not the user's.
+- Codex runs a new or changed user hook only after I approve it, once, in Codex (`/hooks`, or the prompt at
+  startup). `kb doctor` says so after installing; it can't yet tell whether I have (§11).
 
 **Setup.** `scripts/install.sh` installs `kb` from the clone with `uv tool install`, then runs `kb doctor --fix`.
 The install is not editable, so agents keep the installed `kb` while the clone switches branches; rerunning the
 script after a pull updates `kb` and the skill copies. It runs in the user's own terminal, because an agent's sandbox
 can't write the agents' settings. `kb doctor` is the one place that knows what setup means: a setup UI, if one comes
-later, shows its checks.
+later, shows its checks. `scripts/install.sh --hooks start,stop` (the default), `start`, `stop` or `none` chooses
+the hooks: it passes the choice to `kb doctor --fix --hooks`, which records it as `hooks` under `[notes]` in
+`~/.config/agent-fabric/config.toml`, installs those hooks and removes kb's entries for the others. Later
+`kb doctor` runs check against the recorded choice.
 
 **Setup per agent.** Claude Code's and Codex's sandboxes allow writes only in the project and temp folders, so the
 inbox folder goes on each one's write list (Claude Code: `sandbox.filesystem.allowWrite` in
@@ -726,6 +782,12 @@ lists other folders, it reports with the path to add by hand. Cursor CLI's sandb
 doesn't start on the devbox); Copilot CLI has no OS sandbox. So that `kb note` doesn't ask for approval every time,
 it also goes on each agent's command allow list, except in Claude Code with `sandbox.autoAllowBashIfSandboxed`, which
 runs sandboxed commands without asking; `kb doctor` doesn't check the allow lists yet.
+
+The hooks go into the four hooks files in the table above. `kb doctor` knows its own entries by their command,
+which starts with `kb hook`, and changes no other entry: `--fix` adds missing ones, rewrites ones that differ from
+what it would install, and removes those the recorded choice leaves out. The JSON files are rewritten whole, the
+same way as the settings above; Copilot CLI's `kb.json` holds only kb's hooks. A hooks file it can't read, or with
+the wrong shape, it reports and leaves alone.
 
 ## 5. Processes, ports, locations
 
@@ -747,6 +809,7 @@ runs sandboxed commands without asking; `kb doctor` doesn't check the allow list
 | `~/.local/share/agent-fabric/quarantine/` | digests blocked by gitleaks | no |
 | `~/.local/share/agent-fabric/local/` | digests of projects not on the allow list | no (backed up) |
 | `~/.local/share/agent-fabric/inbox/` | notes from `kb note`; `done/` once ingested (§4.10) | no (backed up) |
+| `~/.local/share/agent-fabric/hooks/` | one marker per agent session for the stop hook, removed after 7 days (§4.10) | no |
 | `~/.agentsview/` | agentsview config + archive | no (backed up) |
 | `~/wiki/` | wiki repo | yes |
 
@@ -766,9 +829,10 @@ mypy and pytest on Python 3.13 and 3.14).
 - The code repo is public: no session data, config, digests or wiki content ever goes into it, and its CI has no
   access to the wiki repo. Fixtures for tests are synthetic or scrubbed recordings.
 - Untrusted content: the ingest LLM is sandboxed to its worktree; MCP output is labelled historical; nothing is
-  auto-injected (the `kb-note` skill is an instruction, not history).
+  auto-injected (the `kb-note` skill and its hooks are instructions, not history).
 - Agent notes (§4.10) can carry a prompt injection from whatever the agent read. They are labelled untrusted, never
-  injected into prompts, and reach the wiki only through reviewed ingest. The inbox is writable from the agents'
+  injected into prompts (the start hook gives only their count and the project id), and reach the wiki only through
+  reviewed ingest. The inbox is writable from the agents'
   sandboxes, so a note is not tamper-proof; that is acceptable for advice that is checked before it becomes canon.
 - SLM tools: none at first. Read-only tools may follow, such as reading the project's docs or `kb search`, with
   these limits: read-only; paths limited to the project root and `~/wiki`; secret-looking files denied (`.env*`,
@@ -809,7 +873,10 @@ mypy and pytest on Python 3.13 and 3.14).
 | agents note routine progress | inbox noise | the skill says most sessions need none; ingest drops it; tighten the description |
 | `status` note never resolved | later agents warned about a fixed problem | `kb inbox` marks it possibly stale after 14 days; `kb lint` lists it |
 | agent misnames itself (model name for tool name) | wrong `agent` on the note | the environment wins over a model name in `--agent`; a tool name in `--agent` wins, for an agent started by another (§4.10) |
-| agents never call `kb note` | no notes | measured in the phase 1 trial; reword the skill description |
+| agents never call `kb note` | no notes | the start and stop hooks remind them (§4.10); measured in the phase 1 trial; reword the skill description |
+| the stop hook asks at the wrong moment | an extra turn per session; notes written to please it | once per session, not before 10 minutes; ingest drops thin notes; `--hooks` leaves it out |
+| a hook fails or hangs | the agent's session start or turn end held up | any error prints nothing and exits 0; a 10-second timeout per entry |
+| a Codex hook not yet approved | no reminders in Codex | `kb doctor` says to approve it in Codex's `/hooks` |
 | injected or wrong note | bad advice | untrusted label; ingest checks it against digests and code; review gate |
 
 ## 9. Phases
@@ -839,12 +906,12 @@ The CLI agents come first (§2). Items 1 and 7 for them ran on the devbox on 202
 Claude Code, Codex and Copilot CLI; no-go for Cursor CLI, which gets its own reader in phase 1. Item 2 (watch lag) and
 item 3 (cross-agent search) are still to do for the CLIs. Items 1–3 and 7 for the IDE agents move to phase 3.
 
-**Phase 1 — digests and query.** First `kb note`, `kb inbox` and the `kb-note` skill (§4.10): they need neither
-agentsview nor fabricd, so a one-week trial in one or two projects runs while the rest is built. Then CI with the
-`vet` gate for this repo; the agentsview pin bumped to v0.46.x (from 2026-11-06, §4.1); adapter, normalizer,
-tracker, digester with allow list/redaction/gate/commit/push, for the CLI agents: agentsview for Claude Code, Codex
-and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI + `kb mcp`; a prototype session
-for the panel layout, then the panel with rules only (incl. open loops and carry-over).
+**Phase 1 — digests and query.** First `kb note`, `kb inbox`, the `kb-note` skill and its hooks (§4.10): they
+need neither agentsview nor fabricd, so a one-week trial in one or two projects runs while the rest is built. Then
+CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.x (from 2026-11-06, §4.1); adapter,
+normalizer, tracker, digester with allow list/redaction/gate/commit/push, for the CLI agents: agentsview for Claude
+Code, Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI + `kb mcp`; a
+prototype session for the panel layout, then the panel with rules only (incl. open loops and carry-over).
 
 **Phase 2 — models.** SLM bullets in the panel after it passes the eval (§10); `kb ingest` manual + nightly with
 `codex` backend, digests and notes; two-week comparison with `local` backend; `kb lint`, `kb prune` and `kb retro`.
@@ -886,9 +953,17 @@ them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag 
   Claude Code counts as installed by `~/.claude.json` or its settings file, not by `~/.claude`, which the skill
   copy creates for Copilot CLI or Cursor CLI alone: no Claude Code settings are written for them, and Claude Code
   known only by `~/.claude.json` gets its copy. An entry for a folder holding the inbox; CRLF line endings kept; an
-  unreadable skill copy; `CLAUDE_CONFIG_DIR` and `CODEX_HOME`.
-- Notes trial (phase 1, one week, one or two projects): notes per session, how many I rate useful, duplicates, and
-  sessions where an agent should have left a note and didn't.
+  unreadable skill copy; `CLAUDE_CONFIG_DIR` and `CODEX_HOME`. The copy in `~/.agents/skills/` for Codex and
+  Copilot CLI, the old `~/.codex/skills/` copy removed only once the new one is in place, and `COPILOT_HOME`. Each
+  agent's hooks file missing, without kb's entries, with them, with an outdated one, broken or the wrong shape, and
+  with other hooks, which are kept; `--hooks start`, `stop` and `none` recorded, and the left-out entries removed.
+- `kb hook start`: no notes, open notes, only resolved ones, and outside git; each agent's output format. `kb hook
+  stop`: before 10 minutes (silent), the first turn after (asks), later turns (silent), `stop_hook_active`
+  (silent), a marker it can't write (silent), old markers removed. Both: Cursor's input to the `claude-code` entry,
+  and unreadable input or a missing inbox (silent, exit 0).
+- Notes trial (phase 1, one week, one or two projects): notes per session, how many I rate useful, duplicates,
+  sessions where an agent should have left a note and didn't, and how often the stop hook's question led to a
+  useful note.
 - Project identity: the same repo as a main checkout, a linked worktree, a second clone, an SSH and an HTTPS remote,
   and a folder with no remote, each resolving to the expected id; an alias merges two ids.
 - Redaction: fixture corpus of fake secrets in every supported shape; test fails if gitleaks finds anything after
@@ -906,17 +981,24 @@ the prototype session (§4.8); the minimum desktop is Ubuntu 24.04 (§4.1, glibc
 `origin` remote, then the main checkout, then agentsview's project, with aliases in config (§4.4); Copilot
 session sync is off (§7). Decided 2026-10-31: the CLI agents come first, the IDE agents in phase 3 (§2); headless
 runs get a local digest only unless the project is on `[publish] headless` (§4.3); agents leave notes with
-`kb note` and the `kb-note` skill, independent of agentsview (§4.10), with the skill in `~/.claude/skills/`
-and `~/.codex/skills/`, which Copilot CLI and Cursor CLI also read.
+`kb note` and the `kb-note` skill, independent of agentsview (§4.10). Decided 2026-11-01: the skill goes in
+`~/.claude/skills/` (Claude Code, Cursor CLI) and `~/.agents/skills/` (Codex, Copilot CLI), correcting
+`~/.codex/skills/`, which Copilot CLI never read; a start hook and a stop hook remind agents of it, and the install
+script can leave either out (§4.10).
 
-Open (2026-10-31):
+Open (2026-11-01):
 
 - What marks a Copilot or Cursor run as headless (§4.1).
 - Which variables Copilot CLI and Cursor CLI set that identify the agent and session, so that `kb note` needs no
   `--agent` there (§4.10). Codex: `CODEX_THREAD_ID` (2026-11-01).
-- Codex still reads `$CODEX_HOME/skills/` but calls it deprecated in favour of `~/.agents/skills/`. Codex's copy
-  moves there before the old folder goes; whether Cursor CLI reads `~/.agents/skills/` too is unchecked (§4.10).
-- Whether Copilot CLI and Cursor CLI follow `CLAUDE_CONFIG_DIR` (§4.10 assumes they don't).
+- Whether Cursor CLI reads `~/.agents/skills/` too (it would then see two copies), and whether Codex still reads it
+  with `CODEX_HOME` set (§4.10).
+- Whether Cursor CLI follows `CLAUDE_CONFIG_DIR` (§4.10 assumes it doesn't; Copilot CLI no longer reads `~/.claude/`).
+- The hooks in a live session of each agent (§4.10): the facts come from docs (Copilot CLI, Cursor CLI) and source
+  (Codex), including that Cursor adds `cursor_version` to the input of Claude Code's hooks and where Cursor runs
+  hooks relative to its sandbox.
+- Whether `kb doctor` can tell that Codex has approved its hooks (`[hooks.state]` in `config.toml` holds a hash
+  of each approved hook).
 - The Cursor CLI reader: message order from the `store.db` blob tree, timestamps, and encrypted blobs (§4.1).
 
 The phase 0 spike (§9) settles the remaining unknowns.
