@@ -39,15 +39,28 @@ def normalise_remote(url: str) -> str:
     return re.sub(r"(\.git)?/*$", "", f"{host.lower()}/{path}" if path else host.lower())
 
 
-def git_facts(cwd: Path) -> GitFacts:
-    if _git(cwd, "rev-parse", "--is-inside-work-tree") != "true":
-        return GitFacts()
+def _in_work_tree(cwd: Path) -> bool:
+    return _git(cwd, "rev-parse", "--is-inside-work-tree") == "true"
+
+
+def _project(cwd: Path) -> str | None:
+    """The remote `origin`, normalised; without one, the folder that holds the repo's .git."""
     remote = _git(cwd, "remote", "get-url", "origin")
     if remote:
-        project: str | None = normalise_remote(remote)
-    else:
-        common = _git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
-        project = str(Path(common).parent) if common else None
+        return normalise_remote(remote)
+    common = _git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return str(Path(common).parent) if common else None
+
+
+def git_project(cwd: Path) -> str | None:
+    """Only the project id, in two or three git calls to `git_facts`'s five: for the start hook and `kb inbox`."""
+    return _project(cwd) if _in_work_tree(cwd) else None
+
+
+def git_facts(cwd: Path) -> GitFacts:
+    if not _in_work_tree(cwd):
+        return GitFacts()
+    project = _project(cwd)
     branch = _git(cwd, "symbolic-ref", "--short", "-q", "HEAD")
     commit = _git(cwd, "rev-parse", "--short", "HEAD")
     root = _git(cwd, "rev-parse", "--show-toplevel")
