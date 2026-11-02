@@ -2,8 +2,11 @@
 
 import re
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+from agent_fabric.paths import tilde
 
 
 @dataclass(frozen=True)
@@ -53,8 +56,14 @@ def _project(cwd: Path) -> str | None:
 
 
 def git_project(cwd: Path) -> str | None:
-    """Only the project id, in two or three git calls to `git_facts`'s five: for the start hook and `kb inbox`."""
+    """Only the project id, in two or three git calls to `git_facts`'s five."""
     return _project(cwd) if _in_work_tree(cwd) else None
+
+
+def project_id(folder: Path, env: Mapping[str, str]) -> str:
+    """What notes in this folder belong to, as `Note.scope` names it: its git project, or outside git the folder.
+    The hooks' reminder, their markers and `kb inbox` all match notes through this."""
+    return git_project(folder) or tilde(folder, env)
 
 
 def git_facts(cwd: Path) -> GitFacts:

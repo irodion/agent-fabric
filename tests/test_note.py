@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -143,10 +144,10 @@ def test_an_unknown_agent_must_name_its_tool(kb: Kb) -> None:
     assert (result.exit_code, "--agent" in result.stderr, "Cursor CLI" in result.stderr) == (2, True, True)
 
 
-def hook_ran(kb: Kb, agent: str, event: str = "start") -> None:
+def hook_ran(kb: Kb, agent: str, event: str = "start", **fields: object) -> None:
     """The agent's hook, run for a session in this folder, on a machine with kb set up."""
     (kb.home / ".local" / "share" / "agent-fabric" / "inbox").mkdir(parents=True, exist_ok=True)
-    kb("hook", event, "--agent", agent, stdin=json.dumps({"session_id": agent, "cwd": str(kb.cwd)}))
+    kb("hook", event, "--agent", agent, stdin=json.dumps({"session_id": agent, "cwd": str(kb.cwd)} | fields))
 
 
 def unflagged_note(kb: Kb, *agent_args: str) -> int:
@@ -160,12 +161,20 @@ def test_an_agent_without_a_variable_is_known_from_the_marker_its_hook_left(kb: 
     assert agent_line(kb) == f'agent: {{"name": "{tool}", "from": "hook"}}'
 
 
-@pytest.mark.parametrize("flag", ["Codex", "GPT-5.4"], ids=["another tool", "a model"])
-def test_the_marker_wins_over_a_flag_that_contradicts_it(kb: Kb, flag: str) -> None:
-    """Copilot CLI's model passed `--agent Codex` of its own accord, and its note was signed Codex."""
+@pytest.mark.parametrize("flag", ["Codex", "Claude Code", "GPT-5.4"], ids=["Codex", "Claude Code", "a model"])
+def test_the_marker_wins_over_a_flag_it_can_disprove(kb: Kb, flag: str) -> None:
+    """Copilot CLI's model passed `--agent Codex` of its own accord, and its note was signed Codex. Without their
+    variables this isn't Claude Code or Codex, and a model's name is no tool's."""
     hook_ran(kb, "copilot")
 
     assert agent_line(kb, "--agent", flag) == 'agent: {"name": "Copilot CLI", "from": "hook"}'
+
+
+def test_a_flag_naming_the_other_agent_known_by_its_marker_is_taken_at_its_word(kb: Kb) -> None:
+    """Copilot CLI's finished session is no proof against Cursor CLI, whose own marker may not exist yet."""
+    hook_ran(kb, "copilot")
+
+    assert agent_line(kb, "--agent", "Cursor CLI") == 'agent: {"name": "Cursor CLI", "from": "flag"}'
 
 
 def test_an_agents_own_variable_comes_before_the_markers(kb: Kb) -> None:
@@ -186,6 +195,19 @@ def test_with_copilot_and_cursor_both_at_work_here_only_a_flag_naming_one_can_te
         unflagged_note(kb, "--agent", "Codex"),
         agent_line(kb, "--agent", "Cursor CLI"),
     ) == (2, 2, 'agent: {"name": "Cursor CLI", "from": "flag"}')
+
+
+def test_with_both_at_work_the_refusal_names_the_two_it_accepts(kb: Kb) -> None:
+    hook_ran(kb, "copilot")
+    hook_ran(kb, "cursor")
+
+    result = kb("note", "--kind", "gotcha", "--agent", "Claude Code", "uv needs --cache-dir in the sandbox")
+
+    assert (result.exit_code, "Copilot CLI and Cursor CLI" in result.stderr, "Codex" in result.stderr) == (
+        2,
+        True,
+        False,
+    )
 
 
 def test_claude_codes_and_codexs_markers_say_nothing_about_an_agent_without_a_variable(kb: Kb) -> None:
@@ -215,6 +237,27 @@ def test_a_marker_counts_in_a_git_repos_subfolders(kb: Kb, remote: bool) -> None
     hook_ran(kb, "copilot")
     kb.cwd = kb.cwd / "src"
     kb.cwd.mkdir()
+
+    assert agent_line(kb) == 'agent: {"name": "Copilot CLI", "from": "hook"}'
+
+
+def test_a_session_resumed_in_another_project_moves_its_marker_there(kb: Kb) -> None:
+    hook_ran(kb, "copilot")
+    first = kb.cwd
+    kb.cwd = kb.home / "code" / "other"
+    kb.cwd.mkdir()
+    hook_ran(kb, "copilot")
+    here = agent_line(kb)
+    kb.cwd = first
+
+    assert (here, unflagged_note(kb)) == ('agent: {"name": "Copilot CLI", "from": "hook"}', 2)
+
+
+def test_a_marker_matches_a_note_written_through_a_symlinks_real_folder(kb: Kb) -> None:
+    """Outside git, a hook gets the folder as the agent names it, and `kb note` the physical one from the system."""
+    link = kb.home / "code" / "link"
+    link.symlink_to(kb.cwd)
+    hook_ran(kb, "copilot", cwd=str(link))
 
     assert agent_line(kb) == 'agent: {"name": "Copilot CLI", "from": "hook"}'
 
@@ -252,6 +295,22 @@ def test_each_end_of_a_turn_keeps_the_marker_current(kb: Kb) -> None:
     assert agent_line(kb) == 'agent: {"name": "Copilot CLI", "from": "hook"}'
 
 
+@pytest.mark.parametrize(
+    "fields",
+    [{"stopReason": "user_abort"}, {"stop_hook_active": True}],
+    ids=["an interrupted turn", "while continuing for a stop hook"],
+)
+def test_an_end_of_a_turn_kb_asks_nothing_at_still_keeps_the_marker_current(
+    kb: Kb, fields: dict[str, object]
+) -> None:
+    hook_ran(kb, "copilot")
+    kb.later(hours=7)
+    hook_ran(kb, "copilot", "stop", **fields)
+    kb.later(hours=7)
+
+    assert agent_line(kb) == 'agent: {"name": "Copilot CLI", "from": "hook"}'
+
+
 def test_the_stop_hook_alone_leaves_a_marker_too(kb: Kb) -> None:
     hook_ran(kb, "copilot", "stop")
 
@@ -268,17 +327,44 @@ def marker_file(kb: Kb) -> Path:
     [
         "",
         "[]",
-        '{"started": "2026-10-29T17:05:12", "asked": false, "project": "~/code/scratch"}',
-        '{"started": "2026-10-31T17:05:12+00:00", "asked": false, "project": "~/code/scratch", "seen": "soon"}',
+        "[" * 100_000,
+        '{"started": "0001-01-01T00:00:00+05:00", "asked": false, "project": "~/code/scratch"}',
         '{"started": "2026-10-31T17:05:12+00:00", "asked": false, "project": 7}',
     ],
-    ids=["empty", "not an object", "old, with no time zone", "seen isn't a time", "project isn't a string"],
+    ids=["empty", "not an object", "nested too deep", "an impossible date", "project isn't a string"],
 )
 def test_a_marker_kb_cant_use_says_nothing_rather_than_fail(kb: Kb, content: str) -> None:
     hook_ran(kb, "copilot")
     marker_file(kb).write_text(content)
+    unknown = unflagged_note(kb)
+    kb.env.update(CODEX_ENV)
 
-    assert unflagged_note(kb) == 2
+    assert (unknown, unflagged_note(kb)) == (2, 0)
+
+
+def test_a_marker_with_no_time_zone_is_read_rather_than_fail(kb: Kb) -> None:
+    hook_ran(kb, "copilot")
+    marker_file(kb).write_text('{"started": "2026-10-31T17:05:12", "asked": false, "project": "~/code/scratch"}')
+    os.utime(marker_file(kb), (kb.now.timestamp(), kb.now.timestamp()))
+
+    assert agent_line(kb) == 'agent: {"name": "Copilot CLI", "from": "hook"}'
+
+
+def test_markers_are_read_only_when_no_variable_has_answered(kb: Kb, monkeypatch: pytest.MonkeyPatch) -> None:
+    def never(*_: object) -> set[str]:
+        raise AssertionError("read the markers")
+
+    monkeypatch.setattr("agent_fabric.cli.at_work", never)
+    kb.env.update(CODEX_ENV)
+
+    assert agent_line(kb).startswith('agent: {"name": "Codex", "from": "env"')
+
+
+def test_the_inbox_shows_that_a_note_was_signed_from_a_hooks_marker(kb: Kb) -> None:
+    hook_ran(kb, "copilot")
+    kb("note", "--kind", "gotcha", "uv needs --cache-dir in the sandbox")
+
+    assert "  gotcha  Copilot CLI (from hook)  ~/code/scratch\n" in kb("inbox").stdout
 
 
 def test_a_session_from_before_markers_held_the_project_is_known_at_its_next_hook(kb: Kb) -> None:

@@ -30,7 +30,7 @@ def config_file(env: Mapping[str, str]) -> Path:
 
 
 def hooks_dir(env: Mapping[str, str]) -> Path:
-    """The stop hook's markers, one per agent session (docs/design.md §4.10)."""
+    """The hooks' markers, one per agent session (docs/design.md §4.10)."""
     return inbox_dir(env).parent / "hooks"
 
 

@@ -660,17 +660,27 @@ The kind says what the next agent should do with the note, and decides how long 
   2. *The hooks' marker.* The install script names the agent in each hook entry, and the hook leaves a marker with
      that name and the project (below). A variable can't carry it: `kb note` is started by the agent's shell, not
      by the hook. Without a variable this can't be Claude Code or Codex, so only Copilot CLI's and Cursor CLI's
-     markers count, for 8 hours after their hook last ran. One of them at work in this project signs the note
-     (`from: hook`), and beats an `--agent` that contradicts it: Copilot CLI's model passed `--agent Codex` of its
-     own accord (2026-11-02). With both at work, only `--agent` naming one of them is accepted.
+     markers count, for 8 hours after their hook last ran, and they are read only when no variable has answered.
+     One of them at work in this project signs the note (`from: hook`, which `kb inbox` shows). It beats an
+     `--agent` it can disprove, naming Claude Code, Codex or no tool: Copilot CLI's model passed `--agent Codex` of
+     its own accord (2026-11-02). `--agent` naming Copilot CLI or Cursor CLI is taken at its word, since one's
+     finished session is no proof against the other. With both at work and no such flag, `kb` exits 2 and says only
+     those two will do.
   3. *Asking.* Otherwise `kb` asks for `--agent` with the tool's name, not the model's (Cursor running a Claude
      model is still Cursor CLI).
 
   An agent started by another (Codex run from Claude Code) inherits its variables, so `--agent` naming a tool wins
   over them, and with two agents' variables set `kb` asks for it; a flag naming no tool, such as a model name, loses
   to the environment. Copilot CLI or Cursor CLI started from Claude Code without `--agent` is still recorded as
-  Claude Code. A note written by hand in a project where Copilot CLI or Cursor CLI is at work is signed with that
-  agent; `from: hook` shows it was worked out.
+  Claude Code.
+
+  A marker says who ran in the project lately, not who is calling, and these limits are accepted for now, since a
+  wrong name on a note is a small error and `(from hook)` in `kb inbox` shows which notes it can touch:
+  - A note written by hand, or by an agent `kb` doesn't know, in a project where Copilot CLI or Cursor CLI ran in the
+    last 8 hours is signed with that agent, whatever other name its `--agent` gives. Sibling clones of a repo share
+    a project, and so its markers.
+  - After more than 8 hours idle, a session's marker no longer counts, and the model's `--agent` does, until its next
+    hook: no hook runs at the start of a turn.
 - **`--resolve <id>`** closes an earlier note, usually a `status` once the tests pass again. It writes a new note
   that points at the old one, so the inbox stays append-only; resolved notes drop out of `kb inbox` and
   `kb catchup`.
@@ -753,8 +763,11 @@ kb hook stop --agent <claude-code|codex|copilot|cursor>    # end of a turn: the 
   just stop. kb asks this once per session."* The answer costs one turn; shorter sessions aren't asked, and the
   trial (§10) tunes the 10 minutes. Cursor CLI doesn't ask in a `-p` run: a chat 44 minutes old wasn't asked with
   `-p`, and was in an interactive session (2026-11-02). A marker per session in
-  `~/.local/share/agent-fabric/hooks/` records when it started, whether it was asked, its project, and when a hook
-  last ran, which also tells `kb note` who is at work (above); markers older than 7 days are removed. A marker is written whole or not at all;
+  `~/.local/share/agent-fabric/hooks/` records when it started, whether it was asked, and its project; a session
+  resumed in another project moves there. The hook writes the marker before it looks up the project, so a failed
+  lookup costs only the project. The file's own time says when a hook last ran, at any end of a turn, even an
+  interrupted one: a hook that changes nothing else doesn't rewrite the marker, so it can't put back an older copy.
+  That time tells `kb note` who is at work (above), and markers no hook has run for in 7 days are removed. A marker is written whole or not at all;
   one kb can't read starts the session over rather than leave it unasked. Where the marker can't be written, the
   hook stays silent rather than ask every turn. It also stays silent when the agent is already continuing because
   of a stop hook (`stop_hook_active`), and when the turn didn't complete: Cursor's `status` is `aborted` or `error`,
@@ -937,7 +950,7 @@ mypy and pytest on Python 3.13 and 3.14).
 | sandbox blocks the inbox write | `kb note` exits 1, the note is lost | the error names the folder to add to the sandbox's write list; `kb doctor` reports a missing or unwritable inbox and a write list without it, and `--fix` adds it (§4.10) |
 | agents note routine progress | inbox noise | the skill says most sessions need none; ingest drops it; tighten the description |
 | `status` note never resolved | later agents warned about a fixed problem | `kb inbox` marks it possibly stale after 14 days; `kb lint` lists it |
-| agent misnames itself (model name for tool name) | wrong `agent` on the note | the environment wins over a model name in `--agent`; a tool name in `--agent` wins, for an agent started by another; the hooks' marker wins over a flag that contradicts it (§4.10) |
+| agent misnames itself (model name for tool name) | wrong `agent` on the note | the environment wins over a model name in `--agent`; a tool name in `--agent` wins, for an agent started by another; the hooks' marker wins over a flag it can disprove (§4.10) |
 | agents never call `kb note` | no notes | the start and stop hooks remind them (§4.10); measured in the phase 1 trial; reword the skill description |
 | the stop hook asks at the wrong moment | an extra turn per session; notes written to please it | once per session, not before 10 minutes; ingest drops thin notes; `--hooks` leaves it out |
 | a hook fails or hangs | the agent's session start or turn end held up | any error prints nothing and exits 0; a 10-second timeout per entry |
@@ -1005,9 +1018,11 @@ them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag 
   the note; `--kind` with `--resolve`, and an empty `--resolve` (exit 2); an id used on an earlier day is not drawn
   again; agent from Claude Code's or Codex's environment, from `--agent`, a model name in `--agent` (environment
   wins), a tool name over an inherited environment (flag wins), two agents' variables without `--agent` and neither
-  (exit 2); agent from Copilot CLI's or Cursor CLI's marker, over a flag that contradicts it, in a repo's subfolders;
-  a variable before a marker; both at work (only a flag naming one, else exit 2); Claude Code's and Codex's markers,
-  another project's, one 8 hours old, one from the stop hook alone, one from an older `kb`, and one it can't read;
+  (exit 2); agent from Copilot CLI's or Cursor CLI's marker, over a flag it can disprove, in a repo's subfolders and
+  through a symlink; a flag naming the other taken at its word; a variable before a marker, which is then not read;
+  both at work (only a flag naming one, else exit 2 naming the two); Claude Code's and Codex's markers, another
+  project's, one 8 hours old, one kept current by a turn's end (even an interrupted one), one from the stop hook
+  alone, one from an older `kb`, one moved to another project, and one it can't read; `(from hook)` in `kb inbox`;
   dotted names such as `json.loads` or `example.com` as refs (no warning); a git repo, a linked worktree
   and a folder outside git. Inside the Claude Code and Codex sandboxes with and without the inbox on the write list:
   the note is written, or exit 1 names the folder.
@@ -1036,7 +1051,9 @@ them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag 
 - `kb hook start`: no notes, open notes, only resolved ones, outside git, and in a git repo with and without a
   remote; each agent's output format. `kb hook stop`: before 10 minutes (silent), the first turn after (asks),
   later turns (silent), `stop_hook_active` (silent), a turn Cursor or Copilot CLI says didn't complete (silent), a
-  marker it can't write (silent), a broken marker (the session starts over), old markers removed. Both: Cursor's
+  marker it can't write (silent), a broken marker (the session starts over), a project it can't name (still asks),
+  a turn's end that doesn't ask leaving the marker's contents alone, markers no hook has run for in 7 days removed,
+  and a session still in use kept. `kb hook start`: a project it can't name still leaves a marker. Both: Cursor's
   input to the `claude-code` entry, and unreadable or too deeply nested input or a missing inbox (silent, exit 0).
 - Notes trial (phase 1, one week, one or two projects): notes per session, how many I rate useful, duplicates,
   sessions where an agent should have left a note and didn't, and how often the stop hook's question led to a
@@ -1068,6 +1085,11 @@ Open (2026-11-01):
 - What marks a Copilot or Cursor run as headless (§4.1).
 - Which variables Copilot CLI and Cursor CLI set that identify the session, so that a note can link to its digest.
   The hooks' marker names the agent but not the session (§4.10). Codex: `CODEX_THREAD_ID` (2026-11-01).
+- Whether `kb note` should look at which programs started it (`copilot`, `cursor-agent`) before the marker (§4.10).
+  That names the caller itself, with no 8-hour window and no both-at-work case, but needs a check that an agent's
+  shell can see its parents. For if the trial finds wrong signatures.
+- Whether the Cursor IDE reads `~/.cursor/hooks.json`, and VS Code's Copilot Chat `~/.copilot/hooks/`: their chats
+  would then be signed Cursor CLI or Copilot CLI (§4.10), though the design treats the IDE as a separate agent.
 - Whether Cursor CLI reads `~/.agents/skills/` too (it would then see two copies), and whether Codex still reads it
   with `CODEX_HOME` set (§4.10).
 - Whether Cursor CLI follows `CLAUDE_CONFIG_DIR` (§4.10 assumes it doesn't; Copilot CLI no longer reads `~/.claude/`).
