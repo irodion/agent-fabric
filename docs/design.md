@@ -786,10 +786,10 @@ kb hook stop --agent <claude-code|codex|copilot|cursor>    # end of a turn: the 
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `COPILOT_HOME` move the first three files with their folders, as they move
 the settings and skills: `$CLAUDE_CONFIG_DIR/settings.json`, `$CODEX_HOME/hooks.json`, `$COPILOT_HOME/hooks/kb.json`.
 
-From each agent's hooks reference, and Codex's source at `rust-v0.162.1` (2026-11-01); the trial checks each in a
-live session (§11). Each sends the hook its input as JSON on stdin and runs user hooks in every project. Claude
-Code and Codex run hooks outside their sandboxes (Claude Code's docs, Codex's source), and Copilot CLI has none, so
-the hook can write its marker. Two agents need more:
+From each agent's hooks reference, and Codex's source at `rust-v0.162.1` (2026-11-01). All four have since run both
+hooks live (2026-11-02); what's still unseen is in §11. Each sends the hook its input as JSON on stdin and runs user
+hooks in every project. Claude Code and Codex run hooks outside their sandboxes (Claude Code's docs, Codex's source),
+and Copilot CLI has none, so the hook can write its marker. Two agents need more:
 
 - Cursor CLI also runs Claude Code's user hooks (its "third-party configs" setting, on by default), so in Cursor
   both entries fire. `kb hook --agent claude-code` stays silent when its input comes from Cursor, which adds
@@ -1094,11 +1094,14 @@ Open (2026-11-01):
 - Whether Cursor CLI reads `~/.agents/skills/` too (it would then see two copies), and whether Codex still reads it
   with `CODEX_HOME` set (§4.10).
 - Whether Cursor CLI follows `CLAUDE_CONFIG_DIR` (§4.10 assumes it doesn't; Copilot CLI no longer reads `~/.claude/`).
-- The hooks in a live session of each agent (§4.10): the facts come from docs (Copilot CLI, Cursor CLI) and source
-  (Codex), including that Cursor adds `cursor_version` to the input of Claude Code's hooks and where Cursor runs
-  hooks relative to its sandbox.
+- The rest of the hooks' live check (§4.10). All four agents have run both hooks and asked the stop question
+  (2026-11-02). Still unseen, all in Cursor CLI: whether its agent acts on the start reminder (so far it was only
+  given a command to run); whether it adds `cursor_version` to the input of Claude Code's hooks (that entry stayed
+  silent, as it would if Cursor never ran it); and where it runs hooks relative to its sandbox (`sandbox.mode` is
+  `disabled` on the test box, so the markers it wrote there don't settle it).
 - Whether `kb doctor` can tell that Codex has approved its hooks (`[hooks.state]` in `config.toml` holds a hash
-  of each approved hook).
+  of each approved hook). A missing `enabled = true` doesn't mean off: a Stop entry with a hash and no `enabled` ran
+  (2026-11-02).
 - The Cursor CLI reader: message order from the `store.db` blob tree, timestamps, and encrypted blobs (§4.1).
 
 The phase 0 spike (§9) settles the remaining unknowns.
