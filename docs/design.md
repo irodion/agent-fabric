@@ -760,9 +760,10 @@ kb hook stop --agent <claude-code|codex|copilot|cursor>    # end of a turn: the 
   Once per session, at the first end of a turn at least 10 minutes after the session started, it makes the agent
   continue with: *"kb: before you finish: did this session find something the next agent must know (a broken or
   flaky state, a trap, an error and its fix, a decision and its reason)? If so, leave it with `kb note`. If not,
-  just stop. kb asks this once per session."* The answer costs one turn; shorter sessions aren't asked, and the
-  trial (§10) tunes the 10 minutes. Cursor CLI doesn't ask in a `-p` run: a chat 44 minutes old wasn't asked with
-  `-p`, and was in an interactive session (2026-11-02). A marker per session in
+  just stop. kb asks this once per session."* The answer costs one turn, and Copilot CLI counts the question as a
+  premium request: its count rose by 2 for one typed prompt plus the question (2026-11-02). Shorter sessions aren't
+  asked, and the trial (§10) tunes the 10 minutes. Cursor CLI doesn't ask in a `-p` run: a chat 44 minutes old wasn't
+  asked with `-p`, and was in an interactive session (2026-11-02). A marker per session in
   `~/.local/share/agent-fabric/hooks/` records when it started, whether it was asked, and its project; a session
   resumed in another project moves there. The hook writes the marker before it looks up the project, so a failed
   lookup costs only the project. The file's own time says when a hook last ran, at any end of a turn, even an
