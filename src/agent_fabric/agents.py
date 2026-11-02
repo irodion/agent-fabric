@@ -1,6 +1,6 @@
-"""Which agent is calling `kb`, from its environment where it says so (docs/design.md §4.10)."""
+"""Which agent is calling `kb`: its own variable, then its hooks' marker, then what it says (docs/design.md §4.10)."""
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 
 def _from_env(env: Mapping[str, str]) -> dict[str, dict[str, str]]:
@@ -28,13 +28,25 @@ TOOLS = {
 }
 
 
-def detect_agent(env: Mapping[str, str], flag: str | None) -> dict[str, str] | None:
-    """The agent from its environment or `--agent`; None when neither can tell.
+# The agents kb knows no variable of. By their names in `hooks.EVENTS`: their hooks' markers say who is at work.
+KNOWN_BY_MARKER = {"copilot": "Copilot CLI", "cursor": "Cursor CLI"}
+
+
+def detect_agent(env: Mapping[str, str], flag: str | None, at_work: Iterable[str] = ()) -> dict[str, str] | None:
+    """The agent from its own variable, else the hooks' markers (`at_work`), else `--agent`; None when none can tell.
 
     An agent started by another inherits its variables, so `--agent` naming a tool wins over them, and with two
-    agents' variables set `kb` needs it. A flag that names no tool (a model name, say) loses to the environment."""
+    agents' variables set `kb` needs it. A flag that names no tool (a model name, say) loses to the environment.
+    Without a variable this can't be Claude Code or Codex, whose variables are always set, so only the others' markers
+    count. A flag that contradicts them loses: models have named the wrong tool of their own accord."""
     found = _from_env(env)
     tool = TOOLS.get((flag or "").strip().lower())
+    if not found:
+        marked = {KNOWN_BY_MARKER[agent] for agent in at_work if agent in KNOWN_BY_MARKER}
+        if len(marked) == 1:
+            return {"name": marked.pop(), "from": "hook"}
+        if marked:  # both at work here: only a flag naming one of them can tell which
+            return {"name": tool, "from": "flag"} if tool and tool in marked else None
     if tool:
         return {"name": tool, "from": "env", **found[tool]} if tool in found else {"name": tool, "from": "flag"}
     if len(found) == 1:

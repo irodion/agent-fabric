@@ -16,7 +16,7 @@ from agent_fabric.agents import detect_agent
 from agent_fabric.context import Context
 from agent_fabric.doctor import doctor
 from agent_fabric.gitinfo import git_facts, git_project
-from agent_fabric.hooks import AGENTS, HOOKS
+from agent_fabric.hooks import AGENTS, HOOKS, at_work
 from agent_fabric.hooks import run as run_hook
 from agent_fabric.inbox import Inbox, Snapshot
 from agent_fabric.notes import KINDS, MAX_TEXT, Note, missing_ref, new_id
@@ -127,13 +127,13 @@ def _note(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
         raise UsageError(
             f"the note is {len(text)} characters; keep it to {MAX_TEXT} characters and link longer detail with --ref"
         )
-    agent = detect_agent(env, args.agent)
+    facts = git_facts(cwd)
+    agent = detect_agent(env, args.agent, at_work(facts.project or tilde(cwd, env), env, ctx.now))
     if agent is None:
         raise UsageError(
             "kb can't tell which agent you are; add --agent with your tool's name "
             "(Claude Code, Codex, Copilot CLI, Cursor CLI), not your model's"
         )
-    facts = git_facts(cwd)
     bases = [cwd, *([facts.root] if facts.root else [])]
     warnings = [
         f"kb: warning: --ref {ref}: {missing} not found from {cwd}\n"

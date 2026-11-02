@@ -5,10 +5,10 @@ The reminder carries a count and the project id, never a note's text: the agent 
 import contextlib
 import hashlib
 import json
-from collections.abc import Mapping
-from datetime import datetime, timedelta
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from agent_fabric.context import Context
 from agent_fabric.gitinfo import git_project
@@ -24,15 +24,23 @@ EVENTS = {  # each agent's events for kb's hooks
     "cursor": {"start": "sessionStart", "stop": "stop"},
 }
 AGENTS = tuple(EVENTS)
-# kb knows Claude Code and Codex from their environment; a model left to name its tool can get it wrong
-NOTE_COMMANDS = {
-    "claude-code": "kb note",
-    "codex": "kb note",
-    "copilot": 'kb note --agent "Copilot CLI"',
-    "cursor": 'kb note --agent "Cursor CLI"',
-}
 ASK_AFTER = timedelta(minutes=10)
 KEEP_MARKERS = timedelta(days=7)
+AT_WORK = timedelta(hours=8)  # since its hook last ran: past this, `kb note` no longer takes a marker's word
+QUESTION = (
+    "kb: before you finish: did this session find something the next agent must know (a broken or flaky state, "
+    "a trap, an error and its fix, a decision and its reason)? If so, leave it with `kb note`. If not, just stop. "
+    "kb asks this once per session."
+)
+
+
+class _Session(NamedTuple):
+    """What a session's marker holds."""
+
+    started: datetime
+    asked: bool
+    project: str | None
+    seen: datetime
 
 
 def run(event: str, agent: str, ctx: Context) -> str:
@@ -52,11 +60,10 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
     inbox = Inbox(inbox_dir(ctx.env))
     if _not_for_us(agent, payload, inbox.path):
         return None
+    project = _project(payload, ctx)
     if marker := _marker(agent, payload, ctx.env):
         with contextlib.suppress(OSError):  # the reminder matters more than the marker
-            _seen(marker, ctx.now)  # the stop hook counts its 10 minutes from here
-    folder = _folder(payload, ctx.cwd)
-    project = git_project(folder) or tilde(folder, ctx.env)
+            _seen(marker, ctx.now, lambda: project)  # the stop hook counts its 10 minutes from here
     count = sum(1 for _, note in inbox.read().open() if note.scope == project)
     found = (
         f"kb: {count} open note{'s' if count > 1 else ''} from earlier sessions for {project}, unchecked. "
@@ -66,8 +73,8 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
         else f"kb: no open notes from earlier sessions for {project}."
     )
     advice = (
-        f"Most sessions need no note. Leave one with `{NOTE_COMMANDS[agent]}` (skill kb-note) only when you find "
-        "something the next agent must know."
+        "Most sessions need no note. Leave one with `kb note` (skill kb-note) only when you find something the next "
+        "agent must know."
     )
     return _context(agent, f"{found} {advice}")
 
@@ -82,16 +89,23 @@ def stop(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any]
         or _not_for_us(agent, payload, inbox_dir(ctx.env))
     ):
         return None
-    started, asked = _seen(marker, ctx.now)
-    if asked or ctx.now - started < ASK_AFTER:
+    session = _seen(marker, ctx.now, lambda: _project(payload, ctx))
+    if session.asked or ctx.now - session.started < ASK_AFTER:
         return None
-    _record(marker, started, asked=True)  # first: a marker it can't update means no question
-    question = (
-        "kb: before you finish: did this session find something the next agent must know (a broken or flaky state, "
-        f"a trap, an error and its fix, a decision and its reason)? If so, leave it with `{NOTE_COMMANDS[agent]}`. "
-        "If not, just stop. kb asks this once per session."
-    )
-    return _continue(agent, question)
+    _record(marker, session._replace(asked=True))  # first: a marker it can't update means no question
+    return _continue(agent, QUESTION)
+
+
+def at_work(project: str, env: Mapping[str, str], now: datetime) -> set[str]:
+    """The agents whose hooks ran for this project lately, by their markers: how `kb note` knows an agent that sets
+    no variable of its own (docs/design.md §4.10). A marker it can't read says nothing."""
+    agents = set()
+    for marker in hooks_dir(env).glob("*.json"):
+        with contextlib.suppress(OSError):
+            session = _state(marker)
+            if session and session.project == project and now - session.seen < AT_WORK:
+                agents.add(marker.stem.rpartition("-")[0])  # {agent}-{digest}.json
+    return agents
 
 
 def _turn_completed(payload: Mapping[str, Any]) -> bool:
@@ -117,29 +131,42 @@ def _marker(agent: str, payload: Mapping[str, Any], env: Mapping[str, str]) -> P
     return hooks_dir(env) / f"{agent}-{digest}.json"
 
 
-def _seen(marker: Path, now: datetime) -> tuple[datetime, bool]:
-    """When kb first saw the session, and whether it asked; recorded the first time, and again where the marker
-    can't be read (the session starts over rather than never being asked)."""
-    state = _state(marker)
-    if state is None:
+def _seen(marker: Path, now: datetime, project: Callable[[], str]) -> _Session:
+    """The session, recorded as seen now. New the first time, and again where the marker can't be read (the session
+    starts over rather than never being asked). `project` runs git, so only where the marker doesn't name one."""
+    session = _state(marker)
+    if session is None:
         marker.parent.mkdir(parents=True, exist_ok=True)
         _prune(marker.parent, now)
-        _record(marker, now, asked=False)
-        return now, False
-    return state
+        session = _Session(started=now, asked=False, project=project(), seen=now)
+    else:
+        session = session._replace(project=session.project or project(), seen=now)
+    _record(marker, session)
+    return session
 
 
-def _state(marker: Path) -> tuple[datetime, bool] | None:
-    """The marker's start and whether kb asked; None for no marker, or one kb can't read."""
+def _state(marker: Path) -> _Session | None:
+    """What the marker holds; None for no marker, or one kb can't read."""
     try:
         state = json.loads(marker.read_text(encoding="utf-8"))
-        return datetime.fromisoformat(state["started"]), state["asked"] is True
+        project = state.get("project") if isinstance(state, dict) else None
+        return _Session(
+            started=_time(state["started"]),
+            asked=state["asked"] is True,
+            project=project if isinstance(project, str) else None,
+            seen=_time(state.get("seen") or state["started"]),
+        )
     except (FileNotFoundError, ValueError, TypeError, KeyError):
         return None
 
 
-def _record(marker: Path, started: datetime, *, asked: bool) -> None:
-    replace_file(marker, json.dumps({"started": started.isoformat(), "asked": asked}))  # whole, or not at all
+def _time(text: str) -> datetime:
+    return datetime.fromisoformat(text).astimezone(UTC)  # always comparable with `now`
+
+
+def _record(marker: Path, session: _Session) -> None:
+    fields = session._asdict() | {"started": session.started.isoformat(), "seen": session.seen.isoformat()}
+    replace_file(marker, json.dumps(fields))  # whole, or not at all
 
 
 def _prune(folder: Path, now: datetime) -> None:
@@ -149,7 +176,7 @@ def _prune(folder: Path, now: datetime) -> None:
             state = _state(old)
         except OSError:
             state = None
-        if state is None or now - state[0] > KEEP_MARKERS:
+        if state is None or now - state.started > KEEP_MARKERS:
             old.unlink(missing_ok=True)
 
 
@@ -158,6 +185,12 @@ def _continue(agent: str, text: str) -> dict[str, Any]:
     if agent == "cursor":
         return {"followup_message": text}
     return {"decision": "block", "reason": text}
+
+
+def _project(payload: Mapping[str, Any], ctx: Context) -> str:
+    """The session's project, as `kb note` names it."""
+    folder = _folder(payload, ctx.cwd)
+    return git_project(folder) or tilde(folder, ctx.env)
 
 
 def _folder(payload: Mapping[str, Any], cwd: Path) -> Path:
