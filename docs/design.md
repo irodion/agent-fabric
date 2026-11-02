@@ -660,7 +660,7 @@ The kind says what the next agent should do with the note, and decides how long 
   CLI). An agent started by another (Codex run from Claude Code) inherits its variables, so `--agent` naming a tool
   wins over them, and with two agents' variables set `kb` asks for it; a flag naming no tool, such as a model name,
   loses to the environment. Copilot CLI or Cursor CLI started from Claude Code without `--agent` is still recorded
-  as Claude Code.
+  as Claude Code, so their hooks' text gives the command with `--agent` (below).
 - **`--resolve <id>`** closes an earlier note, usually a `status` once the tests pass again. It writes a new note
   that points at the old one, so the inbox stays append-only; resolved notes drop out of `kb inbox` and
   `kb catchup`.
@@ -732,8 +732,13 @@ kb hook stop --agent <claude-code|codex|copilot|cursor>    # end of a turn: the 
 
 - **Start** runs when a session starts, resumes, is cleared or is compacted (the last two drop the earlier
   reminder). It prints: *"kb: 2 open notes from earlier sessions for github.com/irodion/escape-velocity, unchecked.
-  Run `kb inbox` before relying on the repo's state. When you find something the next agent must know, leave a note
-  with `kb note` (skill kb-note)."* With no open notes, the first sentence says so.
+  Run `kb inbox` before relying on the repo's state. Most sessions need no note. Leave one with `kb note` (skill
+  kb-note) only when you find something the next agent must know."* With no open notes, the first sentence says so.
+- **The command in the text.** For Copilot CLI and Cursor CLI, the start reminder and the stop question give
+  `kb note --agent "Copilot CLI"` or `kb note --agent "Cursor CLI"`: nothing in their environment names them yet, and
+  the hook knows which agent it runs for. Left to name its tool, Copilot CLI's model signed its first note "Codex"
+  (2026-11-02). "Most sessions need no note" is there because the same reminder drew a note that only described the
+  repo, in a session that had been asked what the project does.
 - **Stop** runs at the end of each turn, not at session end: when the session ends, the agent can no longer act.
   Once per session, at the first end of a turn at least 10 minutes after the session started, it makes the agent
   continue with: *"kb: before you finish: did this session find something the next agent must know (a broken or
@@ -923,7 +928,7 @@ mypy and pytest on Python 3.13 and 3.14).
 | sandbox blocks the inbox write | `kb note` exits 1, the note is lost | the error names the folder to add to the sandbox's write list; `kb doctor` reports a missing or unwritable inbox and a write list without it, and `--fix` adds it (§4.10) |
 | agents note routine progress | inbox noise | the skill says most sessions need none; ingest drops it; tighten the description |
 | `status` note never resolved | later agents warned about a fixed problem | `kb inbox` marks it possibly stale after 14 days; `kb lint` lists it |
-| agent misnames itself (model name for tool name) | wrong `agent` on the note | the environment wins over a model name in `--agent`; a tool name in `--agent` wins, for an agent started by another (§4.10) |
+| agent misnames itself (model name for tool name) | wrong `agent` on the note | the environment wins over a model name in `--agent`; a tool name in `--agent` wins, for an agent started by another; the hooks give Copilot CLI and Cursor CLI the `--agent` to use (§4.10) |
 | agents never call `kb note` | no notes | the start and stop hooks remind them (§4.10); measured in the phase 1 trial; reword the skill description |
 | the stop hook asks at the wrong moment | an extra turn per session; notes written to please it | once per session, not before 10 minutes; ingest drops thin notes; `--hooks` leaves it out |
 | a hook fails or hangs | the agent's session start or turn end held up | any error prints nothing and exits 0; a 10-second timeout per entry |
@@ -1017,7 +1022,8 @@ them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag 
   check, and the next steps for `missing`, `outdated`, `problem`, Codex hooks just installed and `kb` not on
   `PATH`; `next: []` when nothing is left to do; values with commas, colons and quotes. `install.sh` without uv.
 - `kb hook start`: no notes, open notes, only resolved ones, outside git, and in a git repo with and without a
-  remote; each agent's output format. `kb hook stop`: before 10 minutes (silent), the first turn after (asks),
+  remote; each agent's output format; the note command in Copilot CLI's and Cursor CLI's text signs a note with
+  their name, even started from Claude Code. `kb hook stop`: before 10 minutes (silent), the first turn after (asks),
   later turns (silent), `stop_hook_active` (silent), a turn Cursor or Copilot CLI says didn't complete (silent), a
   marker it can't write (silent), a broken marker (the session starts over), old markers removed. Both: Cursor's
   input to the `claude-code` entry, and unreadable or too deeply nested input or a missing inbox (silent, exit 0).
