@@ -12,10 +12,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TextIO
 
-from agent_fabric.agents import detect_agent
+from agent_fabric.agents import AgentUnknown, detect_agent
 from agent_fabric.context import Context
 from agent_fabric.doctor import doctor
-from agent_fabric.gitinfo import git_facts, git_project
+from agent_fabric.gitinfo import git_facts, project_id
 from agent_fabric.hooks import AGENTS, HOOKS, at_work
 from agent_fabric.hooks import run as run_hook
 from agent_fabric.inbox import Inbox, Snapshot
@@ -127,13 +127,11 @@ def _note(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
         raise UsageError(
             f"the note is {len(text)} characters; keep it to {MAX_TEXT} characters and link longer detail with --ref"
         )
+    try:
+        agent = detect_agent(env, args.agent, lambda: at_work(project_id(cwd, env), env, ctx.now))
+    except AgentUnknown as e:
+        raise UsageError(str(e)) from None
     facts = git_facts(cwd)
-    agent = detect_agent(env, args.agent, at_work(facts.project or tilde(cwd, env), env, ctx.now))
-    if agent is None:
-        raise UsageError(
-            "kb can't tell which agent you are; add --agent with your tool's name "
-            "(Claude Code, Codex, Copilot CLI, Cursor CLI), not your model's"
-        )
     bases = [cwd, *([facts.root] if facts.root else [])]
     warnings = [
         f"kb: warning: --ref {ref}: {missing} not found from {cwd}\n"
@@ -199,7 +197,7 @@ def _inbox(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
     elif args.project:
         scope = _project(args.project, ctx)
     else:
-        scope = git_project(ctx.cwd) or tilde(ctx.cwd, ctx.env)
+        scope = project_id(ctx.cwd, ctx.env)
     notes = [
         note
         for _, note in (snapshot.notes if args.all else snapshot.open())
@@ -218,7 +216,7 @@ def _project(value: str, ctx: Context) -> str:
     folder = Path(os.path.normpath(ctx.cwd / expand(value, ctx.env)))
     if not folder.is_dir():
         return value
-    return git_project(folder) or tilde(folder, ctx.env)
+    return project_id(folder, ctx.env)
 
 
 def _shown(value: str) -> str:
@@ -228,7 +226,8 @@ def _shown(value: str) -> str:
 
 def _entry(note: Note, now: datetime, resolved_by: str | None) -> str:
     where = note.project or note.cwd
-    header = _shown(f"{note.id}  {note.time:%Y-%m-%d %H:%M}  {note.kind}  {note.agent['name']}  {where}")
+    agent = note.agent["name"] + (" (from hook)" if note.agent.get("from") == "hook" else "")
+    header = _shown(f"{note.id}  {note.time:%Y-%m-%d %H:%M}  {note.kind}  {agent}  {where}")
     age = now - note.time
     if resolved_by:
         header += f"  (resolved by {resolved_by})"

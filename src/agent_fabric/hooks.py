@@ -5,15 +5,16 @@ The reminder carries a count and the project id, never a note's text: the agent 
 import contextlib
 import hashlib
 import json
-from collections.abc import Callable, Mapping
+import os
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
 
 from agent_fabric.context import Context
-from agent_fabric.gitinfo import git_project
+from agent_fabric.gitinfo import project_id
 from agent_fabric.inbox import Inbox
-from agent_fabric.paths import hooks_dir, inbox_dir, tilde
+from agent_fabric.paths import hooks_dir, inbox_dir
 from agent_fabric.sandboxes import replace_file
 
 HOOKS = ("start", "stop")
@@ -25,8 +26,8 @@ EVENTS = {  # each agent's events for kb's hooks
 }
 AGENTS = tuple(EVENTS)
 ASK_AFTER = timedelta(minutes=10)
-KEEP_MARKERS = timedelta(days=7)
-AT_WORK = timedelta(hours=8)  # since its hook last ran: past this, `kb note` no longer takes a marker's word
+KEEP_MARKERS = timedelta(days=7)  # since a hook last ran for the session
+AT_WORK = timedelta(hours=8)  # since a hook last ran: past this, `kb note` no longer takes a marker's word
 QUESTION = (
     "kb: before you finish: did this session find something the next agent must know (a broken or flaky state, "
     "a trap, an error and its fix, a decision and its reason)? If so, leave it with `kb note`. If not, just stop. "
@@ -35,12 +36,12 @@ QUESTION = (
 
 
 class _Session(NamedTuple):
-    """What a session's marker holds."""
+    """What a session's marker holds. The file's own time says when a hook last ran for the session, so that a hook
+    that changes nothing else doesn't rewrite it, and can't put back an older copy over one that says `asked`."""
 
     started: datetime
     asked: bool
-    project: str | None
-    seen: datetime
+    project: str | None  # None until a hook has named it
 
 
 def run(event: str, agent: str, ctx: Context) -> str:
@@ -60,10 +61,15 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
     inbox = Inbox(inbox_dir(ctx.env))
     if _not_for_us(agent, payload, inbox.path):
         return None
-    project = _project(payload, ctx)
-    if marker := _marker(agent, payload, ctx.env):
+    marker = _marker(agent, payload, ctx.env)
+    session = None
+    if marker:
         with contextlib.suppress(OSError):  # the reminder matters more than the marker
-            _seen(marker, ctx.now, lambda: project)  # the stop hook counts its 10 minutes from here
+            session = _seen(marker, ctx.now)  # the stop hook counts its 10 minutes from here; before git can hang
+    project = _project(payload, ctx)
+    if marker and session:
+        with contextlib.suppress(OSError):
+            _name_project(marker, session, project, ctx.now)
     count = sum(1 for _, note in inbox.read().open() if note.scope == project)
     found = (
         f"kb: {count} open note{'s' if count > 1 else ''} from earlier sessions for {project}, unchecked. "
@@ -82,17 +88,17 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
 def stop(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any] | None:
     """Once per session, at the first end of a turn 10 minutes in: make the agent continue with the question."""
     marker = _marker(agent, payload, ctx.env)
-    if (
-        marker is None
-        or payload.get("stop_hook_active")
-        or not _turn_completed(payload)
-        or _not_for_us(agent, payload, inbox_dir(ctx.env))
-    ):
+    if marker is None or _not_for_us(agent, payload, inbox_dir(ctx.env)):
         return None
-    session = _seen(marker, ctx.now, lambda: _project(payload, ctx))
+    session = _seen(marker, ctx.now)
+    if payload.get("stop_hook_active") or not _turn_completed(payload):
+        return None
+    if session.project is None:
+        with contextlib.suppress(Exception):  # the question matters more than the project
+            session = _name_project(marker, session, _project(payload, ctx), ctx.now)
     if session.asked or ctx.now - session.started < ASK_AFTER:
         return None
-    _record(marker, session._replace(asked=True))  # first: a marker it can't update means no question
+    _record(marker, session._replace(asked=True), ctx.now)  # first: a marker it can't update means no question
     return _continue(agent, QUESTION)
 
 
@@ -103,9 +109,14 @@ def at_work(project: str, env: Mapping[str, str], now: datetime) -> set[str]:
     for marker in hooks_dir(env).glob("*.json"):
         with contextlib.suppress(OSError):
             session = _state(marker)
-            if session and session.project == project and now - session.seen < AT_WORK:
+            if session and session.project == project and _since_a_hook_ran(marker, now) < AT_WORK.total_seconds():
                 agents.add(marker.stem.rpartition("-")[0])  # {agent}-{digest}.json
     return agents
+
+
+def _since_a_hook_ran(marker: Path, now: datetime) -> float:
+    """In seconds: a marker's file time can be anything, and a float can't overflow as a date can."""
+    return now.timestamp() - marker.stat().st_mtime
 
 
 def _turn_completed(payload: Mapping[str, Any]) -> bool:
@@ -131,17 +142,26 @@ def _marker(agent: str, payload: Mapping[str, Any], env: Mapping[str, str]) -> P
     return hooks_dir(env) / f"{agent}-{digest}.json"
 
 
-def _seen(marker: Path, now: datetime, project: Callable[[], str]) -> _Session:
-    """The session, recorded as seen now. New the first time, and again where the marker can't be read (the session
-    starts over rather than never being asked). `project` runs git, so only where the marker doesn't name one."""
+def _seen(marker: Path, now: datetime) -> _Session:
+    """The session, with a hook recorded as having run now. New the first time, and again where the marker can't be
+    read (the session starts over rather than never being asked)."""
     session = _state(marker)
     if session is None:
         marker.parent.mkdir(parents=True, exist_ok=True)
         _prune(marker.parent, now)
-        session = _Session(started=now, asked=False, project=project(), seen=now)
+        session = _Session(started=now, asked=False, project=None)
+        _record(marker, session, now)
     else:
-        session = session._replace(project=session.project or project(), seen=now)
-    _record(marker, session)
+        os.utime(marker, (now.timestamp(), now.timestamp()))
+    return session
+
+
+def _name_project(marker: Path, session: _Session, project: str, now: datetime) -> _Session:
+    """The session in this project: the first hook names it, and a session resumed elsewhere moves."""
+    if session.project == project:
+        return session
+    session = session._replace(project=project)
+    _record(marker, session, now)
     return session
 
 
@@ -150,33 +170,26 @@ def _state(marker: Path) -> _Session | None:
     try:
         state = json.loads(marker.read_text(encoding="utf-8"))
         project = state.get("project") if isinstance(state, dict) else None
-        return _Session(
-            started=_time(state["started"]),
-            asked=state["asked"] is True,
-            project=project if isinstance(project, str) else None,
-            seen=_time(state.get("seen") or state["started"]),
-        )
-    except (FileNotFoundError, ValueError, TypeError, KeyError):
+        started = datetime.fromisoformat(state["started"]).astimezone(UTC)  # always comparable with `now`
+        return _Session(started, state["asked"] is True, project if isinstance(project, str) else None)
+    except (FileNotFoundError, ValueError, TypeError, KeyError, OverflowError, RecursionError):
         return None
 
 
-def _time(text: str) -> datetime:
-    return datetime.fromisoformat(text).astimezone(UTC)  # always comparable with `now`
-
-
-def _record(marker: Path, session: _Session) -> None:
-    fields = session._asdict() | {"started": session.started.isoformat(), "seen": session.seen.isoformat()}
+def _record(marker: Path, session: _Session, now: datetime) -> None:
+    fields = {"started": session.started.isoformat(), "asked": session.asked, "project": session.project}
     replace_file(marker, json.dumps(fields))  # whole, or not at all
+    os.utime(marker, (now.timestamp(), now.timestamp()))
 
 
 def _prune(folder: Path, now: datetime) -> None:
-    """Remove the markers of sessions that started over 7 days ago, and any marker kb can't read."""
+    """Remove the markers of sessions no hook has run for in over 7 days, and any marker kb can't read."""
     for old in folder.glob("*.json"):
         try:
-            state = _state(old)
+            remove = _state(old) is None or _since_a_hook_ran(old, now) > KEEP_MARKERS.total_seconds()
         except OSError:
-            state = None
-        if state is None or now - state.started > KEEP_MARKERS:
+            remove = True
+        if remove:
             old.unlink(missing_ok=True)
 
 
@@ -188,9 +201,8 @@ def _continue(agent: str, text: str) -> dict[str, Any]:
 
 
 def _project(payload: Mapping[str, Any], ctx: Context) -> str:
-    """The session's project, as `kb note` names it."""
-    folder = _folder(payload, ctx.cwd)
-    return git_project(folder) or tilde(folder, ctx.env)
+    """The session's project. By the physical folder, which is what `kb note` gets from the system."""
+    return project_id(_folder(payload, ctx.cwd).resolve(), ctx.env)
 
 
 def _folder(payload: Mapping[str, Any], cwd: Path) -> Path:

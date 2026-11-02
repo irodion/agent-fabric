@@ -1,6 +1,6 @@
 """Which agent is calling `kb`: its own variable, then its hooks' marker, then what it says (docs/design.md §4.10)."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 
 
 def _from_env(env: Mapping[str, str]) -> dict[str, dict[str, str]]:
@@ -32,21 +32,31 @@ TOOLS = {
 KNOWN_BY_MARKER = {"copilot": "Copilot CLI", "cursor": "Cursor CLI"}
 
 
-def detect_agent(env: Mapping[str, str], flag: str | None, at_work: Iterable[str] = ()) -> dict[str, str] | None:
-    """The agent from its own variable, else the hooks' markers (`at_work`), else `--agent`; None when none can tell.
+class AgentUnknown(ValueError):
+    """`kb` can't tell which agent this is; the message says what to add."""
+
+
+def detect_agent(env: Mapping[str, str], flag: str | None, at_work: Callable[[], Iterable[str]]) -> dict[str, str]:
+    """The agent from its own variable, else the hooks' markers (`at_work`, read only then), else `--agent`.
 
     An agent started by another inherits its variables, so `--agent` naming a tool wins over them, and with two
     agents' variables set `kb` needs it. A flag that names no tool (a model name, say) loses to the environment.
+
     Without a variable this can't be Claude Code or Codex, whose variables are always set, so only the others' markers
-    count. A flag that contradicts them loses: models have named the wrong tool of their own accord."""
+    count, and they beat a flag naming those two or no tool: models have named the wrong tool of their own accord. A
+    flag naming Copilot CLI or Cursor CLI is taken at its word, since one's finished session is no proof against the
+    other, whose marker may not exist yet."""
     found = _from_env(env)
     tool = TOOLS.get((flag or "").strip().lower())
-    if not found:
-        marked = {KNOWN_BY_MARKER[agent] for agent in at_work if agent in KNOWN_BY_MARKER}
+    if not found and tool not in KNOWN_BY_MARKER.values():
+        marked = {KNOWN_BY_MARKER[agent] for agent in at_work() if agent in KNOWN_BY_MARKER}
         if len(marked) == 1:
             return {"name": marked.pop(), "from": "hook"}
-        if marked:  # both at work here: only a flag naming one of them can tell which
-            return {"name": tool, "from": "flag"} if tool and tool in marked else None
+        if marked:
+            raise AgentUnknown(
+                "kb can't tell which agent you are: Copilot CLI and Cursor CLI have both run in this project lately; "
+                "add --agent with the one you are"
+            )
     if tool:
         return {"name": tool, "from": "env", **found[tool]} if tool in found else {"name": tool, "from": "flag"}
     if len(found) == 1:
@@ -54,4 +64,7 @@ def detect_agent(env: Mapping[str, str], flag: str | None, at_work: Iterable[str
         return {"name": name, "from": "env", **details}
     if flag:  # names no tool; with two agents' variables set, it's still the best word on which one this is
         return {"name": flag, "from": "flag"}
-    return None
+    raise AgentUnknown(
+        "kb can't tell which agent you are; add --agent with your tool's name "
+        "(Claude Code, Codex, Copilot CLI, Cursor CLI), not your model's"
+    )

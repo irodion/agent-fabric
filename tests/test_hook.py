@@ -301,6 +301,55 @@ def test_stop_hook_starts_the_session_over_from_a_broken_marker(kb: Kb) -> None:
     )
 
 
+def test_an_end_of_a_turn_that_does_not_ask_leaves_the_markers_contents_alone(kb: Kb) -> None:
+    """So an overlapping hook can't write back an older copy and undo `asked`."""
+    make_inbox(kb)
+    kb("hook", "start", "--agent", "codex", stdin=start_input(kb))
+    (marker,) = (kb.home / ".local" / "share" / "agent-fabric" / "hooks").iterdir()
+    before = (marker.stat().st_ino, marker.read_text())
+    kb.later(minutes=1)
+
+    kb("hook", "stop", "--agent", "codex", stdin=stop_input(kb))
+
+    assert (marker.stat().st_ino, marker.read_text()) == before
+
+
+def test_start_hook_leaves_a_marker_even_where_it_cannot_name_the_project(kb: Kb) -> None:
+    make_inbox(kb)
+
+    result = kb("hook", "start", "--agent", "copilot", stdin=json.dumps({"sessionId": "c1", "cwd": 7}))
+
+    assert (result.stdout, len(list((kb.home / ".local/share/agent-fabric/hooks").iterdir()))) == ("", 1)
+
+
+def test_stop_hook_still_asks_where_it_cannot_name_the_project(kb: Kb) -> None:
+    make_inbox(kb)
+    unusable = json.dumps({"sessionId": "c1", "cwd": 7})
+    kb("hook", "start", "--agent", "copilot", stdin=unusable)
+    kb.later(minutes=10)
+
+    result = kb("hook", "stop", "--agent", "copilot", stdin=unusable)
+
+    assert json.loads(result.stdout) == {"decision": "block", "reason": QUESTION}
+
+
+def test_a_session_still_in_use_keeps_its_marker_past_seven_days(kb: Kb) -> None:
+    make_inbox(kb)
+    kb("hook", "start", "--agent", "codex", stdin=start_input(kb))
+    kb.later(minutes=10)
+    asked = kb("hook", "stop", "--agent", "codex", stdin=stop_input(kb))
+    kb.later(days=6)
+    kb("hook", "stop", "--agent", "codex", stdin=stop_input(kb))
+    kb.later(days=1, hours=12)
+    kb("hook", "stop", "--agent", "codex", stdin=stop_input(kb, session="another"))  # removes the old markers
+    kb("hook", "stop", "--agent", "codex", stdin=stop_input(kb))
+    kb.later(minutes=10)  # a marker lost and started over would ask again now
+
+    again = kb("hook", "stop", "--agent", "codex", stdin=stop_input(kb))
+
+    assert (bool(asked.stdout), again.stdout) == (True, "")
+
+
 def test_a_new_session_removes_markers_older_than_seven_days(kb: Kb) -> None:
     make_inbox(kb)
     kb("hook", "stop", "--agent", "claude-code", stdin=stop_input(kb, session="old"))
