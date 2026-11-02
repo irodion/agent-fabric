@@ -1,22 +1,37 @@
 """Seam A: `kb hook start|stop`, as the agents' hooks run it, with the agent's hook input on stdin."""
 
 import json
+import shlex
 import subprocess
 
 import pytest
 from conftest import Kb
 
-REMINDER = (
-    "Run `kb inbox` before relying on the repo's state. When you find something the next agent must know, "
-    "leave a note with `kb note` (skill kb-note)."
-)
+NOTE_COMMAND = {
+    "claude-code": "kb note",
+    "codex": "kb note",
+    "copilot": 'kb note --agent "Copilot CLI"',
+    "cursor": 'kb note --agent "Cursor CLI"',
+}
 
 
-QUESTION = (
-    "kb: before you finish: did this session find something the next agent must know (a broken or flaky state, "
-    "a trap, an error and its fix, a decision and its reason)? If so, leave it with `kb note`. If not, just stop. "
-    "kb asks this once per session."
-)
+def advice(agent: str) -> str:
+    return (
+        f"Most sessions need no note. Leave one with `{NOTE_COMMAND[agent]}` (skill kb-note) only when you find "
+        "something the next agent must know."
+    )
+
+
+def reminder(agent: str) -> str:
+    return f"Run `kb inbox` before relying on the repo's state. {advice(agent)}"
+
+
+def question(agent: str) -> str:
+    return (
+        "kb: before you finish: did this session find something the next agent must know (a broken or flaky state, "
+        f"a trap, an error and its fix, a decision and its reason)? If so, leave it with `{NOTE_COMMAND[agent]}`. "
+        "If not, just stop. kb asks this once per session."
+    )
 
 
 def make_inbox(kb: Kb) -> None:
@@ -46,7 +61,7 @@ def test_start_hook_tells_claude_code_how_many_notes_are_open_here(kb: Kb) -> No
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
                 "additionalContext": "kb: 2 open notes from earlier sessions for ~/code/scratch, unchecked. "
-                + REMINDER,
+                + reminder("claude-code"),
             }
         },
     )
@@ -59,7 +74,7 @@ def test_start_hook_tells_claude_code_how_many_notes_are_open_here(kb: Kb) -> No
 def test_start_hook_answers_in_each_agents_format(kb: Kb, agent: str, key: str) -> None:
     kb("note", "--agent", "Codex", "--kind", "status", "the tests fail on main")
     kb("note", "--agent", "Codex", "--kind", "gotcha", "uv needs --cache-dir in the sandbox")
-    text = f"kb: 2 open notes from earlier sessions for ~/code/scratch, unchecked. {REMINDER}"
+    text = f"kb: 2 open notes from earlier sessions for ~/code/scratch, unchecked. {reminder(agent)}"
     expected = {
         "hookSpecificOutput": {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}},
         "additionalContext": {"additionalContext": text},
@@ -83,9 +98,25 @@ def test_start_hook_counts_only_this_projects_open_notes(kb: Kb) -> None:
     result = kb("hook", "start", "--agent", "copilot", stdin=start_input(kb))
 
     assert json.loads(result.stdout) == {
-        "additionalContext": "kb: no open notes from earlier sessions for ~/code/scratch. When you find something "
-        "the next agent must know, leave a note with `kb note` (skill kb-note)."
+        "additionalContext": f"kb: no open notes from earlier sessions for ~/code/scratch. {advice('copilot')}"
     }
+
+
+@pytest.mark.parametrize(("agent", "tool"), [("copilot", "Copilot CLI"), ("cursor", "Cursor CLI")])
+def test_the_note_command_in_the_reminder_signs_the_note_with_the_tool_running_the_hook(
+    kb: Kb, agent: str, tool: str
+) -> None:
+    """Nothing in their environment names these two, and a model left to pick a name can pick its own: Copilot CLI
+    signed a note "Codex". Started from Claude Code, they inherit its variables, and the name here still wins."""
+    make_inbox(kb)
+    kb.env["AI_AGENT"] = "claude-code_2-1-316_agent"
+    started = kb("hook", "start", "--agent", agent, stdin=start_input(kb))
+    text = next(iter(json.loads(started.stdout).values()))
+    command = next(part for part in text.split("`") if part.startswith("kb note"))
+
+    written = kb(*shlex.split(command)[1:], "--kind", "gotcha", "a trap in the tests")
+
+    assert (written.exit_code, f"gotcha  {tool}" in kb("inbox").stdout) == (0, True)
 
 
 def test_start_hook_names_a_single_note_as_one(kb: Kb) -> None:
@@ -170,7 +201,7 @@ def test_stop_hook_asks_claude_code_at_the_first_turn_end_ten_minutes_in(kb: Kb)
     assert (early.stdout, asked.exit_code, json.loads(asked.stdout)) == (
         "",
         0,
-        {"decision": "block", "reason": QUESTION},
+        {"decision": "block", "reason": question("claude-code")},
     )
 
 
@@ -194,7 +225,7 @@ def test_stop_hook_counts_the_ten_minutes_from_the_start_hook(kb: Kb) -> None:
 
     first_turn_end = kb("hook", "stop", "--agent", "codex", stdin=stop_input(kb))
 
-    assert json.loads(first_turn_end.stdout) == {"decision": "block", "reason": QUESTION}
+    assert json.loads(first_turn_end.stdout) == {"decision": "block", "reason": question("codex")}
 
 
 @pytest.mark.parametrize(
@@ -235,12 +266,12 @@ def test_stop_hook_stays_silent(kb: Kb, agent: str, extra: dict[str, object], in
         (
             "copilot",
             {"sessionId": "c1", "cwd": "/w", "stopReason": "end_turn", "stop_hook_active": False},
-            {"decision": "block", "reason": QUESTION},
+            {"decision": "block", "reason": question("copilot")},
         ),
         (
             "cursor",
             {"conversation_id": "c1", "cursor_version": "2026.10.22", "status": "completed", "loop_count": 0},
-            {"followup_message": QUESTION},
+            {"followup_message": question("cursor")},
         ),
     ],
 )
@@ -297,7 +328,10 @@ def test_stop_hook_starts_the_session_over_from_a_broken_marker(kb: Kb) -> None:
 
     asked = kb("hook", "stop", "--agent", "claude-code", stdin=stop_input(kb))
 
-    assert (restarted.stdout, json.loads(asked.stdout)) == ("", {"decision": "block", "reason": QUESTION})
+    assert (restarted.stdout, json.loads(asked.stdout)) == (
+        "",
+        {"decision": "block", "reason": question("claude-code")},
+    )
 
 
 def test_a_new_session_removes_markers_older_than_seven_days(kb: Kb) -> None:

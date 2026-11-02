@@ -24,13 +24,15 @@ EVENTS = {  # each agent's events for kb's hooks
     "cursor": {"start": "sessionStart", "stop": "stop"},
 }
 AGENTS = tuple(EVENTS)
+# kb knows Claude Code and Codex from their environment; a model left to name its tool can get it wrong
+NOTE_COMMANDS = {
+    "claude-code": "kb note",
+    "codex": "kb note",
+    "copilot": 'kb note --agent "Copilot CLI"',
+    "cursor": 'kb note --agent "Cursor CLI"',
+}
 ASK_AFTER = timedelta(minutes=10)
 KEEP_MARKERS = timedelta(days=7)
-QUESTION = (
-    "kb: before you finish: did this session find something the next agent must know (a broken or flaky state, "
-    "a trap, an error and its fix, a decision and its reason)? If so, leave it with `kb note`. If not, just stop. "
-    "kb asks this once per session."
-)
 
 
 def run(event: str, agent: str, ctx: Context) -> str:
@@ -63,8 +65,11 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
         if count
         else f"kb: no open notes from earlier sessions for {project}."
     )
-    text = f"{found} When you find something the next agent must know, leave a note with `kb note` (skill kb-note)."
-    return _context(agent, text)
+    advice = (
+        f"Most sessions need no note. Leave one with `{NOTE_COMMANDS[agent]}` (skill kb-note) only when you find "
+        "something the next agent must know."
+    )
+    return _context(agent, f"{found} {advice}")
 
 
 def stop(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any] | None:
@@ -81,7 +86,12 @@ def stop(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any]
     if asked or ctx.now - started < ASK_AFTER:
         return None
     _record(marker, started, asked=True)  # first: a marker it can't update means no question
-    return _continue(agent, QUESTION)
+    question = (
+        "kb: before you finish: did this session find something the next agent must know (a broken or flaky state, "
+        f"a trap, an error and its fix, a decision and its reason)? If so, leave it with `{NOTE_COMMANDS[agent]}`. "
+        "If not, just stop. kb asks this once per session."
+    )
+    return _continue(agent, question)
 
 
 def _turn_completed(payload: Mapping[str, Any]) -> bool:
