@@ -62,14 +62,13 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
     if _not_for_us(agent, payload, inbox.path):
         return None
     marker = _marker(agent, payload, ctx.env)
-    session = None
     if marker:
         with contextlib.suppress(OSError):  # the reminder matters more than the marker
-            session = _seen(marker, ctx.now)  # the stop hook counts its 10 minutes from here; before git can hang
+            _seen(marker, ctx.now)  # the stop hook counts its 10 minutes from here; before git can hang
     project = _project(payload, ctx)
-    if marker and session:
+    if marker:
         with contextlib.suppress(OSError):
-            _name_project(marker, session, project, ctx.now)
+            _name_project(marker, project, ctx.now)
     count = sum(1 for _, note in inbox.read().open() if note.scope == project)
     found = (
         f"kb: {count} open note{'s' if count > 1 else ''} from earlier sessions for {project}, unchecked. "
@@ -86,20 +85,18 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
 
 
 def stop(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any] | None:
-    """Once per session, at the first end of a turn 10 minutes in: make the agent continue with the question."""
+    """Once per session, at the first end of a turn 10 minutes in: make the agent continue with the question. Every
+    other end of a turn keeps the marker's project current, as nothing else tells it of `git init` or a move."""
     marker = _marker(agent, payload, ctx.env)
     if marker is None or _not_for_us(agent, payload, inbox_dir(ctx.env)):
         return None
     session = _seen(marker, ctx.now)
-    if payload.get("stop_hook_active") or not _turn_completed(payload):
-        return None
-    if session.project is None:
-        with contextlib.suppress(Exception):  # the question matters more than the project
-            session = _name_project(marker, session, _project(payload, ctx), ctx.now)
-    if session.asked or ctx.now - session.started < ASK_AFTER:
-        return None
-    _record(marker, session._replace(asked=True), ctx.now)  # first: a marker it can't update means no question
-    return _continue(agent, QUESTION)
+    finished = _turn_completed(payload) and not payload.get("stop_hook_active")
+    if finished and not session.asked and ctx.now - session.started >= ASK_AFTER:
+        _record(marker, session._replace(asked=True), ctx.now)  # first: a marker it can't update means no question
+        return _continue(agent, QUESTION)  # no git before this: it can outlast the hook's 10 seconds
+    _name_project(marker, _project(payload, ctx), ctx.now)
+    return None
 
 
 def at_work(project: str, env: Mapping[str, str], now: datetime) -> set[str]:
@@ -128,8 +125,9 @@ def last_ran(agent: str, env: Mapping[str, str]) -> datetime | None:
 
 
 def _since_a_hook_ran(marker: Path, now: datetime) -> float:
-    """In seconds: a marker's file time can be anything, and a float can't overflow as a date can."""
-    return now.timestamp() - marker.stat().st_mtime
+    """In seconds: a marker's file time can be anything, even ahead of the clock, which counts as that long ago; and
+    a float can't overflow as a date can."""
+    return abs(now.timestamp() - marker.stat().st_mtime)
 
 
 def _turn_completed(payload: Mapping[str, Any]) -> bool:
@@ -169,13 +167,12 @@ def _seen(marker: Path, now: datetime) -> _Session:
     return session
 
 
-def _name_project(marker: Path, session: _Session, project: str, now: datetime) -> _Session:
-    """The session in this project: the first hook names it, and a session resumed elsewhere moves."""
-    if session.project == project:
-        return session
-    session = session._replace(project=project)
-    _record(marker, session, now)
-    return session
+def _name_project(marker: Path, project: str, now: datetime) -> None:
+    """The session is in this project: the first hook names it, and later ones follow a session that moves. From the
+    marker as it is now, not as it was before git ran: another hook may have asked since."""
+    session = _state(marker)
+    if session and session.project != project:
+        _record(marker, session._replace(project=project), now)
 
 
 def _state(marker: Path) -> _Session | None:
@@ -214,8 +211,7 @@ def _continue(agent: str, text: str) -> dict[str, Any]:
 
 
 def _project(payload: Mapping[str, Any], ctx: Context) -> str:
-    """The session's project. By the physical folder, which is what `kb note` gets from the system."""
-    return project_id(_folder(payload, ctx.cwd).resolve(), ctx.env)
+    return project_id(_folder(payload, ctx.cwd), ctx.env)
 
 
 def _folder(payload: Mapping[str, Any], cwd: Path) -> Path:

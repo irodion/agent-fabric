@@ -127,11 +127,11 @@ def _note(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
         raise UsageError(
             f"the note is {len(text)} characters; keep it to {MAX_TEXT} characters and link longer detail with --ref"
         )
+    facts = git_facts(cwd)
     try:
-        agent = detect_agent(env, args.agent, lambda: at_work(project_id(cwd, env), env, ctx.now))
+        agent = detect_agent(env, args.agent, lambda: at_work(facts.project or tilde(cwd, env), env, ctx.now))
     except AgentUnknown as e:
         raise UsageError(str(e)) from None
-    facts = git_facts(cwd)
     bases = [cwd, *([facts.root] if facts.root else [])]
     warnings = [
         f"kb: warning: --ref {ref}: {missing} not found from {cwd}\n"
@@ -213,7 +213,7 @@ def _inbox(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
 
 def _project(value: str, ctx: Context) -> str:
     """`--project`: a folder names its project as `kb note` would there; anything else is a project id."""
-    folder = Path(os.path.normpath(ctx.cwd / expand(value, ctx.env)))
+    folder = ctx.cwd / expand(value, ctx.env)
     if not folder.is_dir():
         return value
     return project_id(folder, ctx.env)

@@ -144,6 +144,16 @@ def test_another_project_can_be_named_by_its_folder(kb: Kb, folder: str) -> None
     assert listed(kb, "--project", path)[1:] == ["  integration tests fail on main"]
 
 
+def test_a_project_named_through_a_symlink_lists_the_real_folders_notes(kb: Kb) -> None:
+    """`kb note` gets the physical folder from the system, so that's the name its notes carry."""
+    in_folder(kb, "billing")
+    leave(kb, "status", "integration tests fail on main")
+    link = kb.home / "code" / "link"
+    link.symlink_to(kb.cwd)
+
+    assert listed(kb, "--project", str(link))[1:] == ["  integration tests fail on main"]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
