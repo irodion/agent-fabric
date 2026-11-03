@@ -93,7 +93,6 @@ def codex_config(kb: Kb, text: str) -> Path:
 def test_doctor_is_happy_with_a_writable_inbox_and_matching_skills(kb: Kb) -> None:
     make_inbox(kb)
     install_skill(kb, ".claude")
-    install_skill(kb, ".agents")
     claude_settings(
         kb,
         {
@@ -101,8 +100,7 @@ def test_doctor_is_happy_with_a_writable_inbox_and_matching_skills(kb: Kb) -> No
             "hooks": hook_groups("claude-code"),
         },
     )
-    codex_config(kb, f'[sandbox_workspace_write]\nwritable_roots = ["{kb.home}/.local/share/agent-fabric/inbox"]\n')
-    (kb.home / ".codex" / "hooks.json").write_text(json.dumps({"hooks": hook_groups("codex")}))
+    codex_with_hooks(kb, f"{APPROVED_START}\n{APPROVED_STOP}")
 
     result = kb("doctor")
 
@@ -113,8 +111,8 @@ def test_doctor_is_happy_with_a_writable_inbox_and_matching_skills(kb: Kb) -> No
         ("skill", "~/.agents/skills/kb-note/SKILL.md", "for Codex and Copilot CLI"),
         ("sandbox", "~/.claude/settings.json", "Claude Code can write the inbox"),
         ("sandbox", "~/.codex/config.toml", "Codex can write the inbox"),
-        ("hooks", "~/.claude/settings.json", "start and stop"),
-        ("hooks", "~/.codex/hooks.json", "start and stop, once approved in Codex's /hooks"),
+        ("hooks", "~/.claude/settings.json", "start and stop; hasn't run yet"),
+        ("hooks", "~/.codex/hooks.json", "start and stop, approved in Codex; hasn't run yet"),
     ]
     assert (result.exit_code, result.stdout.splitlines()[0], report(result.stdout)) == (
         0,
@@ -183,7 +181,7 @@ def test_fix_adds_missing_and_updates_outdated_skill_copies(kb: Kb) -> None:
     (kb.home / ".codex").mkdir()
     kb("doctor", "--fix")
 
-    assert kb("doctor").exit_code == 0
+    assert [status for status, _, _ in rows(kb("doctor").stdout, "skill")] == ["ok", "ok"]
 
 
 def test_doctor_reports_a_missing_inbox_folder_because_sandboxes_need_it(kb: Kb) -> None:
@@ -631,8 +629,160 @@ def test_fix_installs_kbs_hooks_for_codex_and_says_to_approve_them(kb: Kb) -> No
             }
         ],
         {"hooks": hook_groups("codex")},
-        [("ok", "~/.codex/hooks.json", "start and stop, once approved in Codex's /hooks")],
+        [("problem", "~/.codex/hooks.json", "start and stop not approved in Codex, which won't run them")],
     )
+
+
+def codex_with_hooks(kb: Kb, state: str, hooks: object | None = None) -> None:
+    """Codex set up but for its hooks: kb's in hooks.json, and `state` as it recorded in config.toml on approving."""
+    install_skill(kb, ".agents")
+    codex_config(kb, f'[sandbox_workspace_write]\nwritable_roots = ["{kb.home}/.local/share/agent-fabric/inbox"]\n\n')
+    with (kb.home / ".codex" / "config.toml").open("a") as config:
+        config.write(state.replace("<hooks.json>", str(kb.home / ".codex" / "hooks.json")))
+    (kb.home / ".codex" / "hooks.json").write_text(json.dumps({"hooks": hooks or hook_groups("codex")}))
+
+
+APPROVED_START = '[hooks.state."<hooks.json>:session_start:0:0"]\ntrusted_hash = "sha256:aa"\nenabled = true\n'
+APPROVED_STOP = '[hooks.state."<hooks.json>:stop:0:0"]\ntrusted_hash = "sha256:bb"\n'
+
+
+def test_doctor_counts_a_codex_hook_with_a_hash_and_no_enabled_as_approved(kb: Kb) -> None:
+    """As in a real config: the Stop hook had only a hash, and ran (docs/design.md §11)."""
+    make_inbox(kb)
+    codex_with_hooks(kb, f"{APPROVED_START}\n{APPROVED_STOP}")
+
+    result = kb("doctor")
+
+    assert (result.exit_code, rows(result.stdout, "hooks")) == (
+        0,
+        [("ok", "~/.codex/hooks.json", "start and stop, approved in Codex; hasn't run yet")],
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "detail", "step"),
+    [
+        pytest.param(
+            "",
+            "start and stop not approved in Codex, which won't run them",
+            "Open Codex and approve kb's hooks in /hooks: Codex runs new or changed hooks only then",
+            id="nothing recorded",
+        ),
+        pytest.param(
+            APPROVED_START,
+            "stop not approved in Codex, which won't run it",
+            "Open Codex and approve kb's hooks in /hooks: Codex runs new or changed hooks only then",
+            id="one of the two",
+        ),
+        pytest.param(
+            f'{APPROVED_START}\n[hooks.state."<hooks.json>:stop:0:0"]\nenabled = true\n',
+            "stop not approved in Codex, which won't run it",
+            "Open Codex and approve kb's hooks in /hooks: Codex runs new or changed hooks only then",
+            id="no hash",
+        ),
+        pytest.param(
+            f'{APPROVED_START}\n[hooks.state."/elsewhere/hooks.json:stop:0:0"]\ntrusted_hash = "sha256:bb"\n',
+            "stop not approved in Codex, which won't run it",
+            "Open Codex and approve kb's hooks in /hooks: Codex runs new or changed hooks only then",
+            id="another hooks file's approval",
+        ),
+        pytest.param(
+            f'{APPROVED_START}\n[hooks.state."<hooks.json>:stop:0:0"]\ntrusted_hash = "sha256:bb"\nenabled = false\n',
+            "stop turned off in Codex",
+            "Turn kb's hooks back on in Codex's /hooks, or leave them out with kb doctor --fix --hooks",
+            id="turned off",
+        ),
+    ],
+)
+def test_doctor_says_when_codex_wont_run_kbs_hooks(kb: Kb, state: str, detail: str, step: str) -> None:
+    make_inbox(kb)
+    codex_with_hooks(kb, state)
+
+    result = kb("doctor")
+
+    assert (result.exit_code, rows(result.stdout, "hooks"), report(result.stdout)["next"]) == (
+        1,
+        [("problem", "~/.codex/hooks.json", detail)],
+        [{"by": "user", "step": step}],
+    )
+
+
+def test_doctor_finds_codexs_approval_where_kbs_group_is_in_the_file(kb: Kb) -> None:
+    """Codex keys an approval by the group's and the handler's place in hooks.json."""
+    make_inbox(kb)
+    theirs = {"hooks": [{"type": "command", "command": "their-hook", "timeout": 10}]}
+    hooks = hook_groups("codex")
+    codex_with_hooks(
+        kb,
+        f'{APPROVED_START}\n[hooks.state."<hooks.json>:stop:1:0"]\ntrusted_hash = "sha256:bb"\n',
+        {"SessionStart": hooks["SessionStart"], "Stop": [theirs, *hooks["Stop"]]},
+    )
+
+    assert rows(kb("doctor").stdout, "hooks") == [
+        ("ok", "~/.codex/hooks.json", "start and stop, approved in Codex; hasn't run yet")
+    ]
+
+
+def test_doctor_finds_codexs_approval_through_a_linked_codex_home(kb: Kb) -> None:
+    """Codex's record holds the physical path, whichever way CODEX_HOME reaches it."""
+    make_inbox(kb)
+    codex_with_hooks(kb, "")
+    real = kb.home / ".codex"
+    state = f"{APPROVED_START}\n{APPROVED_STOP}".replace("<hooks.json>", str(real / "hooks.json"))
+    with (real / "config.toml").open("a") as config:
+        config.write(state)
+    (kb.home / "linked").symlink_to(real)
+    kb.env["CODEX_HOME"] = str(kb.home / "linked")
+
+    assert rows(kb("doctor").stdout, "hooks") == [
+        ("ok", "~/linked/hooks.json", "start and stop, approved in Codex; hasn't run yet")
+    ]
+
+
+def test_doctor_asks_codex_to_approve_only_the_chosen_hooks(kb: Kb) -> None:
+    make_inbox(kb)
+    codex_with_hooks(kb, APPROVED_START, {"SessionStart": hook_groups("codex")["SessionStart"]})
+    (kb.home / ".config" / "agent-fabric").mkdir(parents=True)
+    (kb.home / ".config" / "agent-fabric" / "config.toml").write_text('[notes]\nhooks = ["start"]\n')
+
+    assert rows(kb("doctor").stdout, "hooks") == [
+        ("ok", "~/.codex/hooks.json", "start, approved in Codex; hasn't run yet")
+    ]
+
+
+def test_doctor_keeps_saying_once_approved_where_it_cant_read_codexs_config(kb: Kb) -> None:
+    make_inbox(kb)
+    codex_with_hooks(kb, "")
+    (kb.home / ".codex" / "config.toml").write_text("not = toml = at all\n")
+
+    assert rows(kb("doctor").stdout, "hooks") == [
+        ("ok", "~/.codex/hooks.json", "start and stop, once approved in Codex's /hooks; hasn't run yet")
+    ]
+
+
+def test_doctor_says_when_an_agents_hooks_last_ran_by_its_newest_marker(kb: Kb) -> None:
+    make_inbox(kb)
+    (kb.home / ".copilot").mkdir()
+    kb("doctor", "--fix")
+    start = json.dumps({"sessionId": "first", "cwd": str(kb.cwd)})
+    kb("hook", "start", "--agent", "copilot", stdin=start)
+    kb.later(hours=3)
+    kb("hook", "start", "--agent", "copilot", stdin=json.dumps({"sessionId": "second", "cwd": str(kb.cwd)}))
+    newest = f"{kb.now:%Y-%m-%d %H:%M}"
+    kb.later(hours=2)
+    kb("hook", "start", "--agent", "cursor", stdin=json.dumps({"session_id": "another agent", "cwd": str(kb.cwd)}))
+
+    assert rows(kb("doctor").stdout, "hooks") == [
+        ("ok", "~/.copilot/hooks/kb.json", f"start and stop; last ran {newest}")
+    ]
+
+
+def test_doctor_says_when_hooks_have_not_run_yet(kb: Kb) -> None:
+    make_inbox(kb)
+    (kb.home / ".cursor").mkdir()
+    kb("doctor", "--fix")
+
+    assert rows(kb("doctor").stdout, "hooks") == [("ok", "~/.cursor/hooks.json", "start and stop; hasn't run yet")]
 
 
 @pytest.mark.parametrize(
@@ -792,7 +942,7 @@ def test_fix_with_a_hooks_choice_records_it_and_installs_only_those(kb: Kb) -> N
 
     assert (later.exit_code, rows(later.stdout, "hooks"), json.loads(path.read_text())["hooks"]) == (
         0,
-        [("ok", "~/.claude/settings.json", "start")],
+        [("ok", "~/.claude/settings.json", "start; hasn't run yet")],
         {"SessionStart": hook_groups("claude-code")["SessionStart"]},
     )
 

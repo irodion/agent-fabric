@@ -114,6 +114,19 @@ def at_work(project: str, env: Mapping[str, str], now: datetime) -> set[str]:
     return agents
 
 
+def last_ran(agent: str, env: Mapping[str, str]) -> datetime | None:
+    """When a hook last ran for this agent, by its markers: how `kb doctor` knows its hooks work. None: not since the
+    last marker was pruned, or a time that's no date."""
+    times = []
+    for marker in hooks_dir(env).glob(f"{agent}-*.json"):
+        with contextlib.suppress(OSError):
+            times.append(marker.stat().st_mtime)
+    try:
+        return datetime.fromtimestamp(max(times), UTC) if times else None
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _since_a_hook_ran(marker: Path, now: datetime) -> float:
     """In seconds: a marker's file time can be anything, and a float can't overflow as a date can."""
     return now.timestamp() - marker.stat().st_mtime
