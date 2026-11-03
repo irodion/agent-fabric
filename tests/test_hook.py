@@ -2,9 +2,14 @@
 
 import json
 import subprocess
+from collections.abc import Mapping
+from typing import Any
 
 import pytest
 from conftest import Kb
+
+from agent_fabric import hooks
+from agent_fabric.context import Context
 
 ADVICE = (
     "Most sessions need no note. Leave one with `kb note` (skill kb-note) only when you find something the next "
@@ -331,6 +336,46 @@ def test_stop_hook_still_asks_where_it_cannot_name_the_project(kb: Kb) -> None:
     result = kb("hook", "stop", "--agent", "copilot", stdin=unusable)
 
     assert json.loads(result.stdout) == {"decision": "block", "reason": QUESTION}
+
+
+def test_the_stop_hook_that_asks_does_not_wait_for_git(kb: Kb, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Git can hang past the hook's own 10 seconds: the agent would kill it before it asked, at every stop."""
+    make_inbox(kb)
+    kb("hook", "start", "--agent", "copilot", stdin=json.dumps({"session_id": "s1", "cwd": 7}))  # names no project
+    kb.later(minutes=10)
+
+    def hangs(*_: object) -> None:
+        pytest.fail("the question waited for git")
+
+    monkeypatch.setattr("agent_fabric.gitinfo._git", hangs)
+    result = kb("hook", "stop", "--agent", "copilot", stdin=stop_input(kb))
+
+    assert json.loads(result.stdout) == {"decision": "block", "reason": QUESTION}
+
+
+def test_a_start_hook_overlapping_a_stop_hook_cant_undo_asked(kb: Kb, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session resumed in another project: the start hook's git can take seconds, and the stop hook asks meanwhile.
+    Asked twice, the session pays for another turn, and on Copilot CLI another premium request."""
+    make_inbox(kb)
+    kb("hook", "start", "--agent", "codex", stdin=start_input(kb))
+    kb.later(minutes=10)
+    kb.cwd = kb.home / "code" / "other"
+    kb.cwd.mkdir()
+    asked: list[str] = []
+    project = hooks._project
+
+    def stop_hook_overlaps(payload: Mapping[str, Any], ctx: Context) -> str:
+        if not asked:
+            asked.append(kb("hook", "stop", "--agent", "codex", stdin=stop_input(kb)).stdout)
+        return project(payload, ctx)
+
+    monkeypatch.setattr("agent_fabric.hooks._project", stop_hook_overlaps)
+    kb("hook", "start", "--agent", "codex", stdin=start_input(kb))
+    monkeypatch.undo()
+
+    again = kb("hook", "stop", "--agent", "codex", stdin=stop_input(kb))
+
+    assert (json.loads(asked[0]), again.stdout) == ({"decision": "block", "reason": QUESTION}, "")
 
 
 def test_a_session_still_in_use_keeps_its_marker_past_seven_days(kb: Kb) -> None:

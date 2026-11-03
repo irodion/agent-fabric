@@ -1,7 +1,9 @@
 import json
 import os
 import subprocess
+from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from conftest import Kb
@@ -144,6 +146,31 @@ def test_an_unknown_agent_must_name_its_tool(kb: Kb) -> None:
     assert (result.exit_code, "--agent" in result.stderr, "Cursor CLI" in result.stderr) == (2, True, True)
 
 
+@pytest.mark.parametrize(
+    ("flag", "tool"),
+    [
+        ("cursor-agent", "Cursor CLI"),
+        ("cursor-cli", "Cursor CLI"),
+        ("copilot-cli", "Copilot CLI"),
+        ("github-copilot-cli", "Copilot CLI"),
+        ("GitHub Copilot", "Copilot CLI"),
+        ("claude-code", "Claude Code"),
+    ],
+)
+def test_a_tool_is_known_however_the_flag_spells_it(kb: Kb, flag: str, tool: str) -> None:
+    assert agent_line(kb, "--agent", flag) == f'agent: {{"name": "{tool}", "from": "flag"}}'
+
+
+def test_a_flag_of_only_spaces_names_nobody(kb: Kb) -> None:
+    result = kb("note", "--kind", "gotcha", "--agent", "  ", "uv needs --cache-dir in the sandbox")
+
+    assert (result.exit_code, "--agent" in result.stderr) == (2, True)
+
+
+def test_a_flag_is_recorded_without_the_spaces_around_it(kb: Kb) -> None:
+    assert agent_line(kb, "--agent", "  Aider ") == 'agent: {"name": "Aider", "from": "flag"}'
+
+
 def hook_ran(kb: Kb, agent: str, event: str = "start", **fields: object) -> None:
     """The agent's hook, run for a session in this folder, on a machine with kb set up."""
     (kb.home / ".local" / "share" / "agent-fabric" / "inbox").mkdir(parents=True, exist_ok=True)
@@ -167,7 +194,7 @@ def test_the_marker_wins_over_a_flag_it_can_disprove(kb: Kb, flag: str) -> None:
     variables this isn't Claude Code or Codex, and a model's name is no tool's."""
     hook_ran(kb, "copilot")
 
-    assert agent_line(kb, "--agent", flag) == 'agent: {"name": "Copilot CLI", "from": "hook"}'
+    assert agent_line(kb, "--agent", flag) == f'agent: {{"name": "Copilot CLI", "from": "hook", "claimed": "{flag}"}}'
 
 
 def test_a_flag_naming_the_other_agent_known_by_its_marker_is_taken_at_its_word(kb: Kb) -> None:
@@ -175,6 +202,13 @@ def test_a_flag_naming_the_other_agent_known_by_its_marker_is_taken_at_its_word(
     hook_ran(kb, "copilot")
 
     assert agent_line(kb, "--agent", "Cursor CLI") == 'agent: {"name": "Cursor CLI", "from": "flag"}'
+
+
+def test_a_flag_with_a_hyphen_naming_the_other_agent_is_taken_at_its_word_too(kb: Kb) -> None:
+    """Cursor CLI's program is named `cursor-agent`."""
+    hook_ran(kb, "copilot")
+
+    assert agent_line(kb, "--agent", "cursor-agent") == 'agent: {"name": "Cursor CLI", "from": "flag"}'
 
 
 def test_an_agents_own_variable_comes_before_the_markers(kb: Kb) -> None:
@@ -253,6 +287,30 @@ def test_a_session_resumed_in_another_project_moves_its_marker_there(kb: Kb) -> 
     assert (here, unflagged_note(kb)) == ('agent: {"name": "Copilot CLI", "from": "hook"}', 2)
 
 
+def test_a_stop_hook_in_another_project_moves_the_marker_there(kb: Kb) -> None:
+    hook_ran(kb, "copilot")
+    first = kb.cwd
+    kb.cwd = kb.home / "code" / "other"
+    kb.cwd.mkdir()
+    kb.later(minutes=1)
+    hook_ran(kb, "copilot", "stop")
+    here = agent_line(kb)
+    kb.cwd = first
+
+    assert (here, unflagged_note(kb)) == ('agent: {"name": "Copilot CLI", "from": "hook"}', 2)
+
+
+def test_a_session_that_makes_its_folder_a_repo_is_followed_at_its_next_stop_hook(kb: Kb) -> None:
+    """Its project changes with no start hook to say so, and a note there would take the model's word."""
+    hook_ran(kb, "copilot")
+    subprocess.run(["git", "init", "-q"], cwd=kb.cwd, check=True)
+    subprocess.run(["git", "remote", "add", "origin", "git@github.com:me/scratch.git"], cwd=kb.cwd, check=True)
+    kb.later(minutes=1)
+    hook_ran(kb, "copilot", "stop")
+
+    assert agent_line(kb) == 'agent: {"name": "Copilot CLI", "from": "hook"}'
+
+
 def test_a_marker_matches_a_note_written_through_a_symlinks_real_folder(kb: Kb) -> None:
     """Outside git, a hook gets the folder as the agent names it, and `kb note` the physical one from the system."""
     link = kb.home / "code" / "link"
@@ -317,9 +375,32 @@ def test_the_stop_hook_alone_leaves_a_marker_too(kb: Kb) -> None:
     assert agent_line(kb) == 'agent: {"name": "Copilot CLI", "from": "hook"}'
 
 
+@pytest.mark.parametrize(
+    "fields",
+    [{"stopReason": "user_abort"}, {"stop_hook_active": True}],
+    ids=["an interrupted turn", "while continuing for a stop hook"],
+)
+def test_an_end_of_a_turn_kb_asks_nothing_at_still_names_the_project(kb: Kb, fields: dict[str, object]) -> None:
+    hook_ran(kb, "copilot", "stop", **fields)
+
+    assert agent_line(kb) == 'agent: {"name": "Copilot CLI", "from": "hook"}'
+
+
 def marker_file(kb: Kb) -> Path:
     (marker,) = (kb.home / ".local" / "share" / "agent-fabric" / "hooks").iterdir()
     return marker
+
+
+def test_a_marker_dated_ahead_of_the_clock_says_nothing_and_goes_at_the_next_prune(kb: Kb) -> None:
+    hook_ran(kb, "copilot")
+    ahead = (kb.now + timedelta(days=365)).timestamp()
+    os.utime(marker_file(kb), (ahead, ahead))
+    kb.later(days=30)
+    unknown = unflagged_note(kb)
+
+    hook_ran(kb, "cursor")  # a new session removes old markers
+
+    assert (unknown, marker_file(kb).name.startswith("cursor-")) == (2, True)
 
 
 @pytest.mark.parametrize(
@@ -358,6 +439,23 @@ def test_markers_are_read_only_when_no_variable_has_answered(kb: Kb, monkeypatch
     kb.env.update(CODEX_ENV)
 
     assert agent_line(kb).startswith('agent: {"name": "Codex", "from": "env"')
+
+
+def test_a_note_read_by_its_marker_asks_git_for_the_project_once(kb: Kb, monkeypatch: pytest.MonkeyPatch) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=kb.cwd, check=True)
+    subprocess.run(["git", "remote", "add", "origin", "git@github.com:me/scratch.git"], cwd=kb.cwd, check=True)
+    hook_ran(kb, "copilot")
+    asked: list[list[str]] = []
+    run = subprocess.run
+
+    def counted(argv: list[str], **options: Any) -> Any:
+        asked.append(argv)
+        return run(argv, **options)
+
+    monkeypatch.setattr("agent_fabric.gitinfo.subprocess.run", counted)
+    agent_line(kb)
+
+    assert asked.count(["git", "remote", "get-url", "origin"]) == 1
 
 
 def test_the_inbox_shows_that_a_note_was_signed_from_a_hooks_marker(kb: Kb) -> None:

@@ -61,9 +61,11 @@ def git_project(cwd: Path) -> str | None:
 
 
 def project_id(folder: Path, env: Mapping[str, str]) -> str:
-    """What notes in this folder belong to, as `Note.scope` names it: its git project, or outside git the folder.
-    The hooks' reminder, their markers and `kb inbox` all match notes through this."""
-    return git_project(folder) or tilde(folder, env)
+    """What notes in this folder belong to, as `Note.scope` names it: its git project, or outside git the folder. By
+    the physical folder, which is what `kb note` gets from the system. The hooks' reminder, their markers and
+    `kb inbox` all match notes through this."""
+    physical = folder.resolve()
+    return git_project(physical) or tilde(physical, env)
 
 
 def git_facts(cwd: Path) -> GitFacts:
