@@ -991,8 +991,10 @@ them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag 
   its project is on `[publish] headless`.
 - `kb note`, `kb inbox`, `kb doctor`, `kb hook`: each case is a test in `tests/`. `scripts/check.sh` runs them with
   CI's other checks, before each commit; `scripts/check.sh --red REV` names new tests that pass against older code,
-  which don't show the change. By hand, inside the Claude Code and Codex sandboxes with and without the inbox on the
-  write list: the note is written, or exit 1 names the folder.
+  which don't show the change. In an agent's sandbox, `pre-commit` can't stash other unstaged changes in its read-only
+  `~/.cache/pre-commit`, and the commit fails: `PRE_COMMIT_HOME="$TMPDIR/pre-commit" git commit` gives it a folder it
+  can write. By hand, inside the Claude Code and Codex sandboxes with and without the inbox on the write list: the
+  note is written, or exit 1 names the folder.
 - Hooks in a real agent: `scripts/spike/hook-lab.sh <cursor|copilot> [--stop]` runs the agent on this clone's `kb`
   in a throwaway repo and data folder, and prints the markers, how `kb note` signs there and the hook runs. What it
   relies on (2026-11-02): both agents follow `XDG_DATA_HOME`; Copilot CLI's hooks follow a `PATH` prefix and ignored a
