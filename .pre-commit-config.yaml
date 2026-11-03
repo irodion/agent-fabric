@@ -1,0 +1,10 @@
+# The checks CI runs, before each commit. .git/hooks/pre-commit runs this file after gitleaks.
+repos:
+  - repo: local
+    hooks:
+      - id: check
+        name: scripts/check.sh
+        language: system
+        entry: scripts/check.sh
+        pass_filenames: false
+        always_run: true
