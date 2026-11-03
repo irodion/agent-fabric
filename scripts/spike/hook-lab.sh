@@ -3,8 +3,8 @@
 # the markers, how `kb note` signs a note there, and the hook runs in the agent's log (docs/design.md §10). It needs
 # the agent's servers and folders, so it runs outside an agent's sandbox. The agent gets a plain prompt and no shell.
 # Each turn spends a model request, and a premium request in Copilot CLI.
-# Usage: scripts/spike/hook-lab.sh <cursor|copilot> [--stop]
-#   --stop  also get the stop question: make the session 11 minutes old and take another turn in it
+# Usage: scripts/spike/hook-lab.sh <cursor|copilot|codex> [--stop]
+#   --stop  also get the stop question: make the session 11 minutes old, change the repo's origin and take another turn
 set -euo pipefail
 
 usage() {
@@ -14,7 +14,7 @@ usage() {
 
 agent=${1:-}
 case $agent in
-cursor | copilot) ;;
+cursor | copilot | codex) ;;
 *) usage ;;
 esac
 stop=false
@@ -47,6 +47,11 @@ copilot_session() { # the folder Copilot CLI keeps for this project's session
 	[[ -n $yaml ]] && dirname "$yaml"
 }
 
+codex_rollouts() { # the logs Codex keeps for this project's session: each names its folder
+	find "$HOME/.codex/sessions" -name 'rollout-*.jsonl' -newer "$lab" \
+		-exec grep -lF "\"cwd\":\"$proj\"" {} + 2>/dev/null || true
+}
+
 cleanup() { # everything here is named by the lab's unique path, so a real session is never touched
 	local pid session
 	cd /
@@ -62,6 +67,9 @@ cleanup() { # everything here is named by the lab's unique path, so a real sessi
 	session=$(copilot_session || true)
 	if [[ -n $session ]]; then
 		rm -rf "$session"
+	fi
+	if [[ $agent == codex ]]; then
+		codex_rollouts | xargs -r rm -f
 	fi
 	rm -rf "$lab"
 }
@@ -82,20 +90,21 @@ if [[ $agent == cursor ]]; then
 fi
 
 session_id() {
-	if [[ $agent == cursor ]]; then
-		find "$chats" -mindepth 1 -maxdepth 1 -printf '%f\n' | head -1
-	else
-		basename "$(copilot_session)"
-	fi
+	case $agent in
+	cursor) find "$chats" -mindepth 1 -maxdepth 1 -printf '%f\n' | head -1 ;;
+	copilot) basename "$(copilot_session)" ;;
+	codex) head -1 "$(codex_rollouts | head -1)" | jq -r .payload.id ;;
+	esac
 }
 
 take_turn() { # [session id to resume]
 	local id=${1:-}
-	if [[ $agent == cursor ]]; then
-		XDG_DATA_HOME=$data timeout 90 cursor-agent -p --trust ${id:+--resume "$id"} "$prompt"
-	else
-		XDG_DATA_HOME=$data PATH=$repo/.venv/bin:$PATH timeout 90 copilot ${id:+--resume="$id"} -p "$prompt"
-	fi
+	case $agent in
+	cursor) XDG_DATA_HOME=$data timeout 90 cursor-agent -p --trust ${id:+--resume "$id"} "$prompt" ;;
+	copilot) XDG_DATA_HOME=$data PATH=$repo/.venv/bin:$PATH timeout 90 copilot ${id:+--resume="$id"} -p "$prompt" ;;
+	# With stdin an open pipe, as in an agent's shell, `codex exec` waits for its end before it starts.
+	codex) XDG_DATA_HOME=$data PATH=$repo/.venv/bin:$PATH timeout 90 codex exec ${id:+resume "$id"} "$prompt" </dev/null ;;
+	esac
 }
 
 markers() {
@@ -142,6 +151,10 @@ asked() {
 	grep -q '"asked": true' "$data"/agent-fabric/hooks/"$agent"-*.json 2>/dev/null
 }
 
+followed() { # the marker took up the origin changed before the last turn
+	grep -q 'kb-lab-moved' "$data"/agent-fabric/hooks/"$agent"-*.json 2>/dev/null
+}
+
 interactive_cursor_turn() { # `-p` runs don't get the stop question: drive a real session in a private tmux server
 	local id=$1
 	pane() { tmux -L "$socket" capture-pane -p -t lab 2>/dev/null; }
@@ -178,8 +191,9 @@ hook_log
 
 if $stop; then
 	id=$(session_id)
-	echo "=== another turn in session $id, 11 minutes on"
+	echo "=== another turn in session $id, 11 minutes on, with the repo's origin changed"
 	backdate
+	git -C "$proj" remote set-url origin git@github.com:example/kb-lab-moved.git
 	if [[ $agent == cursor ]]; then
 		interactive_cursor_turn "$id"
 	else
@@ -187,7 +201,10 @@ if $stop; then
 	fi
 	echo "--- markers after the stop hook"
 	markers
+	echo "--- kb note in a clean shell, under the new origin"
+	sign "--agent Codex" --agent Codex
 	echo "--- hook runs in the agent's log"
 	hook_log
 	if asked; then echo "the stop question was asked"; else echo "the stop question was NOT asked"; fi
+	if followed; then echo "the marker followed the new origin"; else echo "the marker did NOT follow the new origin"; fi
 fi
