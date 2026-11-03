@@ -47,9 +47,11 @@ copilot_session() { # the folder Copilot CLI keeps for this project's session
 	[[ -n $yaml ]] && dirname "$yaml"
 }
 
-codex_rollouts() { # the logs Codex keeps for this project's session: each names its folder
+codex_rollouts() { # the logs Codex keeps for this project's session: each names its folder, encoded as JSON
+	local cwd
+	cwd=$(jq -n --arg cwd "$proj" '$cwd')
 	find "$HOME/.codex/sessions" -name 'rollout-*.jsonl' -newer "$lab" \
-		-exec grep -lF "\"cwd\":\"$proj\"" {} + 2>/dev/null || true
+		-exec grep -lF "\"cwd\":$cwd" {} + 2>/dev/null || true
 }
 
 cleanup() { # everything here is named by the lab's unique path, so a real session is never touched
@@ -69,7 +71,7 @@ cleanup() { # everything here is named by the lab's unique path, so a real sessi
 		rm -rf "$session"
 	fi
 	if [[ $agent == codex ]]; then
-		codex_rollouts | xargs -r rm -f
+		codex_rollouts | xargs -r -d '\n' rm -f
 	fi
 	rm -rf "$lab"
 }
