@@ -710,8 +710,7 @@ not caused by your change.
 ```
 
 **Reading notes.** `kb inbox` lists the unresolved notes not yet ingested, and marks `status` notes older than 14
-days as possibly stale. `--project` takes a project id or a folder, which names its project as `kb note` would
-there. A note file `kb` can't read, or with a field of the wrong type or form, is skipped. `kb catchup` (§4.9) includes the project's unresolved `status` notes and its latest other
+days as possibly stale. `kb catchup` (§4.9) includes the project's unresolved `status` notes and its latest other
 notes; `kb search --kind note` searches all of them; `kb mcp` offers the same. Like all `kb` output they are labelled
 untrusted: an agent wrote them and nobody has checked them yet.
 
@@ -733,13 +732,10 @@ description sit in the agent's context; the body loads when the agent decides to
 Claude Code's folder, settings and skills with it; Cursor CLI is assumed to keep reading `~/.claude/skills/`, which
 then gets a copy of its own. With `COPILOT_HOME` set, Copilot CLI reads `$COPILOT_HOME/skills/` instead of
 `~/.agents/skills/`, and that folder gets a copy. `kb doctor` checks every copy against the package, for each agent
-it finds installed: Claude Code by its `.claude.json` or `settings.json` (not by `~/.claude`, which a copy for
-Cursor CLI creates), Codex by its folder, Copilot CLI by `~/.copilot` (or `COPILOT_HOME`), Cursor CLI by
-`~/.cursor`. It decides once, before `--fix` writes anything; `kb doctor --fix` adds missing copies and updates
-outdated ones.
+it finds installed, and `--fix` adds missing copies and updates outdated ones. A `~/.claude` folder alone doesn't
+mean Claude Code is installed: a copy for Cursor CLI creates it.
 
-The file is the one copy of the skill text: when to write a note (rarely), the four kinds, `--ref`, `--resolve`, stdin
-for quoted text, `--agent` as the tool's name, the 500-character limit, no secrets, and what exit 1 and 2 mean.
+That file is the one copy of the skill text.
 
 **Hooks.** The skill waits for the agent to think of it. Two hooks remind it, at the start of a session and at the
 end of a turn. Like the skill, they carry an instruction and a count, never a note's text (§7): the agent reads the
@@ -751,28 +747,20 @@ kb hook stop --agent <claude-code|codex|copilot|cursor>    # end of a turn: the 
 ```
 
 - **Start** runs when a session starts, resumes, is cleared or is compacted (the last two drop the earlier
-  reminder). It prints: *"kb: 2 open notes from earlier sessions for github.com/irodion/escape-velocity, unchecked.
-  Run `kb inbox` before relying on the repo's state. Most sessions need no note. Leave one with `kb note` (skill
-  kb-note) only when you find something the next agent must know."* With no open notes, the first sentence says so.
-  "Most sessions need no note" is there because the first wording drew a note that only described the repo, from a
-  session asked what the project does (Copilot CLI, 2026-11-02).
+  reminder). It gives the number of open notes for the project, says to run `kb inbox` before relying on the repo's
+  state, and reminds the agent of `kb note`. "Most sessions need no note" is in the wording because the first one
+  drew a note that only described the repo, from a session asked what the project does (Copilot CLI, 2026-11-02).
 - **Stop** runs at the end of each turn, not at session end: when the session ends, the agent can no longer act.
   Once per session, at the first end of a turn at least 10 minutes after the session started, it makes the agent
-  continue with: *"kb: before you finish: did this session find something the next agent must know (a broken or
-  flaky state, a trap, an error and its fix, a decision and its reason)? If so, leave it with `kb note`. If not,
-  just stop. kb asks this once per session."* The answer costs one turn, and Copilot CLI counts the question as a
-  premium request: its count rose by 2 for one typed prompt plus the question (2026-11-02). Shorter sessions aren't
-  asked, and the trial (§10) tunes the 10 minutes. Cursor CLI doesn't ask in a `-p` run: a chat 44 minutes old wasn't
-  asked with `-p`, and was in an interactive session (2026-11-02). A marker per session in
-  `~/.local/share/agent-fabric/hooks/` records when it started, whether it was asked, and its project; a session
-  resumed in another project moves there. The hook writes the marker before it looks up the project, so a failed
-  lookup costs only the project. The file's own time says when a hook last ran, at any end of a turn, even an
-  interrupted one: a hook that changes nothing else doesn't rewrite the marker, so it can't put back an older copy.
-  That time tells `kb note` who is at work (above), and markers no hook has run for in 7 days are removed. A marker is written whole or not at all;
-  one kb can't read starts the session over rather than leave it unasked. Where the marker can't be written, the
-  hook stays silent rather than ask every turn. It also stays silent when the agent is already continuing because
-  of a stop hook (`stop_hook_active`), and when the turn didn't complete: Cursor's `status` is `aborted` or `error`,
-  or Copilot CLI's `stopReason` isn't `end_turn` (Claude Code runs no Stop hook on an interrupt).
+  continue with a question: did this session find something the next agent must know? If not, just stop. The answer
+  costs one turn, and Copilot CLI counts the question as a premium request: its count rose by 2 for one typed prompt
+  plus the question (2026-11-02). Shorter sessions aren't asked, and the trial (§10) tunes the 10 minutes. Cursor CLI
+  doesn't ask in a `-p` run: a chat 44 minutes old wasn't asked with `-p`, and was in an interactive session
+  (2026-11-02).
+- **Markers.** One per session in `~/.local/share/agent-fabric/hooks/` records when it started, whether it was asked,
+  and its project. The file's own time says when a hook last ran, which tells `kb note` who is at work (above) and
+  `kb doctor` whether the hooks run. Markers no hook has run for in 7 days are removed. Where a marker can't be
+  written, the stop hook stays silent rather than ask every turn.
 - **Never in the way.** Any error, such as unreadable input or a missing inbox, prints nothing and exits 0, and
   each hook entry has a 10-second timeout: a session never fails or waits because of `kb`.
 
@@ -795,7 +783,11 @@ and Copilot CLI has none, so the hook can write its marker. Two agents need more
   both entries fire. `kb hook --agent claude-code` stays silent when its input comes from Cursor, which adds
   `cursor_version`. Copilot CLI runs Claude Code's hooks only from a repo's `.claude/`, not the user's.
 - Codex runs a new or changed user hook only after I approve it, once, in Codex (`/hooks`, or the prompt at
-  startup). `kb doctor` says so after installing; it can't yet tell whether I have (§11).
+  startup). `kb doctor` reads that from `[hooks.state]` in `config.toml`, by the hook's place in `hooks.json`: a hash
+  means approved. A hook with a hash and no `enabled` still runs (2026-11-02), so only `enabled = false` counts as
+  off. An unapproved or turned-off hook is a `problem`, since the setup isn't done. The hash comes from an internal
+  Codex function, so `kb` checks that one is there, not that it matches: after a change to kb's hook it can read as
+  approved until Codex asks again.
 
 **Setup.** `scripts/install.sh` installs `kb` from the clone with `uv tool install`, then runs `kb doctor --fix`.
 The install is not editable, so agents keep the installed `kb` while the clone switches branches; rerunning the
@@ -805,10 +797,6 @@ later, shows its checks. `scripts/install.sh --hooks start,stop` (the default), 
 the hooks: it passes the choice to `kb doctor --fix --hooks`, which records it as `hooks` under `[notes]` in
 `~/.config/agent-fabric/config.toml`, installs those hooks and removes kb's entries for the others. Later
 `kb doctor` runs, and the script rerun without `--hooks`, keep to the recorded choice; with none recorded, both.
-`kb doctor` changes only that one line of the file, in the file's own line endings, and leaves the file and the
-hooks alone where it can't. In the agents' hooks files, kb knows its handlers by their command (a program named
-`kb`, by name or by path, with `hook` first) and changes no other: where one shares a Claude Code or Codex group
-with the user's handlers, `--fix` takes it out of that group and keeps theirs.
 
 **What `kb doctor` prints.** An agent reads the report as often as I do: it runs `kb doctor` when a note fails (the
 checks only read, so they work in its sandbox), or reads what `install.sh` printed. So the report follows AXI's
@@ -826,47 +814,35 @@ checks[9]{status,check,path,detail}:
   missing,skill,~/.agents/skills/kb-note/SKILL.md,for Codex and Copilot CLI
   ok,sandbox,~/.claude/settings.json,Claude Code can write the inbox
   problem,sandbox,~/.codex/config.toml,kb can't add the inbox to sandbox_workspace_write.writable_roots without changing other lines
-  ok,hooks,~/.claude/settings.json,start and stop
+  ok,hooks,~/.claude/settings.json,"start and stop; last ran 2026-11-02 17:04"
   missing,hooks,~/.codex/hooks.json,start and stop
-  ok,hooks,~/.cursor/hooks.json,start and stop
+  ok,hooks,~/.cursor/hooks.json,start and stop; hasn't run yet
 next[2]{by,step}:
   user,"In your own terminal, not in an agent's session, run kb doctor --fix (or rerun scripts/install.sh)"
   user,Add /home/me/.local/share/agent-fabric/inbox to sandbox_workspace_write.writable_roots in ~/.codex/config.toml
 help: "These steps are for the user: an agent's sandbox can't change the agents' settings. Agents: explain them to the user in plain words."
 ```
 
-- **Statuses:** `ok`, `fixed`, `missing` and `outdated` (both of which `--fix` fixes), and `problem` (by hand).
-- **Next steps:** one step to run `kb doctor --fix` for every `missing` or `outdated` row; one by-hand step per
-  `problem`; after `--fix` installs or changes Codex's hooks (not when it only removes one), approving them in
-  `/hooks`; with `kb` not on `PATH`, adding its folder (`uv tool update-shell`); with another `kb` first on `PATH`,
-  taking it off; and after a `--fix` that left rows `missing` or `outdated` behind a problem, running it again once
-  the problem is fixed. Nothing to do is `next: []` and a summary that says so.
-- **`kb` row:** whether the first `kb` on `PATH`, where agents look for it, is the one `install.sh` installed: uv's
-  link into its tool folder (`UV_TOOL_DIR`, or `uv/tools` under the XDG data folder). Another, such as a
-  virtualenv's, is a `problem`, since agents would run it. It replaces `install.sh`'s own warning.
-- **Hooks rows** name every kind of trouble in a file (*"start missing; stop differs from this kb's"*), and a
-  `fixed` row what changed (*"installed start; updated stop"*, *"removed start"*).
-- **`install.sh`** keeps uv quiet, so what it prints is this report; its one error of its own, uv not installed,
-  comes in the same shape. Bad arguments print its usage and exit 2. Exit codes stay: 0 when every row is `ok` or
-  `fixed`, 1 otherwise.
+- **Statuses:** `ok`, `fixed`, `missing` and `outdated` (both of which `--fix` fixes), and `problem` (by hand). Exit
+  0 when every row is `ok` or `fixed`, 1 otherwise.
+- **`kb` row:** whether the first `kb` on `PATH` is the one `install.sh` installed, since agents run whichever comes
+  first. It replaces `install.sh`'s own warning.
+- **Hooks rows** say whether the hooks run, not only whether they're in the file: Codex's approval, and when a hook
+  last ran, by the markers. A right file with no run behind it drew a note doubting a hook that worked (2026-11-02).
+- **`install.sh`** keeps uv quiet, so what it prints is this report.
 
 **Setup per agent.** Claude Code's and Codex's sandboxes allow writes only in the project and temp folders, so the
 inbox folder goes on each one's write list (Claude Code: `sandbox.filesystem.allowWrite` in
 `~/.claude/settings.json`; Codex: `sandbox_workspace_write.writable_roots` in `~/.codex/config.toml`). A sandbox can
-only grant writes to a folder that exists, so `kb doctor --fix` creates the inbox first, then adds it to both lists
-and changes nothing else in either file; an entry for a folder that holds the inbox already covers it. The JSON is
-rewritten whole; the TOML only gains lines, in the file's own line endings, and the result must read back with the
-inbox in it before it is written. Either is replaced in one step, through a private (0600) temporary copy. A file it can't read, or a `writable_roots` that already
-lists other folders, it reports with the path to add by hand. Cursor CLI's sandbox needs the same where it runs (it
-doesn't start on the devbox); Copilot CLI has no OS sandbox. So that `kb note` doesn't ask for approval every time,
-it also goes on each agent's command allow list, except in Claude Code with `sandbox.autoAllowBashIfSandboxed`, which
-runs sandboxed commands without asking; `kb doctor` doesn't check the allow lists yet.
+only grant writes to a folder that exists, so `kb doctor --fix` creates the inbox first. It changes nothing else in
+these files, and one it can't edit safely it reports with the path to add by hand. Cursor CLI's sandbox needs the
+same where it runs (it doesn't start on the devbox); Copilot CLI has no OS sandbox. So that `kb note` doesn't ask for
+approval every time, it also goes on each agent's command allow list, except in Claude Code with
+`sandbox.autoAllowBashIfSandboxed`, which runs sandboxed commands without asking; `kb doctor` doesn't check the allow
+lists yet.
 
-The hooks go into the four hooks files in the table above. `kb doctor` knows its own entries by their command,
-which starts with `kb hook`, and changes no other entry: `--fix` adds missing ones, rewrites ones that differ from
-what it would install, and removes those the recorded choice leaves out. The JSON files are rewritten whole, the
-same way as the settings above; Copilot CLI's `kb.json` holds only kb's hooks. A hooks file it can't read, or with
-the wrong shape, it reports and leaves alone.
+The hooks go into the four hooks files in the table above. `kb doctor` knows its own entries by their command and
+changes no other, so the user's hooks survive every run. Copilot CLI's `kb.json` holds only kb's hooks.
 
 ## 5. Processes, ports, locations
 
@@ -888,7 +864,7 @@ the wrong shape, it reports and leaves alone.
 | `~/.local/share/agent-fabric/quarantine/` | digests blocked by gitleaks | no |
 | `~/.local/share/agent-fabric/local/` | digests of projects not on the allow list | no (backed up) |
 | `~/.local/share/agent-fabric/inbox/` | notes from `kb note`; `done/` once ingested (§4.10) | no (backed up) |
-| `~/.local/share/agent-fabric/hooks/` | one marker per agent session for the stop hook, removed after 7 days (§4.10) | no |
+| `~/.local/share/agent-fabric/hooks/` | one marker per agent session, for the hooks, `kb note` and `kb doctor`; removed after 7 days without a hook (§4.10) | no |
 | `~/.agentsview/` | agentsview config + archive | no (backed up) |
 | `~/wiki/` | wiki repo | yes |
 
@@ -1013,49 +989,21 @@ them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag 
   the reader must give the same messages and tool results as the JSON blobs, in conversation order.
 - Headless runs: fixtures of `claude -p`, `codex exec` and `copilot -p` sessions; each gets a local digest only unless
   its project is on `[publish] headless`.
-- `kb note`: each kind; no or unknown `--kind` and text over 500 characters (exit 2 with what to change); text on
-  stdin with quotes, backticks and `$`; the same note twice within 24 h (one file, same id); two different notes in
-  the same second (both kept); `--resolve` hides the note from `kb inbox` and `kb catchup`, even when worded like
-  the note; `--kind` with `--resolve`, and an empty `--resolve` (exit 2); an id used on an earlier day is not drawn
-  again; agent from Claude Code's or Codex's environment, from `--agent`, a model name in `--agent` (environment
-  wins), a tool name over an inherited environment (flag wins), two agents' variables without `--agent` and neither
-  (exit 2); agent from Copilot CLI's or Cursor CLI's marker, over a flag it can disprove, in a repo's subfolders and
-  through a symlink; a flag naming the other taken at its word; a variable before a marker, which is then not read;
-  both at work (only a flag naming one, else exit 2 naming the two); Claude Code's and Codex's markers, another
-  project's, one 8 hours old, one kept current by a turn's end (even an interrupted one), one from the stop hook
-  alone, one from an older `kb`, one moved to another project, and one it can't read; `(from hook)` in `kb inbox`;
-  dotted names such as `json.loads` or `example.com` as refs (no warning); a git repo, a linked worktree
-  and a folder outside git. Inside the Claude Code and Codex sandboxes with and without the inbox on the write list:
-  the note is written, or exit 1 names the folder.
-- `kb inbox`: `--project` as an id and as an absolute, relative or `.` folder; a `--since` it can't read or too long
-  ago (exit 2); note files with a field of the wrong type, or an id with control characters, skipped without
-  crashing `kb inbox` or `kb note`.
-- `kb doctor`: the inbox and each skill copy missing, outdated or unwritable, and `--fix` for each. Claude Code's
-  `settings.json` and Codex's `config.toml` missing, without the inbox, with it, broken, or the wrong shape; for
-  Codex also no `[sandbox_workspace_write]` table, a table without `writable_roots`, one listing other folders, and
-  a table `--fix` can't extend by adding lines (dotted keys): every other byte kept, or the file left alone.
-  Claude Code counts as installed by `~/.claude.json` or its settings file, not by `~/.claude`, which the skill
-  copy creates for Cursor CLI alone: no Claude Code settings are written for it, and Claude Code known only by
-  `~/.claude.json` gets its copy. An entry for a folder holding the inbox; CRLF line endings kept; an unreadable
-  skill copy; `CLAUDE_CONFIG_DIR` and `CODEX_HOME`. The copy in `~/.agents/skills/` for Codex and Copilot CLI, the
-  old copy in `$CODEX_HOME/skills/` (default and moved) removed only once the new one is in place, and
-  `COPILOT_HOME`. Each agent's hooks file missing, without kb's entries, with them, with an outdated one, broken or
-  the wrong shape, and with other hooks, which are kept; the hooks files under `CLAUDE_CONFIG_DIR`, `CODEX_HOME`
-  and `COPILOT_HOME`; `--hooks start`, `stop` and `none` recorded, and the left-out entries removed. kb's handler
-  in a group with the user's (theirs kept), run by path, and a user command that only starts with `kb hook`
-  (`kb hookshot`, left alone). kb's config: CRLF kept, a table right after `[notes]`, a `[notes]` header on the
-  last line, and a `notes` or `hooks` of the wrong shape (a `problem`, never a crash). Another `kb` first on `PATH`,
-  and `UV_TOOL_DIR`.
-- `kb doctor` report: read back with the official TOON decoder (`toon-format`); the summary's counts, a row per
-  check, and the next steps for `missing`, `outdated`, `problem`, Codex hooks just installed and `kb` not on
-  `PATH`; `next: []` when nothing is left to do; values with commas, colons and quotes. `install.sh` without uv.
-- `kb hook start`: no notes, open notes, only resolved ones, outside git, and in a git repo with and without a
-  remote; each agent's output format. `kb hook stop`: before 10 minutes (silent), the first turn after (asks),
-  later turns (silent), `stop_hook_active` (silent), a turn Cursor or Copilot CLI says didn't complete (silent), a
-  marker it can't write (silent), a broken marker (the session starts over), a project it can't name (still asks),
-  a turn's end that doesn't ask leaving the marker's contents alone, markers no hook has run for in 7 days removed,
-  and a session still in use kept. `kb hook start`: a project it can't name still leaves a marker. Both: Cursor's
-  input to the `claude-code` entry, and unreadable or too deeply nested input or a missing inbox (silent, exit 0).
+- `kb note`, `kb inbox`, `kb doctor`, `kb hook`: each case is a test in `tests/`. `scripts/check.sh` runs them with
+  CI's other checks, before each commit; `scripts/check.sh --red REV` names new tests that pass against older code,
+  which don't show the change. By hand, inside the Claude Code and Codex sandboxes with and without the inbox on the
+  write list: the note is written, or exit 1 names the folder.
+- Hooks in a real agent: `scripts/spike/hook-lab.sh <cursor|copilot> [--stop]` runs the agent on this clone's `kb`
+  in a throwaway repo and data folder, and prints the markers, how `kb note` signs there and the hook runs. What it
+  relies on (2026-11-02): both agents follow `XDG_DATA_HOME`; Copilot CLI's hooks follow a `PATH` prefix and ignored a
+  project hooks file; Cursor CLI's ignore the prefix and run a project `.cursor/hooks.json` as well as the user's.
+  `--stop` backdates the marker's `started` rather than wait 10 minutes, and drives Cursor through a private tmux
+  server, as `-p` runs don't get the question. On resume, Codex, Copilot CLI and Cursor CLI keep a session's marker,
+  and Claude Code gets a new one.
+- What a hook did, in each agent's own record of the session: Claude Code `~/.claude/projects/<folder>/<id>.jsonl`;
+  Codex `~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl`; Copilot CLI `~/.copilot/session-state/<id>/events.jsonl`
+  (`hook.start` and `hook.end`, with each hook's output); Cursor CLI `~/.cursor/chats/<md5 of the folder>/<id>/store.db`
+  (blobs, §4.1).
 - Notes trial (phase 1, one week, one or two projects): notes per session, how many I rate useful, duplicates,
   sessions where an agent should have left a note and didn't, and how often the stop hook's question led to a
   useful note.
@@ -1099,9 +1047,6 @@ Open (2026-11-01):
   given a command to run); whether it adds `cursor_version` to the input of Claude Code's hooks (that entry stayed
   silent, as it would if Cursor never ran it); and where it runs hooks relative to its sandbox (`sandbox.mode` is
   `disabled` on the test box, so the markers it wrote there don't settle it).
-- Whether `kb doctor` can tell that Codex has approved its hooks (`[hooks.state]` in `config.toml` holds a hash
-  of each approved hook). A missing `enabled = true` doesn't mean off: a Stop entry with a hash and no `enabled` ran
-  (2026-11-02).
 - The Cursor CLI reader: message order from the `store.db` blob tree, timestamps, and encrypted blobs (§4.1).
 
 The phase 0 spike (§9) settles the remaining unknowns.
