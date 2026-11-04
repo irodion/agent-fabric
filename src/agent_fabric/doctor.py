@@ -184,9 +184,31 @@ def _hooks_choice(env: Mapping[str, str], hooks: tuple[str, ...] | None) -> tupl
     return hooks, []
 
 
+def _copilot_sync(settings: Path, env: Mapping[str, str]) -> Row:
+    """Copilot CLI syncs sessions to the user's GitHub account unless its settings.json turns that off; a false left
+    in config.json is ignored (docs/design.md §7). kb reports this and leaves the setting to the user."""
+    shown = tilde(settings, env)
+    try:
+        text = settings.read_text(encoding="utf-8") if settings.exists() else "{}"
+        # Copilot CLI starts its config.json with `//` lines, which no line of JSON can start with.
+        values = json.loads("\n".join(line for line in text.split("\n") if not line.lstrip().startswith("//")))
+        if not isinstance(values, dict):
+            raise ValueError("the file is not a JSON object")
+    except (OSError, ValueError) as e:
+        return cant_read("sync", shown, e)
+    if values.get("remoteSessions") is True:
+        detail = "remoteSessions is true, which syncs sessions to your GitHub account whatever remoteExport says"
+        return Row("problem", "sync", shown, detail, step=f'Set "remoteSessions": false in {shown}')
+    if values.get("remoteExport") is not False:
+        detail = "remoteExport isn't false, so Copilot CLI syncs sessions to your GitHub account"
+        step = f'Set "remoteExport": false in {shown} (a false in config.json is ignored)'
+        return Row("problem", "sync", shown, detail, step=step)
+    return Row("ok", "sync", shown, "Copilot CLI's session sync is off")
+
+
 def doctor(env: Mapping[str, str], *, fix: bool = False, hooks: tuple[str, ...] | None = None) -> tuple[int, str]:
-    """Check the inbox, the skill copies, the sandboxes' write lists and the agents' hooks; with `fix`, set up
-    what's missing. `hooks` (with `fix`) records which hooks to install."""
+    """Check the inbox, the skill copies, the sandboxes' write lists, the agents' hooks and Copilot CLI's session
+    sync; with `fix`, set up what's missing, except the sync. `hooks` (with `fix`) records which hooks to install."""
     found = agents(env)
     inbox = inbox_dir(env)
     rows = [
@@ -223,4 +245,6 @@ def doctor(env: Mapping[str, str], *, fix: bool = False, hooks: tuple[str, ...] 
             rows.append(Row("problem", "hooks", shown, "left alone until the sandbox problem is fixed", step=again))
         elif hooks_row := hookfiles.check(path, agent, chosen, env, fix=fix):
             rows.append(hooks_row)
+    if found.has_copilot:
+        rows.append(_copilot_sync(found.copilot / "settings.json", env))
     return (0 if all(row.status in ("ok", "fixed") for row in rows) else 1), render(rows, fix=fix)

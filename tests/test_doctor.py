@@ -10,6 +10,9 @@ import toon_format
 from conftest import Kb
 
 SKILL = (files("agent_fabric") / "skills" / "kb-note" / "SKILL.md").read_text()
+SYNC_OFF = "Copilot CLI's session sync is off"
+SYNC_ON = "remoteExport isn't false, so Copilot CLI syncs sessions to your GitHub account"
+TURN_SYNC_OFF = 'Set "remoteExport": false in ~/.copilot/settings.json (a false in config.json is ignored)'
 
 
 def a_command(path: Path) -> Path:
@@ -42,7 +45,7 @@ def report(output: str) -> dict[str, Any]:
 
 
 def rows(output: str, check: str) -> list[tuple[str, str, str]]:
-    """One kind of check's rows (inbox, skill, sandbox, hooks) as (status, path, detail)."""
+    """One kind of check's rows (inbox, skill, sandbox, hooks, sync) as (status, path, detail)."""
     return [(status, path, detail) for status, kind, path, detail in all_rows(output) if kind == check]
 
 
@@ -74,6 +77,19 @@ def uses_claude_code(kb: Kb) -> None:
 
 def make_inbox(kb: Kb) -> None:
     (kb.home / ".local" / "share" / "agent-fabric" / "inbox").mkdir(parents=True)
+
+
+def copilot_file(kb: Kb, name: str, text: str) -> None:
+    folder = kb.home / ".copilot"
+    folder.mkdir(exist_ok=True)
+    (folder / name).write_text(text)
+
+
+def an_agent(kb: Kb, agent_home: str) -> None:
+    """The agent's folder, with Copilot CLI's session sync off, which kb doctor would otherwise report."""
+    (kb.home / agent_home).mkdir()
+    if agent_home == ".copilot":
+        copilot_file(kb, "settings.json", '{"remoteExport": false}')
 
 
 def claude_settings(kb: Kb, settings: object) -> Path:
@@ -388,7 +404,7 @@ def test_fix_reports_and_keeps_an_agent_settings_file_it_cannot_read(kb: Kb, fil
 @pytest.mark.parametrize("agent_home", [".copilot", ".cursor"])
 def test_fix_writes_no_claude_code_settings_for_copilot_or_cursor_alone(kb: Kb, agent_home: str) -> None:
     make_inbox(kb)
-    (kb.home / agent_home).mkdir()
+    an_agent(kb, agent_home)
     kb("doctor", "--fix")
 
     assert ((kb.home / ".claude" / "settings.json").exists(), kb("doctor").exit_code) == (False, 0)
@@ -576,6 +592,7 @@ def test_with_copilot_home_copilot_gets_its_own_copy(kb: Kb) -> None:
     assert all_rows(kb("doctor").stdout)[2:] == [
         ("missing", "skill", "~/.config/copilot/skills/kb-note/SKILL.md", "for Copilot CLI"),
         ("missing", "hooks", "~/.config/copilot/hooks/kb.json", "start and stop missing"),
+        ("problem", "sync", "~/.config/copilot/settings.json", SYNC_ON),
     ]
 
 
@@ -811,7 +828,7 @@ def test_fix_installs_kbs_hooks_for_copilot_and_cursor(
     kb: Kb, agent_home: str, file: str, hooks: dict[str, object]
 ) -> None:
     make_inbox(kb)
-    (kb.home / agent_home).mkdir()
+    an_agent(kb, agent_home)
 
     fixed = rows(kb("doctor", "--fix").stdout, "hooks")
 
@@ -1263,4 +1280,110 @@ def test_doctor_says_how_to_put_kb_on_path_for_the_agents(kb: Kb) -> None:
     assert ([row for row in result["checks"] if row["check"] == "kb"], result["next"]) == (
         [{"status": "problem", "check": "kb", "path": "kb", "detail": "not on PATH, where agents look for it"}],
         [{"by": "user", "step": "Put kb on PATH: run uv tool update-shell, then open a new terminal"}],
+    )
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        '{"remoteExport": false}',
+        '{"remoteExport": false, "remoteSessions": false}',
+        '// A comment line, as Copilot CLI writes in config.json.\n  // Another.\n{\n  "remoteExport": false\n}\n',
+    ],
+    ids=["plain", "remote control off", "under comment lines"],
+)
+def test_doctor_says_copilots_session_sync_is_off(kb: Kb, settings: str) -> None:
+    make_inbox(kb)
+    copilot_file(kb, "settings.json", settings)
+
+    assert rows(kb("doctor").stdout, "sync") == [("ok", "~/.copilot/settings.json", SYNC_OFF)]
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [None, "{}", '{"remoteExport": true}', '{"remoteExport": "false"}'],
+    ids=["no file", "no setting", "on", "not a boolean"],
+)
+def test_doctor_reports_copilots_session_sync_unless_settings_json_turns_it_off(kb: Kb, settings: str | None) -> None:
+    make_inbox(kb)
+    (kb.home / ".copilot").mkdir()
+    if settings is not None:
+        copilot_file(kb, "settings.json", settings)
+
+    result = kb("doctor")
+
+    assert (result.exit_code, rows(result.stdout, "sync")) == (1, [("problem", "~/.copilot/settings.json", SYNC_ON)])
+    assert {"by": "user", "step": TURN_SYNC_OFF} in report(result.stdout)["next"]
+
+
+def test_a_false_in_copilots_config_json_does_not_turn_session_sync_off(kb: Kb) -> None:
+    """GitHub's config reference: "Settings left in config.json are ignored" (docs/design.md §7)."""
+    make_inbox(kb)
+    header = "// User settings belong in settings.json.\n// This file is managed automatically.\n"
+    copilot_file(kb, "config.json", header + '{\n  "remoteExport": false\n}\n')
+
+    assert rows(kb("doctor").stdout, "sync") == [("problem", "~/.copilot/settings.json", SYNC_ON)]
+
+
+def test_copilots_remote_control_turns_session_sync_back_on(kb: Kb) -> None:
+    make_inbox(kb)
+    copilot_file(kb, "settings.json", '{"remoteExport": false, "remoteSessions": true}')
+
+    result = kb("doctor")
+    detail = "remoteSessions is true, which syncs sessions to your GitHub account whatever remoteExport says"
+
+    assert rows(result.stdout, "sync") == [("problem", "~/.copilot/settings.json", detail)]
+    assert {"by": "user", "step": 'Set "remoteSessions": false in ~/.copilot/settings.json'} in report(result.stdout)[
+        "next"
+    ]
+
+
+def test_doctor_shows_nothing_of_a_copilot_settings_file_it_cannot_parse(kb: Kb) -> None:
+    make_inbox(kb)
+    copilot_file(kb, "settings.json", '{"token": "a-secret",}')
+
+    result = kb("doctor")
+    [(status, path, detail)] = rows(result.stdout, "sync")
+
+    assert (status, path, detail.startswith("can't read it ("), "a-secret" in result.stdout) == (
+        "problem",
+        "~/.copilot/settings.json",
+        True,
+        False,
+    )
+
+
+def test_doctor_reports_copilot_settings_that_are_not_an_object(kb: Kb) -> None:
+    make_inbox(kb)
+    copilot_file(kb, "settings.json", "[]")
+
+    assert rows(kb("doctor").stdout, "sync") == [
+        ("problem", "~/.copilot/settings.json", "can't read it (the file is not a JSON object)")
+    ]
+
+
+def test_fix_leaves_copilots_session_sync_to_the_user(kb: Kb) -> None:
+    make_inbox(kb)
+    (kb.home / ".copilot").mkdir()
+
+    result = kb("doctor", "--fix")
+
+    assert (
+        rows(result.stdout, "sync"),
+        result.exit_code,
+        (kb.home / ".copilot" / "settings.json").exists(),
+        {"by": "user", "step": TURN_SYNC_OFF} in report(result.stdout)["next"],
+    ) == ([("problem", "~/.copilot/settings.json", SYNC_ON)], 1, False, True)
+
+
+def test_doctor_checks_copilots_session_sync_only_where_copilot_is(kb: Kb) -> None:
+    make_inbox(kb)
+    (kb.home / ".cursor").mkdir()
+    without_copilot = rows(kb("doctor").stdout, "sync")
+
+    copilot_file(kb, "settings.json", '{"remoteExport": false}')
+
+    assert (without_copilot, rows(kb("doctor").stdout, "sync")) == (
+        [],
+        [("ok", "~/.copilot/settings.json", SYNC_OFF)],
     )

@@ -21,7 +21,7 @@ class Row:
     """One check: `ok`, `fixed`, `missing` or `outdated` (which `kb doctor --fix` fixes), or `problem` (by hand)."""
 
     status: str
-    check: str  # inbox, skill, sandbox, hooks
+    check: str  # kb, inbox, skill, sandbox, hooks, sync
     path: str  # as shown, with ~
     detail: str
     step: str | None = None  # what the user does for this row, where kb can't

@@ -103,7 +103,7 @@ take_turn() { # [session id to resume]
 	local id=${1:-}
 	case $agent in
 	cursor) XDG_DATA_HOME=$data timeout 90 cursor-agent -p --trust ${id:+--resume "$id"} "$prompt" ;;
-	copilot) XDG_DATA_HOME=$data PATH=$repo/.venv/bin:$PATH timeout 90 copilot ${id:+--resume="$id"} -p "$prompt" ;;
+	copilot) XDG_DATA_HOME=$data PATH=$repo/.venv/bin:$PATH timeout 90 copilot --sync-session=off ${id:+--resume="$id"} -p "$prompt" ;;
 	# With stdin an open pipe, as in an agent's shell, `codex exec` waits for its end before it starts.
 	codex) XDG_DATA_HOME=$data PATH=$repo/.venv/bin:$PATH timeout 90 codex exec ${id:+resume "$id"} "$prompt" </dev/null ;;
 	esac

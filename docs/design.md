@@ -846,6 +846,8 @@ help: "These steps are for the user: an agent's sandbox can't change the agents'
   first. It replaces `install.sh`'s own warning.
 - **Hooks rows** say whether the hooks run, not only whether they're in the file: Codex's approval, and when a hook
   last ran, by the markers. A right file with no run behind it drew a note doubting a hook that worked (2026-11-02).
+- **`sync` row:** whether Copilot CLI's session sync is off (§7), where Copilot CLI is installed. `--fix` doesn't
+  change it: what leaves the machine is my choice, not part of setting up notes.
 - **`install.sh`** keeps uv quiet, so what it prints is this report.
 
 **Setup per agent.** Claude Code's and Codex's sandboxes allow writes only in the project and temp folders, so the
@@ -916,11 +918,14 @@ mypy and pytest on Python 3.13 and 3.14).
 - Copilot session sync is off. By default Copilot CLI and the Copilot app copy local sessions to the GitHub
   account, unredacted and outside the allow list. Set `"remoteExport": false` in `~/.copilot/settings.json`
   (phase 0) and don't turn on remote control (`remoteSessions` or `/remote on`), which re-enables export whatever
-  that setting says. Repo-level Copilot settings can't override it: keys not on their list are ignored. Copilot CLI
-  1.0.105 on the devbox keeps the key in `~/.copilot/config.json`, a file whose header says it is managed
-  automatically, so `kb doctor` checks both files and warns if the setting is missing or `true`. Test and scripted
-  runs also pass `--no-remote-export`. The docs don't say whether turning sync off deletes copies already synced, so
-  check github.com once.
+  that setting says. Repo-level Copilot settings can't override it: keys not on their list are ignored. On the devbox
+  the key sat only in `~/.copilot/config.json`, which doesn't count: GitHub's config reference says "Settings left in
+  `config.json` are ignored" (read 2026-11-03), and Copilot CLI 1.0.105's own header in that file says user settings
+  belong in `settings.json`. So `kb doctor` reads `settings.json` alone and reports a `problem` unless `remoteExport`
+  is `false` there, or if `remoteSessions` is `true`; `--fix` leaves the setting to me. Scripted runs
+  (`scripts/spike/hook-lab.sh`) also pass `--sync-session=off`, which the reference gives for a single run: 1.0.105
+  says `--remote-export` was renamed to it, and still accepts `--no-remote-export` without listing it. The docs don't
+  say whether turning sync off deletes copies already synced, so check github.com once.
 
 ## 8. Failure modes
 
