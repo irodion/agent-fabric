@@ -1,18 +1,20 @@
 # agent-fabric — design
 
-Status: draft v0.5, 2026-10-31 (v0.3 had two review rounds; v0.4 put the CLI agents first and added the CLI
-capture check, §4.1; v0.5 adds agent notes, §4.10). Name: agent-fabric; CLI: `kb`.
-Background research: `~/code/reports/Cross agent coding memory harness.md`.
+Status: draft v0.6, 2026-11-04 (v0.3 had two review rounds; v0.4 put the CLI agents first and added the CLI
+capture check, §4.1; v0.5 adds agent notes, §4.10; v0.6 rebuilds ingest around notes, §4.7). Name: agent-fabric; CLI:
+`kb`.
+Background research: `~/code/reports/Cross agent coding memory harness.md`, `~/code/reports/Inbox to wiki.md`.
 
 ## 1. Goal
 
 Switch freely between coding agents without losing the history of what was done and decided: first the CLI agents
 (Claude Code, Codex, Copilot CLI, Cursor CLI), later the IDE agents (Cursor IDE, VS Code Copilot Chat). Concretely:
 
-1. Every session leaves a deterministic, redacted **digest** in a Markdown wiki repo on GitHub.
+1. Every session leaves a deterministic, redacted **digest** in a local Markdown wiki repo.
 2. A **live panel** beside the agent lists decisions, risky actions and open loops ("disabled test, claimed
    temporary — verify later") while the session runs.
-3. An LLM periodically folds digests into curated **wiki pages** (manual trigger + nightly), reviewed before merge.
+3. An LLM periodically folds notes, and later digests, into curated **wiki pages** (manual trigger + timer), reviewed
+   before merge.
 4. Agents and I **pull** history on demand through one CLI (`kb`) and one MCP server. No history is injected into
    agent prompts automatically; the standing instructions are the `kb-note` skill and two hooks that remind the
    agent of it, with a count of open notes but never their text (item 5).
@@ -24,7 +26,7 @@ Switch freely between coding agents without losing the history of what was done 
 
 - Replacing or wrapping the agents. They run in their native UIs, untouched.
 - Blocking or approving agent actions. The panel is advisory only.
-- Multi-user or multi-machine sync (one Linux desktop for now).
+- Multi-user or multi-machine sync. Each machine keeps its own inbox and wiki (§2).
 - Parsing vendor storage formats ourselves (delegated to agentsview, §4.1).
 
 ## 2. Context and decisions so far
@@ -32,18 +34,19 @@ Switch freely between coding agents without losing the history of what was done 
 | Topic | Decision | Why |
 |---|---|---|
 | Host | Linux desktop (Ubuntu 24.04 or newer), Core Ultra 7 265H (Arc 140T iGPU), 64 GB RAM; all agents run locally on it | IDE chat history lives where the IDE runs |
+| Machines | Each machine keeps its own inbox and wiki, with no sync (2026-11-04) | Machines need no link to each other |
 | Agents first | The CLI agents: Claude Code, Codex, Copilot CLI, Cursor CLI; the IDE agents in phase 3 | Current focus (2026-10-31) |
 | Capture | agentsview, built on CI from a pinned tag, sandboxed, behind an adapter; Cursor CLI through its own reader | agentsview parses Claude Code, Codex, Copilot CLI, Cursor IDE and VS Code Copilot Chat on Linux; for Cursor CLI it drops tool results and fails under a read-only home (§4.1) |
 | Supply chain | SafeDep `vet` gate on agentsview's dependencies and on ours from the first commit | One reviewed build per version; malware and fresh-package checks before anything runs on the desktop |
-| Publishing | Allow list of projects; everything else stays local | Client work never reaches GitHub by default |
-| Repos | `agent-fabric` (code) public, MIT; the wiki repo private | Code is shareable; session data never is |
+| Publishing | Allow list of projects; everything else stays out of the wiki | Client work never reaches the wiki or a hosted model by default |
+| Repos | `agent-fabric` (code) public, MIT; the wiki repo local, with no remote | Code is shareable; session data never is |
 | Session end | Idle timeout, not session-end hooks | Cursor's `sessionEnd` is unreliable; Codex/Claude give hooks 1–3 s |
 | Compaction | Deterministic extraction; no LLM in the digest | Facts are extractable; only "why" needs a model |
 | Retrieval | Pull only (CLI/MCP), manually triggered | Avoids context pollution and memory-poisoning via injection |
 | Agent notes | `kb note` CLI + `kb-note` skill → local inbox; the wiki only through ingest (§4.10) | Agents notice things no digest records; a CLI works in every agent, and a skill loads only when used |
 | Note reminders | A session-start hook (reminder + count of open notes) and an end-of-turn hook (asks once per session), installed by `scripts/install.sh`; either can be left out (§4.10) | A skill alone waits for the agent to think of it; at session end the agent can no longer act |
 | Setup report | `kb doctor` (and so `install.sh`) prints one TOON document after AXI: counts, a row per check, next steps for the user (§4.10) | Agents run `kb doctor` and must tell me what to do; their sandbox can't do setup |
-| Wiki ingest | Manual (`kb ingest`) and nightly, onto a review branch | Review gate before anything becomes canon |
+| Wiki ingest | Notes first, manual (`kb ingest`) and on a timer, onto a review branch. The model answers typed questions about each note and `kb` files the note's text; `codex` first, a local decision model nightly later. `kb prune` adds cited summaries on a trigger and never removes a claim (§4.7) | Review gate before anything becomes canon; no model text reaches a claim, a small model can run the same job, and a bad summary can be thrown away |
 | Live panel | Rules detect, small model only phrases and extracts decisions | Rules measurably work; LLM judgement alone did not |
 | OpenHands | Not used; event model borrowed | It cannot observe IDE sessions |
 
@@ -68,11 +71,9 @@ Switch freely between coding agents without losing the history of what was done 
  └──────────────┬───────────────────────────────────────────────┘
                 │ git
  ┌──────────────▼───────────────┐       ┌───────────────────────────┐
- │ wiki repo (~/wiki, private)  │<──────│ kb ingest (manual/nightly)│
- │ raw/ digests · wiki/ pages   │ branch│ codex exec | local 26B    │
- └──────────────┬───────────────┘       └───────────────────────────┘
-                │ push (timer)
-             GitHub
+ │ wiki repo (~/wiki, private)  │<──────│ kb ingest (manual/timer)  │
+ │ raw/ digests · wiki/ pages   │ branch│ codex exec | local model  │
+ └──────────────────────────────┘       └───────────────────────────┘
 
  Query: kb CLI / `kb mcp` (wiki, digests, loops, notes)  +  `agentsview mcp --profile memory` (raw transcripts)
  Notes: agents run `kb note` (skill `kb-note`) → ~/.local/share/agent-fabric/inbox/ → kb inbox · search · ingest
@@ -426,65 +427,131 @@ For every file written into the wiki repo, in order:
    a panel notice, do not commit.
 3. Write file, regenerate `index.md`, append to `log.md`, `git add <paths>`, commit (`digest: <project> <agent>
    <shortid>`). The repo's own gitleaks pre-commit hook is a second backstop; never `--no-verify`.
-4. `fabric-push.timer` pushes `main` every 30 min. Failures retry; commits accumulate locally.
 
 Local-only digests go through step 1 as well, so `kb` output never shows raw secrets.
+
+What ingest sends to a hosted model goes through steps 1 and 2 first (§4.7). The steps above cover files written, and
+this is another way out of the machine.
 
 Single writer: all commits to `main` go through `fabricd` holding a lock file; ingest writes only to its branch in
 a separate worktree.
 
 ### 4.6 Wiki repo
 
-One private repo for all projects (`~/wiki`, remote on GitHub).
+One local repo per machine, for all its projects (`~/wiki`), with no remote.
 
 ```
-AGENTS.md          schema + rules for the ingest LLM (page types, linking, citation, "replace don't append")
+AGENTS.md          schema: the wording of ingest's questions, and the rules for `kb prune`'s summaries
 index.md           generated catalogue (never hand-edited)
 log.md             append-only, one line per digest/ingest (merge=union in .gitattributes)
 raw/sessions/...   digests (§4.4)
 raw/notes/...      agent notes that ingest used (§4.10)
-wiki/projects/<project>.md       overview, current state, conventions, recurring problems
-wiki/decisions/<project>/<slug>.md   decision, alternatives, rationale, sessions that support it
-wiki/concepts/<slug>.md          cross-project knowledge ("pnpm workspace quirks")
+wiki/projects/<project>.md       a project's claims, by kind, under a summary once `kb prune` writes one
+wiki/concepts/<slug>.md          a `kb prune` summary citing claims across projects ("pnpm workspace quirks")
 wiki/retros/<project>/<date>.md  retro findings (§4.7)
 wiki/archive/...                 pages retired by pruning (§4.7)
 ```
 
-Every claim in `wiki/` links to the digest(s) it came from. Per-directory entry counts stay under GitHub's 3,000
-via the year/month sharding. The wiki only grows unless it is pruned; lint and prune are in §4.7.
+Pages are made of claims: a note's own text with its evidence, not prose.
+
+```markdown
+### `pytest` hangs in the sandbox
+`pytest` hangs in the sandbox: the DB fixture needs a socket; run `-m 'not db'`.
+- source: n1a2b3c (Codex, 2026-11-20) · anchor: tests/conftest.py@9d8e7f6 · verified: 2026-11-20 · supersedes: none
+```
+
+`kb` files each claim by the model's answers (§4.7). A `supersede` moves the old claim to the page's `## Superseded`
+section, with a pointer to what replaced it. A `conflict` keeps both claims side by side until I decide, and a note that
+adds to a claim is filed below it. A claim says only what its note said, and nothing rewrites it, so whether it still
+holds shows only in its anchor and `verified` date (§4.7's lint).
+
+A page may open with a `## Summary` written by `kb prune`, marked as such, with every sentence citing note ids (§4.7).
+The claims stay the record, so deleting a summary loses nothing.
+
+Every claim in `wiki/` links to the note or digest it came from. Per-directory entry counts stay small through the
+year/month sharding. The wiki only grows, since no claim is ever removed; §4.7's lint and prune keep it readable.
 
 ### 4.7 Ingest, lint and prune, retro
 
-`kb ingest [--project P] [--since DATE] [--backend codex|local] [--dry-run]`; `fabric-ingest.timer` runs it at
-03:00.
+`kb ingest [--project P] [--backend codex|local] [--dry-run]`, run by `fabric-ingest.timer` (§5). It starts with notes;
+digests join when they exist (§11).
 
-1. Pending = digests whose `(path, revision)` is not yet in a merged ingest (ledger in `state.db`), plus the
-   `gotcha`, `fix` and `decision` notes in the inbox from allowed projects (§4.10).
-2. Use worktree `~/.local/share/agent-fabric/ingest-wt` on branch `ingest/<yyyy-mm-dd>`. If an unmerged ingest
-   branch exists, keep appending to it instead of starting a new one.
-3. Run the backend with `AGENTS.md` as instructions and the pending digests as input. It may only touch `wiki/`,
-   `index.md` and `log.md`.
-   - `codex` (default): `codex exec -C <worktree> -s workspace-write --ephemeral -o <summary.md> -` with the prompt
-     on stdin. `--ephemeral` keeps ingest runs out of the captured history.
-   - `local`: Gemma 4 26B-A4B on llama-server, driven by a small Python loop (read pages → propose full page
-     replacements as JSON → apply). For a two-week comparison against `codex` on the same batches.
-4. Redaction gate (§4.5) over every changed file, then commit on the branch. Optionally push the branch and open a PR.
-5. I review (tuicr or the PR) and merge. On merge the ledger marks those digests ingested. A deleted, unmerged
-   branch returns its digests to pending.
+The model only decides. It answers typed questions about a note, as a decision model does, and `kb` acts on the answers
+and files the note's own text as the claim. No model text reaches a claim, so this step can't make anything up, and a
+small local model can run the same job as a hosted one: the move changes one setting. Pages read as filed notes until
+`kb prune` writes their first summary, and connections between notes appear only then.
 
-The ingest LLM sees digests and notes only, plus the existing wiki pages; for detail it can call `agentsview mcp`.
-It treats a note as one agent's claim: it checks the note against its refs, the digests and the code before a page
-cites it.
+1. **Gate, no model.** Resolved notes move to `inbox/done/` (§4.10). Then count the open `gotcha`, `fix` and `decision`
+   notes of allowed projects that no unmerged branch already holds. Under 3, with the oldest under 7 days: log it and
+   exit 0. An empty run is a success.
+2. **Manifest.** Work in worktree `~/.local/share/agent-fabric/ingest-wt` on branch `ingest/<yyyy-mm-dd>`, or on an
+   unmerged ingest branch if there is one. Commit the note ids and the base commit. A deleted, unmerged branch returns
+   its notes to pending.
+3. **Evidence, no model.** For each ref of each note: did it exist at the note's commit, does it exist now, has it
+   changed since, and an excerpt. Add candidate claims found with `rg`, and any matching lines of the project's
+   `AGENTS.md`, to show what's already recorded.
+4. **Input gate.** Redaction and gitleaks (§4.5) over all of that, before a hosted model sees it. A hit quarantines the
+   note.
+5. **Typed questions, per note.** Each is narrow, because decision models read a question literally, and code combines
+   the answers.
+   - For each ref's excerpt: does it support the note, contradict it, or say nothing?
+   - For each candidate claim: is the note the same fact, does it add to the claim, replace it or contradict it, or is
+     it unrelated? Contradicting means both can't be true, not that one is newer.
+   - Would a future agent plausibly act better for knowing this?
+6. **`kb` acts.** It turns the answers into one action: `skip`, `add`, `duplicate`, `extend`, `supersede` or `conflict`.
+   The claim goes under its kind's section on `wiki/projects/<project>.md`. It copies the note to `raw/notes/` and
+   regenerates `index.md` and `log.md`. An invalid answer that fails again on one retry goes on a list for review and
+   reaches no page.
+7. **Output gate.** `kb lint` and §4.5 over every changed file, then commit on the branch.
+8. **Review.** I review in tuicr, about weekly, with the note and the answers beside each action, least certain first,
+   and mark each action right or wrong (§10).
+9. **Merge.** The next run finds the merged manifests and moves their notes to `inbox/done/`, so notes need no ledger in
+   `state.db`.
 
-**Lint and prune.** Without pruning the wiki fills up with stale and duplicate pages. This follows the "lint"
-operation in Karpathy's gist, in two steps:
+The model sees one note, its evidence and its candidate claims, and has no tools. It treats the note as one agent's
+claim, since the first inbox held a false alarm (2026-11-02).
 
-- `kb lint` (deterministic; nightly after ingest, also part of `kb doctor`) reports broken links, claims citing
-  missing digests, orphan pages, oversized pages, pages whose newest citation is older than 90 days, decisions
-  contradicted by a newer decision page, and near-duplicate titles.
-- `kb prune` (manual + monthly timer) is an LLM pass on branch `prune/<yyyy-mm>` that works from the lint report.
-  It merges duplicates, marks superseded decisions, condenses long pages and moves pages of projects inactive for
-  6 months to `wiki/archive/`. It goes through the same review and merge as ingest.
+**Backends.**
+
+- `codex`, first, on a weekly timer: no tools, with a schema that allows only the questions' options. Expect about a
+  dollar a month.
+- `local`, nightly once it passes §10: a decision model on `llama-server`'s `/v1/systemone`, on loopback. Nightly runs
+  append to one branch, so review stays weekly. These models are small enough for an 8 GB machine, and should take
+  seconds per note on a CPU, which still has to be measured. Speed and RAM aren't the constraint; whether the decisions
+  are right is. A generative model limited to the same options is the baseline to beat.
+
+**What differs from Karpathy's gist.** The layers, the three operations, `index.md` and `log.md` are his. Three things
+change:
+
+- His ingest writes summaries and "might touch 10-15 wiki pages". Here it files one note and writes nothing, since these
+  sources are 500 characters already written for a reader without context, and repeated LLM rewriting made memory worse
+  than none in one study (arXiv 2605.12978). Writing waits for `kb prune`, on a trigger, and adds to the claims rather
+  than replacing them.
+- His raw sources are "your source of truth", and he reads each ingest ("I read the summaries, check the updates, and
+  guide the LLM"). Notes are unchecked claims and the job runs unattended, so the evidence step and the review branch
+  stand in for both.
+- His lint never re-checks a page against its own source (below).
+
+**Reading.** Agents read pages directly until `kb search` exists, and nothing is injected. The `kb-note` skill tells
+them to check a claim's anchor before relying on it, as Copilot Memory does (§4.10), and to treat a summary as a pointer
+to its claims.
+
+**Lint and prune.** Without these the wiki becomes a long list of stale and duplicate claims. `kb lint` follows the
+"lint" operation in Karpathy's gist, and `kb prune` does the writing his ingest does:
+
+- `kb lint` (deterministic; after ingest, also part of `kb doctor`) reports broken links, claims citing missing notes
+  or digests, claims whose anchor file changed since `verified`, a `supersedes` pointing at nothing, a summary citing a
+  missing claim, orphan pages, oversized pages and near-duplicate titles. Karpathy's lint compares pages with each
+  other and with newer sources, and the failure people report is a page "confidently wrong for months" that passes
+  those checks. A changed anchor is the check that looks at the source, and it replaces a 90-day age check. A
+  contradiction can't be found deterministically, so it appears only as a `conflict` or a `supersedes` from ingest.
+- `kb prune` (manual + weekly timer) is the only pass that writes. It does nothing unless a page has 10 claims and no
+  summary, 10 new claims since its summary, or a summary citing a claim that has since been superseded. Then, on branch
+  `prune/<yyyy-mm-dd>`, a generative model with no tools (`codex` first) reads the page's claims and writes a
+  `## Summary` above them, and `kb` refuses any sentence that cites no claim on the page. It can also write a
+  `wiki/concepts/` page, which holds only a summary citing claims across projects, split an oversized page by moving
+  claims unchanged, and move pages of projects inactive for 6 months to `wiki/archive/`. It never rewrites or removes a
+  claim. It goes through the same review and merge as ingest.
 
 Raw digests are never pruned. Git history keeps them anyway, so deleting would not shrink the repo; `kb search`
 ranks old digests lower instead.
@@ -503,7 +570,7 @@ starts from deterministic pre-findings across sessions, which a single-session r
 - `docs-drift` flags (§4.8) and loops open longer than 14 days;
 - bypassed checks (`safety-bypass`, `lint-suppressed`) more than once.
 
-The LLM (same backends as ingest) turns these into candidates ordered by severity, each citing digests, and writes
+The LLM (same backend as `kb prune`) turns these into candidates ordered by severity, each citing digests, and writes
 them to `wiki/retros/<project>/<date>.md` on the ingest branch. Proposed edits to a project's AGENTS.md, CI or lint
 config appear as diffs on that page, and I apply them myself in the project repo. Nothing changes agent
 instructions automatically.
@@ -727,11 +794,14 @@ days as possibly stale. `kb catchup` (§4.9) includes the project's unresolved `
 notes; `kb search --kind note` searches all of them; `kb mcp` offers the same. Like all `kb` output they are labelled
 untrusted: an agent wrote them and nobody has checked them yet.
 
-**Into the wiki.** `kb ingest` (§4.7) takes the `gotcha`, `fix` and `decision` notes of allowed projects along with
-the digests. `status` notes stay out: they describe a moment, and end with `--resolve`. A note ingest uses is copied
-to `raw/notes/<project>/<yyyy>/<mm>/` in the wiki repo, after the redaction gate (§4.5), so pages can cite it. After
-the merge, every note the run used or dropped, and every resolved `status` note, moves to `inbox/done/<yyyy>/<mm>/`,
-so the inbox holds only notes still to act on. Notes from projects not on the allow list stay local.
+**Into the wiki.** `kb ingest` (§4.7) takes the open `gotcha`, `fix` and `decision` notes of allowed projects. `status`
+notes stay out: they describe a moment, and end with `--resolve`. A resolved note skips the model too, and moves to
+`inbox/done/<yyyy>/<mm>/` with its resolution, where search still finds it. All of the first five notes in a real inbox
+(2026-11-02 to 04) were resolved within two days, and what lasted was already in this document or AGENTS.md. A
+resolution that holds a lasting fact should be its own note, and the skill says so. A note ingest uses is copied to
+`raw/notes/<project>/<yyyy>/<mm>/` in the wiki repo, after the redaction gate (§4.5), so pages can cite it. After the
+merge, every note the run used or dropped moves to `inbox/done/<yyyy>/<mm>/`, so the inbox holds only notes still to act
+on. Notes from projects not on the allow list stay local.
 
 **Skill.** `src/agent_fabric/skills/kb-note/SKILL.md`, shipped in the package, copied into two user skills folders
 that between them reach all four CLI agents: `~/.claude/skills/` (read by Claude Code and Cursor CLI) and
@@ -870,10 +940,9 @@ changes no other, so the user's hooks survive every run. Copilot CLI's `kb.json`
 | `agentsview.service` (sandboxed; user or system unit, §4.1) | `agentsview serve --no-browser --no-update-check --port <port> --replace` | `127.0.0.1:<port>` (8080 by default) |
 | `fabricd.service` | tracker, observer, digester, panel | 127.0.0.1:8090 |
 | `llama-panel.service` | `llama-server` with E4B | 127.0.0.1:8091 |
-| `fabric-ingest.timer` | `kb ingest` at 03:00 (starts a 26B llama-server on 8092 if `--backend local`) | — |
-| `fabric-push.timer` | push wiki `main` every 30 min | — |
-| `fabric-prune.timer` | `kb lint` nightly after ingest; `kb prune` monthly | — |
-| `fabric-backup.timer` | daily SQLite backup of agentsview archive and `state.db` | — |
+| `fabric-ingest.timer` | `kb ingest`, weekly on `codex`, nightly at 03:00 on `local` (which starts a llama-server on 8092), §4.7. `Persistent=true`, so a machine asleep at that time runs it on waking; `OnFailure=` leaves a marker for `kb doctor` | — |
+| `fabric-prune.timer` | `kb prune` weekly, which writes only when a page meets its trigger (§4.7; `kb lint` runs inside `kb ingest`) | — |
+| `fabric-backup.timer` | daily SQLite backup of agentsview archive and `state.db`, and a `git bundle` of the wiki, which has no remote | — |
 
 | Path | Contents | In git |
 |---|---|---|
@@ -898,16 +967,22 @@ mypy and pytest on Python 3.13 and 3.14).
 ## 7. Security and privacy
 
 - Everything binds to 127.0.0.1. No auth needed while loopback-only; agentsview's `--require-auth` if that changes.
-- Redaction before write, gitleaks gate, pre-commit backstop (§4.5). Private repo is not treated as secret-safe.
+- Redaction before write, gitleaks gate, pre-commit backstop (§4.5). The wiki repo is not treated as secret-safe.
 - Allow list: only listed projects are published (§4.5).
 - The code repo is public: no session data, config, digests or wiki content ever goes into it, and its CI has no
   access to the wiki repo. Fixtures for tests are synthetic or scrubbed recordings.
-- Untrusted content: the ingest LLM is sandboxed to its worktree; MCP output is labelled historical; nothing is
-  auto-injected (the `kb-note` skill and its hooks are instructions, not history).
+- Untrusted content: the ingest model has no tools, and can only pick from the options of typed questions, so no model
+  text reaches a claim; `kb prune`'s summaries are the only model text in the wiki, written with no tools, cited and
+  reviewed (§4.7); MCP output is labelled historical; nothing is auto-injected (the `kb-note` skill and its hooks are
+  instructions, not history).
+- Hosted ingest and `kb prune` send the notes of allowed projects, and ingest also excerpts of the files they cite, to
+  the model's vendor, after the input gate (§4.7). The `local` backend sends nothing off the machine.
 - Agent notes (§4.10) can carry a prompt injection from whatever the agent read. They are labelled untrusted, never
   injected into prompts (the start hook gives only their count and the project id), and reach the wiki only through
   reviewed ingest. The inbox is writable from the agents'
   sandboxes, so a note is not tamper-proof; that is acceptable for advice that is checked before it becomes canon.
+  Content screening doesn't catch a plain false note (arXiv 2608.21230: it refused 0 of 360), so the ref evidence and
+  my review are the defence, and nobody has measured how well that works.
 - SLM tools: none at first. Read-only tools may follow, such as reading the project's docs or `kb search`, with
   these limits: read-only; paths limited to the project root and `~/wiki`; secret-looking files denied (`.env*`,
   `*.pem`, `id_*`, `*credentials*`); size caps; no shell, no network. Tool output is untrusted, like the
@@ -942,8 +1017,13 @@ mypy and pytest on Python 3.13 and 3.14).
 | Cursor IDE updates lag | panel late for Cursor | measure in spike; add Cursor hooks (`afterAgentResponse`, `afterFileEdit`) as a second source if needed |
 | llama-server down/slow | no SLM bullets | rules-only mode, flagged in panel header |
 | gitleaks hit | digest not committed | quarantine + panel notice |
-| push fails | commits pile up locally | timer retries |
-| ingest branch left unmerged | wiki stale | nightly appends to same branch; `kb doctor` warns after 7 days |
+| the disk is lost | the wiki goes with it, having no remote | daily `git bundle` in the backup (§5) |
+| ingest branch left unmerged | wiki stale | later runs append to the same branch; `kb doctor` warns after 7 days |
+| Codex login expired, or the model call fails | no ingest; notes wait | `OnFailure=` marker reported by `kb doctor`; the notes stay pending |
+| a backend returns an invalid answer | no decision | one retry, then it goes on the review list and reaches no page (§4.7) |
+| a confident wrong answer | noise filed, or a useful note dropped | review, least certain first; a dropped note is listed for review, and keeps its file (§4.7) |
+| a summary gets a connection wrong | a false lead that reads as fact | each sentence cites its claims and it's marked as model-written; review; deleting it loses nothing (§4.7) |
+| the hosted run still has a tool | a note could make it read a file | the first real run checks this (§4.7, §11) |
 | vendor prunes/migrates history | source files gone | agentsview archive + daily backup keep the raw layer |
 | own automated runs captured | feedback loop | `codex exec --ephemeral`; ignore `is_automated` sessions |
 | sandbox blocks the inbox write | `kb note` exits 1, the note is lost | the error names the folder to add to the sandbox's write list; `kb doctor` reports a missing or unwritable inbox and a write list without it, and `--fix` adds it (§4.10) |
@@ -954,7 +1034,7 @@ mypy and pytest on Python 3.13 and 3.14).
 | the stop hook asks at the wrong moment | an extra turn per session; notes written to please it | once per session, not before 10 minutes; ingest drops thin notes; `--hooks` leaves it out |
 | a hook fails or hangs | the agent's session start or turn end held up | any error prints nothing and exits 0; a 10-second timeout per entry |
 | a Codex hook not yet approved | no reminders in Codex | `kb doctor` says to approve it in Codex's `/hooks` |
-| injected or wrong note | bad advice | untrusted label; ingest checks it against digests and code; review gate |
+| injected or wrong note | bad advice | untrusted label; `kb` gathers its ref evidence for the model and for me; review gate |
 
 ## 9. Phases
 
@@ -963,7 +1043,7 @@ mypy and pytest on Python 3.13 and 3.14).
 2. `agentsview session watch` lag during live Cursor IDE and Copilot Chat sessions (target ≤ 10 s).
 3. `agentsview mcp --profile memory` from Codex finds a Cursor session.
 4. Record API responses as adapter fixtures; check `/api/v1/events` semantics and the turn-end heuristic.
-5. `llama-bench` E2B / E4B / 26B-A4B on SYCL vs Vulkan.
+5. `llama-bench` E2B / E4B / 26B-A4B on SYCL vs Vulkan, and the decision-model candidates (§4.7, §10).
 6. CI workflow builds agentsview with the `vet` gate and the Ubuntu 24.04 smoke test; install it on the desktop;
    run the two `systemd-run` probes (§4.1) to choose a user or system unit; confirm checks 1–3 still pass with the
    sandboxed unit.
@@ -984,14 +1064,15 @@ Claude Code, Codex and Copilot CLI; no-go for Cursor CLI, which gets its own rea
 item 3 (cross-agent search) are still to do for the CLIs. Items 1–3 and 7 for the IDE agents move to phase 3.
 
 **Phase 1 — digests and query.** First `kb note`, `kb inbox`, the `kb-note` skill and its hooks (§4.10): they
-need neither agentsview nor fabricd, so a one-week trial in one or two projects runs while the rest is built. Then
+need neither agentsview nor fabricd, so a one-week trial in one or two projects runs while the rest is built.
+Notes-only `kb ingest` and `kb lint` on the `codex` backend come next, for the same reason (§4.7). Then
 CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.x (from 2026-11-06, §4.1); adapter,
-normalizer, tracker, digester with allow list/redaction/gate/commit/push, for the CLI agents: agentsview for Claude
+normalizer, tracker, digester with allow list/redaction/gate/commit, for the CLI agents: agentsview for Claude
 Code, Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI + `kb mcp`; a
 prototype session for the panel layout, then the panel with rules only (incl. open loops and carry-over).
 
-**Phase 2 — models.** SLM bullets in the panel after it passes the eval (§10); `kb ingest` manual + nightly with
-`codex` backend, digests and notes; two-week comparison with `local` backend; `kb lint`, `kb prune` and `kb retro`.
+**Phase 2 — models.** SLM bullets in the panel after it passes the eval (§10); `kb ingest` takes digests too (§11);
+the comparison with the `local` backend, then nightly on it (§10); `kb prune` and `kb retro`.
 
 **Phase 3 — breadth.** The IDE agents (Cursor IDE, VS Code Copilot Chat), starting with phase 0 items 1–3 and 7 for
 them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag demands it, semantic search
@@ -1043,7 +1124,21 @@ them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag 
 - SLM: labelled set of ~30 real sessions from phase 1 (plus a few ImpossibleBench trajectories). Score recall of
   decisions and reason links, precision of bullets, latency per batch. Initial adoption bar: ≥ 70% decision recall,
   ≤ 1 wrong bullet per 10, ≤ 10 s per batch.
-- Ingest: compare `codex` vs `local` pages on the same batches by review effort (edits needed before merge).
+- `kb ingest` and `kb prune`: tests in `tests/` with a fake backend, for the gate and the trigger, the manifest,
+  resolved notes, the evidence, each way an answer can fail, a summary sentence citing no claim, and no claim ever
+  changing. The first real run is mine.
+- Does the wiki pay off? Keep 10 real questions, and answer them with `rg` over notes and then over pages. If pages
+  don't win after a month, that's a finding: a compiled wiki isn't shown to beat good retrieval (arXiv 2605.18490). Try
+  a second, less documented project too, since agents here move knowledge into the repo by hand (§4.10).
+- Moving from `codex` to `local`: shadow runs on the same frozen batches, with both results unlabelled, plus 30 seeded
+  traps scored by script: a dead ref, a real ref that contradicts its note, a duplicate, a contradiction, an injection.
+  Score each backend by actions I marked wrong (§4.7), including the notes it dropped that the other kept.
+- How many notes that takes: the first days' rate gives at most 1.33 eligible notes a day, so two weeks is 19 notes,
+  with a 15% chance of telling 20% wrong from 40%. 150 notes give 96% but take 16 weeks (exact paired test, assuming
+  independent notes). The switch reverses with one setting and I still review everything, so the bar is a screen for
+  disaster: about 40 real notes and the traps, at most 10% wrong and within 10 points of `codex`, and a valid answer
+  within one retry at least 98% of the time. After that, one batch a week also goes through `codex` as an audit. This
+  catches a clearly worse model, not a slightly worse one. The thresholds are a first guess.
 
 ## 11. Open questions
 
@@ -1056,7 +1151,9 @@ runs get a local digest only unless the project is on `[publish] headless` (§4.
 `kb note` and the `kb-note` skill, independent of agentsview (§4.10). Decided 2026-11-01: the skill goes in
 `~/.claude/skills/` (Claude Code, Cursor CLI) and `~/.agents/skills/` (Codex, Copilot CLI), correcting
 `~/.codex/skills/`, which Copilot CLI never read; a start hook and a stop hook remind agents of it, and the install
-script can leave either out (§4.10).
+script can leave either out (§4.10). Decided 2026-11-04: each machine keeps its own local wiki, with no remote and no
+sync (§2); ingest starts with notes on the `codex` backend, its model only answers typed questions, and it moves to a
+local model after §10's comparison; `kb prune` adds cited summaries on a trigger and never removes a claim (§4.7).
 
 Open (2026-11-01):
 
@@ -1077,5 +1174,12 @@ Open (2026-11-01):
   silent, as it would if Cursor never ran it); and where it runs hooks relative to its sandbox (`sandbox.mode` is
   `disabled` on the test box, so the markers it wrote there don't settle it).
 - The Cursor CLI reader: message order from the `store.db` blob tree, timestamps, and encrypted blobs (§4.1).
+
+Open (2026-11-04):
+
+- Whether Codex can run with no tools at all (§4.7). The first real run settles it: a note that asks it to read a file.
+- Which decision model passes §10 on each machine. The candidates' published scores are their authors' own.
+- Digests in ingest. A digest isn't a claim, so filing its text as one won't carry over (§4.7).
+- What `kb prune` runs on after `codex`, since it needs a model that writes.
 
 The phase 0 spike (§9) settles the remaining unknowns.
