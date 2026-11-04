@@ -481,9 +481,9 @@ and files the note's own text as the claim. No model text reaches a claim, so th
 small local model can run the same job as a hosted one: the move changes one setting. Pages read as filed notes until
 `kb prune` writes their first summary, and connections between notes appear only then.
 
-1. **Gate, no model.** Resolved notes move to `inbox/done/` (§4.10). Then count the open `gotcha`, `fix` and `decision`
-   notes of allowed projects that no unmerged branch already holds. Under 3, with the oldest under 7 days: log it and
-   exit 0. An empty run is a success.
+1. **Gate, no model.** Run `kb lint` first, since claims go stale while the inbox is quiet. Resolved notes move to
+   `inbox/done/` (§4.10). Then count the open `gotcha`, `fix` and `decision` notes of allowed projects that no unmerged
+   branch has an action for. Under 3, with the oldest under 7 days: log it and exit 0. An empty run is a success.
 2. **Manifest.** Work in worktree `~/.local/share/agent-fabric/ingest-wt` on branch `ingest/<yyyy-mm-dd>`, or on an
    unmerged ingest branch if there is one. Commit the note ids and the base commit. A deleted, unmerged branch returns
    its notes to pending.
@@ -499,14 +499,14 @@ small local model can run the same job as a hosted one: the move changes one set
      it unrelated? Contradicting means both can't be true, not that one is newer.
    - Would a future agent plausibly act better for knowing this?
 6. **`kb` acts.** It turns the answers into one action: `skip`, `add`, `duplicate`, `extend`, `supersede` or `conflict`.
-   The claim goes under its kind's section on `wiki/projects/<project>.md`. It copies the note to `raw/notes/` and
-   regenerates `index.md` and `log.md`. An invalid answer that fails again on one retry goes on a list for review and
-   reaches no page.
+   The claim goes under its kind's section on `wiki/projects/<project>.md`. It records the action in the manifest,
+   copies the note to `raw/notes/` and regenerates `index.md` and `log.md`. An invalid answer that fails again on one
+   retry gets no action, goes on a list for review and reaches no page.
 7. **Output gate.** `kb lint` and §4.5 over every changed file, then commit on the branch.
 8. **Review.** I review in tuicr, about weekly, with the note and the answers beside each action, least certain first,
    and mark each action right or wrong (§10).
-9. **Merge.** The next run finds the merged manifests and moves their notes to `inbox/done/`, so notes need no ledger in
-   `state.db`.
+9. **Merge.** The next run finds the merged manifests and moves the notes with an action to `inbox/done/`, so notes need
+   no ledger in `state.db`. A quarantined note, or one with no valid answer, stays in the inbox and is tried again.
 
 The model sees one note, its evidence and its candidate claims, and has no tools. It treats the note as one agent's
 claim, since the first inbox held a false alarm (2026-11-02).
@@ -539,7 +539,8 @@ to its claims.
 **Lint and prune.** Without these the wiki becomes a long list of stale and duplicate claims. `kb lint` follows the
 "lint" operation in Karpathy's gist, and `kb prune` does the writing his ingest does:
 
-- `kb lint` (deterministic; after ingest, also part of `kb doctor`) reports broken links, claims citing missing notes
+- `kb lint` (deterministic; on every ingest run, even when the gate exits, and in `kb doctor`, which is where its
+  findings show when no branch is waiting for review) reports broken links, claims citing missing notes
   or digests, claims whose anchor file changed since `verified`, a `supersedes` pointing at nothing, a summary citing a
   missing claim, orphan pages, oversized pages and near-duplicate titles. Karpathy's lint compares pages with each
   other and with newer sources, and the failure people report is a page "confidently wrong for months" that passes
@@ -941,7 +942,7 @@ changes no other, so the user's hooks survive every run. Copilot CLI's `kb.json`
 | `fabricd.service` | tracker, observer, digester, panel | 127.0.0.1:8090 |
 | `llama-panel.service` | `llama-server` with E4B | 127.0.0.1:8091 |
 | `fabric-ingest.timer` | `kb ingest`, weekly on `codex`, nightly at 03:00 on `local` (which starts a llama-server on 8092), §4.7. `Persistent=true`, so a machine asleep at that time runs it on waking; `OnFailure=` leaves a marker for `kb doctor` | — |
-| `fabric-prune.timer` | `kb prune` weekly, which writes only when a page meets its trigger (§4.7; `kb lint` runs inside `kb ingest`) | — |
+| `fabric-prune.timer` | `kb prune` weekly, which writes only when a page meets its trigger (§4.7; `kb lint` runs in `kb ingest`, before its gate) | — |
 | `fabric-backup.timer` | daily SQLite backup of agentsview archive and `state.db`, and a `git bundle` of the wiki, which has no remote | — |
 
 | Path | Contents | In git |
