@@ -3,13 +3,14 @@
 ## What exists
 
 `docs/design.md` plans a memory shared across coding agents: session digests, a live panel, a wiki, an MCP server.
-Two parts are built: agent notes (`kb note`, `inbox`, `doctor`, `hook` and the `kb-note` skill) and the CI that builds
-and vets agentsview. The rest of the design, including `fabricd` and the other `kb` commands, is still a plan (§9 has
-the phases).
+Three parts are built: agent notes (`kb note`, `inbox`, `doctor`, `hook` and the `kb-note` skill), notes into the wiki
+(`kb ingest`, `kb lint`), and the CI that builds and vets agentsview. The rest of the design, including `fabricd` and
+the other `kb` commands, is still a plan (§9 has the phases).
 
 The design holds decisions, their reasons and dated findings from real agent runs. Details live in code and tests,
 which cite it by section. Read the section before changing what it covers:
 
+- §4.6, §4.7: wiki pages, `kb ingest`, `kb lint`
 - §4.10: notes, how a note is signed, the hooks, `kb doctor`
 - §4.1: the agentsview pin, its build, the vet gate
 - §7: anything that reaches an agent's prompt or leaves the machine
@@ -39,6 +40,8 @@ itself.
 - `kb note` and `kb hook` write to the real inbox and markers, and the inbox is append-only. `kb doctor --fix` edits
   the real agents' settings. To try a command that writes, with `XDG_DATA_HOME` unset, give it a throwaway home:
   `HOME="$(mktemp -d)" .venv/bin/kb <args>`.
+- `kb ingest` moves notes out of the inbox, writes `~/wiki` and spends model requests through `codex`, so ask first. To
+  try it, use a throwaway home with a stub `codex` on PATH (`tests/test_codex.py` has one).
 - Under `uv run`, `kb doctor` reports a `problem` on its `kb` row, because `.venv/bin` comes first on PATH. That's
   expected.
 - A commit in a sandbox with other changes unstaged fails, because pre-commit can't stash them in its read-only cache.
@@ -51,7 +54,8 @@ itself.
 
 `cli.run(argv, env=, cwd=, stdin=, now=)` is the program's entry, and `main` fills those arguments from the process.
 Pass them down (`context.Context`) so that tests can drive any command in-process with a fake home and a fixed clock,
-through the `kb` fixture in `tests/conftest.py`. Two places still see the real environment, so a fake home doesn't
+through the `kb` fixture in `tests/conftest.py`. The `lab` fixture adds a project in git, a fake model and a stand-in
+gitleaks. Two places still see the real environment, so a fake home doesn't
 reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~` from it.
 
 - **Notes.** `notes.py` is the file format, `inbox.py` the folder. The inbox is append-only: each note is a new file
@@ -66,6 +70,9 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   The same markers limit the stop question to once per session and give `kb doctor` its "last ran".
 - **Hooks.** `hooks.py` runs at each hook and knows each agent's events and output format. `hookfiles.py` installs kb's
   entries in each agent's hooks file, recognises them by their command, and keeps every other entry.
+- **Ingest.** `ingest.py` runs §4.7's steps, and the model answers only through `backends.Backend`. `decisions.py` turns
+  answers into one action, `evidence.py` reads a note's refs, `secretgate.py` redacts and scans, `pages.py` is the page
+  format and `manifests.py` records what each branch took. `lint.py` is `kb lint`, and ingest runs it too.
 - **`kb doctor`.** `doctor.py` gathers one `report.Row` per check, with `sandboxes.py` and `hookfiles.py` covering the
   agents' settings, and `report.py` renders one TOON document. It writes TOON by hand: `toon-format` is a dev dependency
   that tests use as an independent decoder, and the package has no runtime dependencies yet.
@@ -75,6 +82,11 @@ These hold across the code:
 - A hook never breaks a session: on any error it prints nothing and exits 0.
 - The start hook's reminder carries a count and the project id, and the stop hook's question is a fixed string. Note
   text reaches an agent only through `kb inbox`, under its untrusted header.
+- No model text reaches a claim: `kb` files the note's own text, and a claim's lines never change once filed.
+- A note is untrusted. Its refs are read only from git objects of its own project, and its text is escaped when filed.
+  A bad note fails by itself, and the run files the others.
+- Ingest fails closed: if gitleaks can't vouch for a text, the run stops before any model sees it. A file is redacted
+  and scanned whole before it's cut to an excerpt, because a cut can hide what makes a secret recognisable.
 - `kb doctor` only reads, unless given `--fix`. `--fix` edits the user's agent settings and keeps everything else in
   them. A file it can't edit safely gets a `problem` row with a step for the user, and stays as it is.
 - `src/agent_fabric/skills/kb-note/SKILL.md` is the one copy of the skill. `kb doctor` compares the installed copies

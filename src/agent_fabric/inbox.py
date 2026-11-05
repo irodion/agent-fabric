@@ -1,7 +1,8 @@
 """The notes inbox: one file per note, append-only (docs/design.md §4.10)."""
 
+import contextlib
 from dataclasses import dataclass, field, replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from agent_fabric.notes import Note, new_id, parse, render
@@ -44,10 +45,11 @@ class Inbox:
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    def read(self) -> Snapshot:
-        """Notes still in the inbox (not moved to `done/`); unreadable files are skipped."""
+    def read(self, *, with_done: bool = False) -> Snapshot:
+        """Notes still in the inbox, and with `with_done` those moved to `done/`; unreadable files are skipped."""
         found = []
-        for file in self.path.glob("*.md"):
+        moved = (self.path / "done").rglob("*.md") if with_done else ()
+        for file in (*self.path.glob("*.md"), *moved):
             try:
                 found.append((file, parse(file.read_text(encoding="utf-8"))))
             except (OSError, ValueError, TypeError, KeyError):
@@ -71,3 +73,10 @@ class Inbox:
                 continue
             return file, note
         raise FileExistsError(f"no free note id in {self.path} after {ID_ATTEMPTS} attempts")
+
+    def retire(self, file: Path, when: datetime) -> None:
+        """Move a note to `done/<yyyy>/<mm>/`, by the month given. A note already moved is left where it is."""
+        folder = self.path / "done" / f"{when:%Y}" / f"{when:%m}"
+        folder.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(FileNotFoundError):
+            file.rename(folder / file.name)

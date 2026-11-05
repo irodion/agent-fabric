@@ -5,13 +5,19 @@ import os
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date, datetime
 from importlib.resources import files
 from pathlib import Path
 
 from agent_fabric import config, hookfiles
-from agent_fabric.paths import config_file, expand, inbox_dir, tilde, uv_tool_dir
+from agent_fabric.lint import findings, summary
+from agent_fabric.manifests import Manifest, unmerged
+from agent_fabric.paths import config_file, expand, inbox_dir, tilde, uv_tool_dir, wiki_dir
 from agent_fabric.report import Row, render
 from agent_fabric.sandboxes import cant_read, claude_code, codex
+from agent_fabric.wikirepo import Git, GitError
+
+BRANCH_WAIT = 7  # days an ingest branch can wait for review before kb doctor says so (docs/design.md §8)
 
 
 @dataclass(frozen=True)
@@ -206,9 +212,56 @@ def _copilot_sync(settings: Path, env: Mapping[str, str]) -> Row:
     return Row("ok", "sync", shown, "Copilot CLI's session sync is off")
 
 
-def doctor(env: Mapping[str, str], *, fix: bool = False, hooks: tuple[str, ...] | None = None) -> tuple[int, str]:
-    """Check the inbox, the skill copies, the sandboxes' write lists, the agents' hooks and Copilot CLI's session
-    sync; with `fix`, set up what's missing, except the sync. `hooks` (with `fix`) records which hooks to install."""
+def _ingest_tools(env: Mapping[str, str]) -> list[Row]:
+    """What `kb ingest` needs, once there's a project for it to publish (docs/design.md §4.5, §4.7)."""
+    shown = tilde(config_file(env), env)
+    try:
+        if not config.allowed_projects(env):
+            return []
+    except ValueError as e:
+        return [Row("problem", "ingest", shown, f"can't read [publish] allow ({e})")]
+    return [
+        Row("problem", "ingest", tool, f"{tool} isn't on PATH, and kb ingest needs it")
+        for tool in ("gitleaks", "codex")
+        if shutil.which(tool, path=env.get("PATH", "")) is None
+    ]
+
+
+def _wiki(env: Mapping[str, str], now: datetime) -> list[Row]:
+    """`kb lint`'s findings, and a branch left waiting (docs/design.md §4.7, §8). Quiet where there's no wiki yet."""
+    folder = wiki_dir(env)
+    if not (folder / ".git").exists():
+        return []
+    shown = tilde(folder, env)
+    found = findings(env, now)
+    said = summary(found)
+    if any(finding.level == "error" for finding in found):
+        rows = [Row("problem", "wiki", shown, said, step="Run kb lint to see what's broken, and fix it by hand")]
+    else:
+        rows = [Row("ok", "wiki", shown, f"{said}: kb lint lists them" if found else "no findings")]
+    try:
+        waiting = unmerged(Git(folder, env))
+    except GitError as e:
+        return [*rows, Row("problem", "ingest", shown, str(e))]
+    if waiting and (days := _days_waiting(waiting, now)) > BRANCH_WAIT:
+        step = f"Review {waiting.branch} and merge it, or delete it to return its notes to pending"
+        rows.append(Row("problem", "ingest", waiting.branch, f"unmerged for {days} days", step=step))
+    return rows
+
+
+def _days_waiting(manifest: Manifest, now: datetime) -> int:
+    try:
+        return (now.date() - date.fromisoformat(manifest.name[:10])).days
+    except ValueError:  # a branch kb didn't name
+        return 0
+
+
+def doctor(
+    env: Mapping[str, str], now: datetime, *, fix: bool = False, hooks: tuple[str, ...] | None = None
+) -> tuple[int, str]:
+    """Check the inbox, the skill copies, the sandboxes' write lists, the agents' hooks, Copilot CLI's session sync,
+    and the wiki and what `kb ingest` needs; with `fix`, set up what's missing, except the sync and the last two.
+    `hooks` (with `fix`) records which hooks to install."""
     found = agents(env)
     inbox = inbox_dir(env)
     rows = [
@@ -247,4 +300,5 @@ def doctor(env: Mapping[str, str], *, fix: bool = False, hooks: tuple[str, ...] 
             rows.append(hooks_row)
     if found.has_copilot:
         rows.append(_copilot_sync(found.copilot / "settings.json", env))
+    rows += [*_ingest_tools(env), *_wiki(env, now)]
     return (0 if all(row.status in ("ok", "fixed") for row in rows) else 1), render(rows, fix=fix)

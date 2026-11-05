@@ -444,6 +444,7 @@ One local repo per machine, for all its projects (`~/wiki`), with no remote.
 AGENTS.md          schema: the wording of ingest's questions, and the rules for `kb prune`'s summaries
 index.md           generated catalogue (never hand-edited)
 log.md             append-only, one line per digest/ingest (merge=union in .gitattributes)
+manifests/...      what each ingest branch took and what became of each note, and its review list
 raw/sessions/...   digests (§4.4)
 raw/notes/...      agent notes that ingest used (§4.10)
 wiki/projects/<project>.md       a project's claims, by kind, under a summary once `kb prune` writes one
@@ -462,7 +463,7 @@ Pages are made of claims: a note's own text with its evidence, not prose.
 
 `kb` files each claim by the model's answers (§4.7). A `supersede` moves the old claim to the page's `## Superseded`
 section, with a pointer to what replaced it. A `conflict` keeps both claims side by side until I decide, and a note that
-adds to a claim is filed below it. A claim says only what its note said, and nothing rewrites it, so whether it still
+adds to a claim is filed below it. Each links to every claim it's about. A claim says only what its note said, and nothing rewrites it, so whether it still
 holds shows only in its anchor and `verified` date (§4.7's lint).
 
 A page may open with a `## Summary` written by `kb prune`, marked as such, with every sentence citing note ids (§4.7).
@@ -490,25 +491,34 @@ small local model can run the same job as a hosted one: the move changes one set
    this branch, so a note that failed on a merged branch gets one more try. Commit their ids and the base commit. A
    deleted, unmerged branch returns its notes to pending.
 3. **Evidence, no model.** For each ref of each note: did it exist at the note's commit, does it exist now, has it
-   changed since, and an excerpt. Add candidate claims found with `rg`, and any matching lines of the project's
-   `AGENTS.md`, to show what's already recorded.
-4. **Input gate.** Redaction and gitleaks (§4.5) over all of that, before a hosted model sees it. A hit quarantines the
-   note.
+   changed since, and an excerpt. It reads only git objects of the note's own project, and no `.env*` file (§7). A file
+   is redacted and scanned whole before it's cut to an excerpt, since a cut can hide what makes a secret recognisable,
+   such as a private key's end marker. A file gitleaks still flags sends no excerpt, and the review list names it. Add
+   candidate claims that share the note's words, and any such lines of the project's `AGENTS.md`, to show what's
+   already recorded.
+4. **Input gate.** Redaction and gitleaks (§4.5) over all of that and the note's other fields, before a hosted model
+   sees it. A hit quarantines that note, and the others go on.
 5. **Typed questions, per note.** Each is narrow, because decision models read a question literally, and code combines
    the answers.
    - For each ref's excerpt: does it support the note, contradict it, or say nothing?
    - For each candidate claim: is the note the same fact, does it add to the claim, replace it or contradict it, or is
      it unrelated? Contradicting means both can't be true, not that one is newer.
+   - For each matching line of the project's `AGENTS.md`: does the note state the same fact?
    - Would a future agent plausibly act better for knowing this?
+   - How sure are you of these answers? Review goes by this, since `codex` gives no probabilities.
 6. **`kb` acts.** It turns the answers into one action: `skip`, `add`, `duplicate`, `extend`, `supersede` or `conflict`.
-   The claim goes under its kind's section on `wiki/projects/<project>.md`. It records the action in the manifest,
-   copies the note to `raw/notes/` and regenerates `index.md` and `log.md`. An invalid answer that fails again on one
-   retry gets no action, goes on a list for review and reaches no page.
+   A ref that contradicts the note means `skip`, so a false alarm can't replace a good claim. A ref git can't find
+   proves nothing, since the file may be untracked or on another branch: the note is decided as usual, with no anchor if
+   no other ref has one, and the review list marks it. The claim goes under its kind's section on
+   `wiki/projects/<project>.md`. It records the action in the manifest, copies the note to `raw/notes/` and regenerates
+   `index.md` and `log.md`. An invalid answer that fails again on one retry gets no action, goes on a list for review
+   and reaches no page.
 7. **Output gate.** `kb lint` and §4.5 over every changed file, then commit on the branch, with each note's outcome in
    the manifest: its action, or why it failed. A run that dies before this commit leaves no outcomes, so the next run
    drops its uncommitted work and takes those notes again.
 8. **Review.** I review in tuicr, about weekly, with the note and the answers beside each action, least certain first,
-   and mark each action right or wrong (§10).
+   and mark each action right or wrong (§10). A note resolved after it was filed heads the list, and I take its claim
+   off the branch by hand if it no longer holds, since `kb` never removes a claim.
 9. **Merge.** The next run finds the merged manifests and moves the notes with an action to `inbox/done/`, so notes need
    no ledger in `state.db`. A quarantined note, or one with no valid answer, stays in the inbox until it's resolved.
    It's tried once on each later branch, and doesn't count towards the gate.
@@ -769,7 +779,8 @@ The kind says what the next agent should do with the note, and decides how long 
     too.
 - **`--resolve <id>`** closes an earlier note, usually a `status` once the tests pass again. It writes a new note
   that points at the old one, so the inbox stays append-only; resolved notes drop out of `kb inbox` and
-  `kb catchup`.
+  `kb catchup`. A note already filed on the wiki can't be resolved: what's true now goes in a new note, which ingest
+  weighs against the claim.
 - **Repeats.** The same kind and text in the same project within 24 h writes nothing and prints the existing id, so a
   retried command doesn't duplicate a note.
 - **Result.** The note's id and path, exit 0. Bad input exits 2 and says what to change (the kinds, the length
@@ -953,7 +964,7 @@ changes no other, so the user's hooks survive every run. Copilot CLI's `kb.json`
 | Path | Contents | In git |
 |---|---|---|
 | `~/.config/agent-fabric/config.toml` | settings (allow lists, idle timeout, ports, backends, project aliases) | no |
-| `~/.local/share/agent-fabric/state.db` | cursors, loops, ingest ledger, flags | no (backed up) |
+| `~/.local/share/agent-fabric/state.db` | cursors, loops, flags | no (backed up) |
 | `~/.local/share/agent-fabric/index.db` | search index | no (rebuildable) |
 | `~/.local/share/agent-fabric/quarantine/` | digests blocked by gitleaks | no |
 | `~/.local/share/agent-fabric/local/` | digests of projects not on the allow list | no (backed up) |
@@ -982,7 +993,8 @@ mypy and pytest on Python 3.13 and 3.14).
   reviewed (§4.7); MCP output is labelled historical; nothing is auto-injected (the `kb-note` skill and its hooks are
   instructions, not history).
 - Hosted ingest and `kb prune` send the notes of allowed projects, and ingest also excerpts of the files they cite, to
-  the model's vendor, after the input gate (§4.7). The `local` backend sends nothing off the machine.
+  the model's vendor, after the input gate (§4.7). Refs are read only from git objects of the note's own project, so a
+  note can't get `~/.ssh` or an untracked file sent. The `local` backend sends nothing off the machine.
 - Agent notes (§4.10) can carry a prompt injection from whatever the agent read. They are labelled untrusted, never
   injected into prompts (the start hook gives only their count and the project id), and reach the wiki only through
   reviewed ingest. The inbox is writable from the agents'
@@ -1026,6 +1038,8 @@ mypy and pytest on Python 3.13 and 3.14).
 | the disk is lost | the wiki goes with it, having no remote | daily `git bundle` in the backup (§5) |
 | ingest branch left unmerged | wiki stale | later runs append to the same branch; `kb doctor` warns after 7 days |
 | Codex login expired, or the model call fails | no ingest; notes wait | `OnFailure=` marker reported by `kb doctor`; the notes stay pending |
+| gitleaks missing or failing | nothing can be checked | `kb ingest` stops before any model is asked; `kb doctor` reports a missing one |
+| ingest branch checked out, or moved during a run | a run can't add to it safely | the run stops and says so, with the branch as it was; the notes wait |
 | a backend returns an invalid answer | no decision | one retry, then it goes on the review list and reaches no page (§4.7) |
 | a confident wrong answer | noise filed, or a useful note dropped | review, least certain first; a dropped note is listed for review, and keeps its file (§4.7) |
 | a summary gets a connection wrong | a false lead that reads as fact | each sentence cites its claims and it's marked as model-written; review; deleting it loses nothing (§4.7) |
@@ -1071,11 +1085,12 @@ item 3 (cross-agent search) are still to do for the CLIs. Items 1–3 and 7 for 
 
 **Phase 1 — digests and query.** First `kb note`, `kb inbox`, the `kb-note` skill and its hooks (§4.10): they
 need neither agentsview nor fabricd, so a one-week trial in one or two projects runs while the rest is built.
-Notes-only `kb ingest` and `kb lint` on the `codex` backend come next, for the same reason (§4.7). Then
-CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.x (from 2026-11-06, §4.1); adapter,
-normalizer, tracker, digester with allow list/redaction/gate/commit, for the CLI agents: agentsview for Claude
-Code, Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI + `kb mcp`; a
-prototype session for the panel layout, then the panel with rules only (incl. open loops and carry-over).
+Notes-only `kb ingest` and `kb lint` on the `codex` backend follow, for the same reason (§4.7). They are built, but
+haven't run on a real model. Their timer and `OnFailure=` marker come with that first run, and `kb lint`'s summary
+check with `kb prune`. Then CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.x (from
+2026-11-06, §4.1); adapter, normalizer, tracker, digester with allow list/redaction/gate/commit, for the CLI agents:
+agentsview for Claude Code, Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI +
+`kb mcp`; a prototype session for the panel layout, then the panel with rules only (incl. open loops and carry-over).
 
 **Phase 2 — models.** SLM bullets in the panel after it passes the eval (§10); `kb ingest` takes digests too (§11);
 the comparison with the `local` backend, then nightly on it (§10); `kb prune` and `kb retro`.
@@ -1137,7 +1152,7 @@ them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag 
   don't win after a month, that's a finding: a compiled wiki isn't shown to beat good retrieval (arXiv 2605.18490). Try
   a second, less documented project too, since agents here move knowledge into the repo by hand (§4.10).
 - Moving from `codex` to `local`: shadow runs on the same frozen batches, with both results unlabelled, plus 30 seeded
-  traps scored by script: a dead ref, a real ref that contradicts its note, a duplicate, a contradiction, an injection.
+  traps scored by script: a real ref that contradicts its note, a duplicate, a contradiction, an injection.
   Score each backend by actions I marked wrong (§4.7), including the notes it dropped that the other kept.
 - How many notes that takes: the first days' rate gives at most 1.33 eligible notes a day, so two weeks is 19 notes,
   with a 15% chance of telling 20% wrong from 40%. 150 notes give 96% but take 16 weeks (exact paired test, assuming

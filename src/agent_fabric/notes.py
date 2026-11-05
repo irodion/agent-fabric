@@ -8,13 +8,14 @@ import json
 import re
 import secrets
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 SCHEMA = "fabric.note/1"
 KINDS = ("status", "gotcha", "fix", "decision")
 MAX_TEXT = 500
+STALE_AFTER = timedelta(days=14)  # a `status` note this old may no longer hold
 ID = re.compile(r"n[0-9a-f]{6}")
 
 
@@ -110,10 +111,13 @@ FILE_EXTENSIONS = frozenset(
 
 def ref_path(ref: str) -> str | None:
     """The file a ref points at, if it looks like one: `src/x.py`, `src/x.rs:12:5`, `tests/t.py::test_a`,
-    `README.md`. None for commands, URLs, commits and dotted names such as `httpx.ConnectError` or `json.loads`."""
+    `src/x.py#L12`, `src/x.py:main`, `README.md#setup`, `README.md`. None for commands, URLs, commits and dotted names
+    such as `httpx.ConnectError` or `json.loads`."""
     if re.search(r"\s", ref) or "://" in ref or re.fullmatch(r"[0-9a-f]{7,40}", ref):
         return None
-    path = re.sub(r"(:\d+)+(-\d+)?$", "", ref.split("::", 1)[0])
+    path = re.sub(r"#[\w.-]*$", "", ref.split("::", 1)[0])
+    path = re.sub(r"(:\d+)+(-\d+)?$", "", path)
+    path = re.sub(r":[A-Za-z_][\w.]*$", "", path)
     stem, dot, extension = path.rpartition(".")
     if "/" in path or (stem and dot and extension.lower() in FILE_EXTENSIONS):
         return path
