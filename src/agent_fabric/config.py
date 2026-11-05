@@ -42,6 +42,16 @@ def hooks_choice(env: Mapping[str, str]) -> tuple[str, ...]:
     return HOOKS if recorded is None else recorded
 
 
+def allowed_projects(env: Mapping[str, str]) -> tuple[str, ...]:
+    """The project ids under `[publish] allow` (docs/design.md §4.5). The list starts empty: nothing is published
+    until a project is added. ValueError where the file can't be read."""
+    publish: Any = tomllib.loads(_text(env)).get("publish", {})
+    allow = publish.get("allow", []) if isinstance(publish, dict) else None
+    if not isinstance(allow, list) or not all(isinstance(project, str) for project in allow):
+        raise ValueError("publish.allow must be a list of project ids")
+    return tuple(allow)
+
+
 def record_hooks(env: Mapping[str, str], chosen: tuple[str, ...]) -> None:
     """Record the choice: change the `hooks` line under [notes], or add it; ValueError where that can't do it."""
     text = _text(env)

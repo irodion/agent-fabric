@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TextIO
 
+from agent_fabric.backends import Backend
+
 
 @dataclass(frozen=True)
 class Context:
@@ -15,3 +17,4 @@ class Context:
     cwd: Path
     stdin: TextIO
     now: datetime
+    backend: Backend | None = None  # what answers ingest's questions; None for the one `--backend` names

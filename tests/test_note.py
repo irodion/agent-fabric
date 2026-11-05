@@ -8,6 +8,8 @@ from typing import Any
 import pytest
 from conftest import Kb
 
+from agent_fabric.inbox import Inbox
+
 
 def test_a_note_shows_up_in_the_inbox(kb: Kb) -> None:
     kb("note", "--kind", "gotcha", "--agent", "Codex", "uv needs --cache-dir in the sandbox")
@@ -684,3 +686,27 @@ def test_an_empty_resolve_id_is_refused_as_such(kb: Kb) -> None:
     result = kb("note", "--agent", "Codex", "--resolve", "", "they pass again")
 
     assert (result.exit_code, "--resolve" in result.stderr) == (2, True)
+
+
+def test_a_retried_resolve_is_safe_after_the_note_has_moved_to_done(kb: Kb) -> None:
+    note = kb("note", "--kind", "status", "--agent", "Codex", "integration tests fail on main").stdout.split()[0]
+    first = kb("note", "--resolve", note, "--agent", "Codex", "fixed").stdout.split()[0]
+    assert kb("ingest").exit_code == 0
+
+    again = kb("note", "--resolve", note, "--agent", "Codex", "fixed")
+
+    assert again.exit_code == 0
+    assert again.stdout.split()[0] == first
+    assert "already resolved" in again.stderr
+
+
+def test_a_note_already_filed_on_the_wiki_says_to_write_a_new_note_instead_of_resolving(kb: Kb) -> None:
+    note = kb("note", "--kind", "gotcha", "--agent", "Codex", "the socket fixture hangs").stdout.split()[0]
+    inbox = kb.home / ".local" / "share" / "agent-fabric" / "inbox"
+    Inbox(inbox).retire(next(inbox.glob(f"*-{note}.md")), kb.now)
+
+    result = kb("note", "--resolve", note, "--agent", "Codex", "fixed")
+
+    assert result.exit_code == 2
+    assert "new note" in result.stderr
+    assert list(inbox.glob("*.md")) == []

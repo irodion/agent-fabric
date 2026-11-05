@@ -15,6 +15,16 @@ def inbox_dir(env: Mapping[str, str]) -> Path:
     return _data_home(env) / "agent-fabric" / "inbox"
 
 
+def wiki_dir(env: Mapping[str, str]) -> Path:
+    """This machine's wiki repo (docs/design.md §4.6)."""
+    return Path(env["HOME"]) / "wiki"
+
+
+def ingest_worktree(env: Mapping[str, str]) -> Path:
+    """Where `kb ingest` works, so it never touches the wiki's own checkout (docs/design.md §4.7)."""
+    return _data_home(env) / "agent-fabric" / "ingest-wt"
+
+
 def uv_tool_dir(env: Mapping[str, str]) -> Path:
     """Where `uv tool install` puts each tool's own folder, as `uv tool dir` prints it."""
     tool_dir = Path(env.get("UV_TOOL_DIR") or "")
