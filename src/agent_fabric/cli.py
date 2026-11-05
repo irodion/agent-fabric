@@ -25,7 +25,7 @@ from agent_fabric.lint import lint
 from agent_fabric.notes import KINDS, MAX_TEXT, STALE_AFTER, Note, missing_ref, new_id
 from agent_fabric.paths import expand, inbox_dir, tilde
 from agent_fabric.secretgate import GateUnavailable
-from agent_fabric.wikirepo import GitError
+from agent_fabric.wikirepo import WIKI_ERRORS
 
 
 @dataclass(frozen=True)
@@ -119,7 +119,7 @@ def _wiki_command(args: argparse.Namespace, ctx: Context) -> Result:
             return Result(*lint(ctx.env, ctx.now), "")
         project = _project(args.project, ctx) if args.project else None
         return Result(*ingest(ctx, project=project, dry_run=args.dry_run), "")
-    except (BackendError, GateUnavailable, GitError, OSError, Stopped) as e:
+    except (BackendError, GateUnavailable, Stopped, *WIKI_ERRORS) as e:
         return Result(1, "", f"kb: {e}\n")
 
 
