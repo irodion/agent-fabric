@@ -15,7 +15,7 @@ from agent_fabric.manifests import Manifest, unmerged
 from agent_fabric.paths import config_file, expand, inbox_dir, tilde, uv_tool_dir, wiki_dir
 from agent_fabric.report import Row, render
 from agent_fabric.sandboxes import cant_read, claude_code, codex
-from agent_fabric.wikirepo import Git, GitError
+from agent_fabric.wikirepo import WIKI_ERRORS, Git, GitError
 
 BRANCH_WAIT = 7  # days an ingest branch can wait for review before kb doctor says so (docs/design.md §8)
 
@@ -233,7 +233,10 @@ def _wiki(env: Mapping[str, str], now: datetime) -> list[Row]:
     if not (folder / ".git").exists():
         return []
     shown = tilde(folder, env)
-    found = findings(env, now)
+    try:
+        found = findings(env, now)
+    except WIKI_ERRORS as e:
+        return [Row("problem", "wiki", shown, f"kb lint can't check it: {e}")]
     said = summary(found)
     if any(finding.level == "error" for finding in found):
         rows = [Row("problem", "wiki", shown, said, step="Run kb lint to see what's broken, and fix it by hand")]

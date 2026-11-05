@@ -293,3 +293,23 @@ def test_doctor_asks_nothing_of_ingest_with_an_empty_allow_list(kb: Kb, tmp_path
     kb.env["PATH"] = str(tmp_path)
 
     assert doctor_rows(kb, "ingest") == []
+
+
+def test_doctor_reports_a_wiki_it_cannot_check_instead_of_crashing(lab: Lab, tmp_path: Path) -> None:
+    built_wiki(lab)
+    lab.kb.env["PATH"] = str(tmp_path)  # git is gone, and lint needs it for the anchors
+
+    row = doctor_rows(lab.kb, "wiki")[0]
+
+    assert row["status"] == "problem"
+    assert "git" in row["detail"]
+
+
+def test_a_page_that_cannot_be_read_is_reported_instead_of_crashing(lab: Lab) -> None:
+    built_wiki(lab)
+    (lab.wiki / PAGE).write_bytes(b"\xff\xfe not text\n")
+
+    assert doctor_rows(lab.kb, "wiki")[0]["status"] == "problem"
+    result = lab.kb("lint")
+    assert result.exit_code == 1
+    assert result.stderr.startswith("kb: ")

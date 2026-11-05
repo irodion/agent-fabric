@@ -21,6 +21,9 @@ class GitError(Exception):
     """A git command failed; the message says which, and why."""
 
 
+WIKI_ERRORS = (GitError, OSError, UnicodeError)  # git failing, or a page that can't be read
+
+
 class Git:
     def __init__(self, folder: Path, env: Mapping[str, str], *, timeout: float = TIMEOUT) -> None:
         self.folder = folder
