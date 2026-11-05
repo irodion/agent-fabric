@@ -482,8 +482,8 @@ small local model can run the same job as a hosted one: the move changes one set
 `kb prune` writes their first summary, and connections between notes appear only then.
 
 1. **Gate, no model.** Run `kb lint` first, since claims go stale while the inbox is quiet. Resolved notes move to
-   `inbox/done/` (§4.10). Then count the open `gotcha`, `fix` and `decision` notes of allowed projects that no unmerged
-   branch lists. Under 3, with the oldest under 7 days: log it and exit 0. An empty run is a success.
+   `inbox/done/` (§4.10). Then count the open `gotcha`, `fix` and `decision` notes of allowed projects with no outcome
+   on any manifest. Under 3, with the oldest under 7 days: log it and exit 0. An empty run is a success.
 2. **Manifest.** Work in worktree `~/.local/share/agent-fabric/ingest-wt` on branch `ingest/<yyyy-mm-dd>`, or on an
    unmerged ingest branch if there is one. Commit the note ids and the base commit. A deleted, unmerged branch returns
    its notes to pending.
@@ -502,7 +502,9 @@ small local model can run the same job as a hosted one: the move changes one set
    The claim goes under its kind's section on `wiki/projects/<project>.md`. It records the action in the manifest,
    copies the note to `raw/notes/` and regenerates `index.md` and `log.md`. An invalid answer that fails again on one
    retry gets no action, goes on a list for review and reaches no page.
-7. **Output gate.** `kb lint` and §4.5 over every changed file, then commit on the branch.
+7. **Output gate.** `kb lint` and §4.5 over every changed file, then commit on the branch, with each note's outcome in
+   the manifest: its action, or why it failed. A run that dies before this commit leaves no outcomes, so the next run
+   drops its uncommitted work and takes those notes again.
 8. **Review.** I review in tuicr, about weekly, with the note and the answers beside each action, least certain first,
    and mark each action right or wrong (§10).
 9. **Merge.** The next run finds the merged manifests and moves the notes with an action to `inbox/done/`, so notes need
@@ -1127,8 +1129,8 @@ them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag 
   decisions and reason links, precision of bullets, latency per batch. Initial adoption bar: ≥ 70% decision recall,
   ≤ 1 wrong bullet per 10, ≤ 10 s per batch.
 - `kb ingest` and `kb prune`: tests in `tests/` with a fake backend, for the gate and the trigger, the manifest,
-  resolved notes, the evidence, each way an answer can fail, a summary sentence citing no claim, and no claim ever
-  changing. The first real run is mine.
+  resolved notes, the evidence, each way an answer can fail, a run that dies before its commit, a summary sentence
+  citing no claim, and no claim ever changing. The first real run is mine.
 - Does the wiki pay off? Keep 10 real questions, and answer them with `rg` over notes and then over pages. If pages
   don't win after a month, that's a finding: a compiled wiki isn't shown to beat good retrieval (arXiv 2605.18490). Try
   a second, less documented project too, since agents here move knowledge into the repo by hand (§4.10).
