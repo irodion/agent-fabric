@@ -168,17 +168,18 @@ def _work_on(backend: Backend, tree: Git, note: Note, ctx: Context) -> dict[str,
     if decision.action not in ("skip", "duplicate"):
         _write(tree, page_path(clean.scope), page.render())
     _write(tree, raw_path(clean), render(clean))
-    outcome: dict[str, object] = {
+    marks = {
+        "missing": [redact(ref.ref) for ref in evidence.refs if ref.dead],
+        "unchecked": [redact(ref.ref) for ref in evidence.refs if ref.unchecked],
+        "withheld": [redact(ref.path) for ref in evidence.refs if ref.withheld and ref.path],
+    }
+    return {
         "action": decision.action,
         "answers": answers,
         "targets": list(decision.targets),
         "text": clean.text,
+        **{mark: refs for mark, refs in marks.items() if refs},
     }
-    if missing := [redact(ref.ref) for ref in evidence.refs if ref.dead]:
-        outcome["missing"] = missing
-    if withheld := [redact(ref.path) for ref in evidence.refs if ref.withheld and ref.path]:
-        outcome["withheld"] = withheld
-    return outcome
 
 
 def _index(tree: Git) -> str:

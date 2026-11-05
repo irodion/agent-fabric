@@ -36,6 +36,7 @@ class RefEvidence:
     excerpt: str | None = None
     withheld: bool = False  # gitleaks flagged the file, so no excerpt
     dead: bool = False  # looks like a file, but git has it at neither point: maybe untracked, or on another branch
+    unchecked: bool = False  # looks like a file, but the note's checkout isn't here to look in
 
 
 @dataclass(frozen=True)
@@ -132,7 +133,7 @@ def _gather_ref(repo: Git, ref: str, note: Note, prefix: str, env: Mapping[str, 
 def gather(note: Note, env: Mapping[str, str]) -> Evidence:
     repo = checkout(note, env)
     if repo is None:
-        return Evidence(tuple(RefEvidence(ref) for ref in note.refs))
+        return Evidence(tuple(RefEvidence(ref, unchecked=ref_path(ref) is not None) for ref in note.refs))
     prefix = repo("rev-parse", "--show-prefix").strip()
     refs = tuple(_gather_ref(repo, ref, note, prefix, env) for ref in note.refs)
     docs = repo("cat-file", "blob", f"HEAD:{DOCS}") if repo.ok("cat-file", "-e", f"HEAD:{DOCS}") else ""
