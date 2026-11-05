@@ -82,6 +82,10 @@ def questions_for(
                 f"Ref {at}: {ref.ref}\nNot found in git, at the note's commit or now. It may be untracked, or only "
                 "on another branch, so this doesn't show the note is wrong.\n"
             )
+        elif ref.unchecked:
+            parts.append(
+                f"Ref {at}: {ref.ref}\nNot checked: the note's checkout isn't here. This says nothing about it.\n"
+            )
         elif ref.path:
             facts = (
                 f"in the repo at the note's commit: {_yes_no(ref.at_commit)}; there now: {_yes_no(ref.now)}; "

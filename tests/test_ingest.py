@@ -1498,3 +1498,19 @@ def test_a_flag_that_could_not_be_committed_is_made_on_the_next_run(lab: Lab) ->
     assert lab.kb("ingest").exit_code == 0
 
     assert f"- {notes[0]}: no longer true\n" in lab.show(BRANCH, "manifests/2026-10-31.md")
+
+
+def test_a_ref_whose_checkout_has_gone_is_told_to_the_model_and_marked_for_review(lab: Lab) -> None:
+    lab.leave("gotcha", "main returns 1, whatever it was given", "src/app.py", "pytest -q")
+    shutil.rmtree(lab.repo)
+    lab.kb.cwd = lab.kb.home
+
+    run_a_week_later(lab)
+
+    state = lab.fake.calls[0][0]
+    assert "Ref 0: src/app.py\nNot checked" in state
+    assert "pytest -q" not in state
+    review = lab.show("ingest/2026-11-08", REVIEW)
+    assert "- ref not checked, its checkout isn't here: src/app.py\n" in review
+    assert "pytest -q" not in review
+    assert "ref not found" not in review

@@ -107,7 +107,10 @@ def _entry(note_id: str, outcome: dict[str, Any]) -> str:
     withheld = "".join(
         f"- excerpt withheld, gitleaks flagged it: {safe(path)}\n" for path in outcome.get("withheld", ())
     )
-    details = f"{listed}{targets}{missing}{withheld}"
+    unchecked = "".join(
+        f"- ref not checked, its checkout isn't here: {safe(ref)}\n" for ref in outcome.get("unchecked", ())
+    )
+    details = f"{listed}{targets}{missing}{unchecked}{withheld}"
     return f"## {note_id} {outcome['action']} (sure: {answers.get('sure')})\n\n{quoted}\n{details}"
 
 

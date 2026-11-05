@@ -508,11 +508,11 @@ small local model can run the same job as a hosted one: the move changes one set
    - How sure are you of these answers? Review goes by this, since `codex` gives no probabilities.
 6. **`kb` acts.** It turns the answers into one action: `skip`, `add`, `duplicate`, `extend`, `supersede` or `conflict`.
    A ref that contradicts the note means `skip`, so a false alarm can't replace a good claim. A ref git can't find
-   proves nothing, since the file may be untracked or on another branch: the note is decided as usual, with no anchor if
-   no other ref has one, and the review list marks it. The claim goes under its kind's section on
-   `wiki/projects/<project>.md`. It records the action in the manifest, copies the note to `raw/notes/` and regenerates
-   `index.md` and `log.md`. An invalid answer that fails again on one retry gets no action, goes on a list for review
-   and reaches no page.
+   proves nothing, since the file may be untracked or on another branch, and neither does one whose checkout has gone:
+   the note is decided as usual, with no anchor if no other ref has one, and the review list marks it. The claim goes
+   under its kind's section on `wiki/projects/<project>.md`. It records the action in the manifest, copies the note to
+   `raw/notes/` and regenerates `index.md` and `log.md`. An invalid answer that fails again on one retry gets no action,
+   goes on a list for review and reaches no page.
 7. **Output gate.** `kb lint` and §4.5 over every changed file, then commit on the branch, with each note's outcome in
    the manifest: its action, or why it failed. A run that dies before this commit leaves no outcomes, so the next run
    drops its uncommitted work and takes those notes again.
