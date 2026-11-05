@@ -481,12 +481,14 @@ and files the note's own text as the claim. No model text reaches a claim, so th
 small local model can run the same job as a hosted one: the move changes one setting. Pages read as filed notes until
 `kb prune` writes their first summary, and connections between notes appear only then.
 
-1. **Gate, no model.** Run `kb lint` first, since claims go stale while the inbox is quiet. Resolved notes move to
-   `inbox/done/` (§4.10). Then count the open `gotcha`, `fix` and `decision` notes of allowed projects with no outcome
-   on any manifest. Under 3, with the oldest under 7 days: log it and exit 0. An empty run is a success.
+1. **Gate, no model.** Run `kb lint` first, since claims go stale while the inbox is quiet. Resolved notes, and notes
+   with an action on a merged manifest, move to `inbox/done/` (§4.10). Then count the open `gotcha`, `fix` and
+   `decision` notes of allowed projects with no outcome on any manifest. Under 3, with the oldest under 7 days: log it
+   and exit 0. An empty run is a success.
 2. **Manifest.** Work in worktree `~/.local/share/agent-fabric/ingest-wt` on branch `ingest/<yyyy-mm-dd>`, or on an
-   unmerged ingest branch if there is one. Commit the note ids and the base commit. A deleted, unmerged branch returns
-   its notes to pending.
+   unmerged ingest branch if there is one. The run takes the open notes of those kinds and projects with no outcome on
+   this branch, so a note that failed on a merged branch gets one more try. Commit their ids and the base commit. A
+   deleted, unmerged branch returns its notes to pending.
 3. **Evidence, no model.** For each ref of each note: did it exist at the note's commit, does it exist now, has it
    changed since, and an excerpt. Add candidate claims found with `rg`, and any matching lines of the project's
    `AGENTS.md`, to show what's already recorded.
