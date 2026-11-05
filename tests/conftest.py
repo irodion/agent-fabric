@@ -133,6 +133,9 @@ def lab(kb: Kb, tmp_path: Path) -> Lab:
     gitleaks = stubs / "gitleaks"
     gitleaks.write_text(GITLEAKS)
     gitleaks.chmod(gitleaks.stat().st_mode | stat.S_IEXEC)
+    codex = stubs / "codex"  # for `kb doctor`, whatever this machine has: the fake model answers instead
+    codex.write_text("#!/bin/sh\nexit 1\n")
+    codex.chmod(codex.stat().st_mode | stat.S_IEXEC)
     kb.env.update(
         PATH=f"{stubs}:{os.environ['PATH']}",
         GIT_AUTHOR_NAME="Test",
