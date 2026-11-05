@@ -483,7 +483,7 @@ small local model can run the same job as a hosted one: the move changes one set
 
 1. **Gate, no model.** Run `kb lint` first, since claims go stale while the inbox is quiet. Resolved notes move to
    `inbox/done/` (§4.10). Then count the open `gotcha`, `fix` and `decision` notes of allowed projects that no unmerged
-   branch has an action for. Under 3, with the oldest under 7 days: log it and exit 0. An empty run is a success.
+   branch lists. Under 3, with the oldest under 7 days: log it and exit 0. An empty run is a success.
 2. **Manifest.** Work in worktree `~/.local/share/agent-fabric/ingest-wt` on branch `ingest/<yyyy-mm-dd>`, or on an
    unmerged ingest branch if there is one. Commit the note ids and the base commit. A deleted, unmerged branch returns
    its notes to pending.
@@ -506,7 +506,8 @@ small local model can run the same job as a hosted one: the move changes one set
 8. **Review.** I review in tuicr, about weekly, with the note and the answers beside each action, least certain first,
    and mark each action right or wrong (§10).
 9. **Merge.** The next run finds the merged manifests and moves the notes with an action to `inbox/done/`, so notes need
-   no ledger in `state.db`. A quarantined note, or one with no valid answer, stays in the inbox and is tried again.
+   no ledger in `state.db`. A quarantined note, or one with no valid answer, stays in the inbox until it's resolved.
+   It's tried once on each later branch, and doesn't count towards the gate.
 
 The model sees one note, its evidence and its candidate claims, and has no tools. It treats the note as one agent's
 claim, since the first inbox held a false alarm (2026-11-02).
