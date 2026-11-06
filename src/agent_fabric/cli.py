@@ -65,7 +65,7 @@ def run_in(argv: list[str], ctx: Context) -> Result:
     inbox_cmd = commands.add_parser("inbox")
     inbox_cmd.add_argument("--kind", choices=KINDS)
     inbox_cmd.add_argument("--since", type=_age, metavar="AGE", help="e.g. 7d or 24h")
-    inbox_cmd.add_argument("--all", action="store_true", help="also resolved notes and their resolutions")
+    inbox_cmd.add_argument("--all", action="store_true", help="also notes resolved or ingested, and resolutions")
     scope = inbox_cmd.add_mutually_exclusive_group()
     scope.add_argument("--project", help="a project id, or a folder (default: the current one)")
     scope.add_argument("--all-projects", action="store_true", help="every project's notes")

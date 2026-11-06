@@ -77,6 +77,13 @@ def test_all_also_lists_resolved_notes_and_their_resolutions(kb: Kb) -> None:
     ]
 
 
+def test_the_help_says_all_also_lists_notes_already_ingested(kb: Kb, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        kb("inbox", "--help")
+
+    assert "resolved or ingested" in " ".join(capsys.readouterr().out.split())
+
+
 def test_the_inbox_says_its_notes_are_unchecked_claims(kb: Kb) -> None:
     leave(kb, "gotcha", "uv needs --cache-dir in the sandbox")
 
