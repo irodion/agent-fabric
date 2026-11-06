@@ -27,6 +27,7 @@ EVENTS = {  # each agent's events for kb's hooks
 }
 AGENTS = tuple(EVENTS)
 ASK_AFTER = timedelta(minutes=10)
+ASK_AGAIN_AFTER = timedelta(hours=8)  # since the last question: a long session has moved on to other work
 KEEP_MARKERS = timedelta(days=7)  # since a hook last ran for the session
 PLAIN_ID = re.compile(r"[A-Za-z0-9._/~:@+-]+")  # a remote or a path, with no room for a sentence
 MAX_ID = 200
@@ -34,7 +35,7 @@ AT_WORK = timedelta(hours=8)  # since a hook last ran: past this, `kb note` no l
 QUESTION = (
     "kb: before you finish: did this session find something the next agent must know (a broken or flaky state, "
     "a trap, an error and its fix, a decision and its reason)? If so, leave it with `kb note`. If not, just stop. "
-    "kb asks this once per session."
+    "kb asks this once per session, and again after a compaction or 8 hours."
 )
 
 
@@ -42,7 +43,7 @@ class _Session(NamedTuple):
     """What a session's marker holds. The file's own time says when a hook last ran for the session, so that a hook
     that changes nothing else doesn't rewrite it, and can't put back an older copy over one that says `asked`."""
 
-    started: datetime
+    started: datetime  # when this part of the session began: its start, its last question, or a compaction
     asked: bool
     project: str | None  # None until a hook has named it
 
@@ -67,7 +68,10 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
     marker = _marker(agent, payload, ctx.env)
     if marker:
         with contextlib.suppress(OSError):  # the reminder matters more than the marker
-            _seen(marker, ctx.now)  # the stop hook counts its 10 minutes from here; before git can hang
+            session = _seen(marker, ctx.now)  # the stop hook counts its 10 minutes from here; before git can hang
+            if payload.get("source") == "compact":
+                # It drops what the session saw: ask at the next turn end, while the summary still holds some of it.
+                _record(marker, session._replace(started=ctx.now - ASK_AFTER, asked=False), ctx.now)
     project = _project(payload, ctx)
     if marker:
         with contextlib.suppress(OSError):
@@ -89,15 +93,17 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
 
 
 def stop(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any] | None:
-    """Once per session, at the first end of a turn 10 minutes in: make the agent continue with the question. Every
-    other end of a turn keeps the marker's project current, as nothing else tells it of `git init` or a move."""
+    """At the first end of a turn 10 minutes into a session, after a compaction, or 8 hours after the last question:
+    make the agent continue with the question. Every other end of a turn keeps the marker's project current, as
+    nothing else tells it of `git init` or a move."""
     marker = _marker(agent, payload, ctx.env)
     if marker is None or _not_for_us(agent, payload, inbox_dir(ctx.env)):
         return None
     session = _seen(marker, ctx.now)
     finished = _turn_completed(payload) and not payload.get("stop_hook_active")
-    if finished and not session.asked and ctx.now - session.started >= ASK_AFTER:
-        _record(marker, session._replace(asked=True), ctx.now)  # first: a marker it can't update means no question
+    if finished and ctx.now - session.started >= (ASK_AGAIN_AFTER if session.asked else ASK_AFTER):
+        # first: a marker it can't update means no question
+        _record(marker, session._replace(started=ctx.now, asked=True), ctx.now)
         return _continue(agent, QUESTION)  # no git before this: it can outlast the hook's 10 seconds
     _name_project(marker, _project(payload, ctx), ctx.now)
     return None

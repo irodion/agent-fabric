@@ -44,7 +44,7 @@ Switch freely between coding agents without losing the history of what was done 
 | Compaction | Deterministic extraction; no LLM in the digest | Facts are extractable; only "why" needs a model |
 | Retrieval | Pull only (CLI/MCP), manually triggered | Avoids context pollution and memory-poisoning via injection |
 | Agent notes | `kb note` CLI + `kb-note` skill → local inbox; the wiki only through ingest (§4.10) | Agents notice things no digest records; a CLI works in every agent, and a skill loads only when used |
-| Note reminders | A session-start hook (reminder + count of open notes) and an end-of-turn hook (asks once per session), installed by `scripts/install.sh`; either can be left out (§4.10) | A skill alone waits for the agent to think of it; at session end the agent can no longer act |
+| Note reminders | A session-start hook (reminder + count of open notes) and an end-of-turn hook (asks once per session, again after a compaction or 8 hours), installed by `scripts/install.sh`; either can be left out (§4.10) | A skill alone waits for the agent to think of it; at session end the agent can no longer act |
 | Setup report | `kb doctor` (and so `install.sh`) prints one TOON document after AXI: counts, a row per check, next steps for the user (§4.10) | Agents run `kb doctor` and must tell me what to do; their sandbox can't do setup |
 | Wiki ingest | Notes first, manual (`kb ingest`) and on a timer, onto a review branch. The model answers typed questions about each note and `kb` files the note's text; `codex` first, a local decision model nightly later. `kb prune` adds cited summaries on a trigger and never removes a claim (§4.7) | Review gate before anything becomes canon; no model text reaches a claim, a small model can run the same job, and a bad summary can be thrown away |
 | Live panel | Rules detect, small model only phrases and extracts decisions | Rules measurably work; LLM judgement alone did not |
@@ -849,7 +849,7 @@ characters, and Unicode format and separator characters such as bidi overrides, 
 
 ```text
 kb hook start --agent <claude-code|codex|copilot|cursor>   # session start: the reminder, in that agent's format
-kb hook stop --agent <claude-code|codex|copilot|cursor>    # end of a turn: the question, once per session
+kb hook stop --agent <claude-code|codex|copilot|cursor>    # end of a turn: the question, once per session part
 ```
 
 - **Start** runs when a session starts, resumes, is cleared or is compacted (the last two drop the earlier
@@ -857,20 +857,24 @@ kb hook stop --agent <claude-code|codex|copilot|cursor>    # end of a turn: the 
   state, and reminds the agent of `kb note`. "Most sessions need no note" is in the wording because the first one
   drew a note that only described the repo, from a session asked what the project does (Copilot CLI, 2026-11-02).
   Cursor CLI's `--resume` ran no start hook in the one session that logged it (2026-11-03).
-- **Stop** runs at the end of each turn, not at session end: when the session ends, the agent can no longer act.
-  Once per session, at the first end of a turn at least 10 minutes after the session started, it makes the agent
-  continue with a question: did this session find something the next agent must know? If not, just stop. The answer
-  costs one turn, and Copilot CLI counts the question as a premium request: its count rose by 2 for one typed prompt
-  plus the question (2026-11-02). Shorter sessions aren't asked, and the trial (§10) tunes the 10 minutes. Cursor CLI
-  doesn't ask in a `-p` run: a chat 44 minutes old wasn't asked with `-p`, and was in an interactive session
-  (2026-11-02). A `-p` turn and two interactive ones logged two stop hooks, which fits `-p` running none (2026-11-03).
-- **Markers.** One per session in `~/.local/share/agent-fabric/hooks/` records when it started, whether it was asked,
-  and its project. The file's own time says when a hook last ran, which tells `kb note` who is at work (above) and
-  `kb doctor` whether the hooks run. Markers no hook has run for in 7 days are removed. Where a marker can't be
-  written, the stop hook stays silent rather than ask every turn. Each end of a turn looks the project up again, so
-  the marker follows a session that runs `git init` or moves (a few milliseconds; where git hangs, the turn waits up
-  to the hook's 10 seconds). The end of a turn that asks doesn't, since a hanging git would stop the question ever
-  being asked, so a note answering it can still meet the old project, or none with `--hooks stop`.
+- **Stop** runs at the end of each turn, not at session end: when the session ends, the agent can no longer act. At
+  the first end of a turn at least 10 minutes after the session started, it makes the agent continue with a question:
+  did this session find something the next agent must know? If not, just stop. It asks again at the first end of a
+  turn after a compaction (Claude Code's start hook says `source: compact`), since a compaction drops what the session
+  saw, and 8 hours after its last question. One Claude Code session ran 2½ days through four compactions and was asked
+  once, on its first day, so the work of the later days went unasked (2026-11-06). The answer costs one turn, and
+  Copilot CLI counts the question as a premium request: its count rose by 2 for one typed prompt plus the question
+  (2026-11-02). Shorter sessions aren't asked, and the trial (§10) tunes the 10 minutes. Cursor CLI doesn't ask in a
+  `-p` run: a chat 44 minutes old wasn't asked with `-p`, and was in an interactive session (2026-11-02). A `-p` turn
+  and two interactive ones logged two stop hooks, which fits `-p` running none (2026-11-03).
+- **Markers.** One per session in `~/.local/share/agent-fabric/hooks/` records when its current part started (the
+  session, its last question or a compaction), whether it was asked, and its project. The file's own time says when a
+  hook last ran, which tells `kb note` who is at work (above) and `kb doctor` whether the hooks run. Markers no hook
+  has run for in 7 days are removed. Where a marker can't be written, the stop hook stays silent rather than ask every
+  turn. Each end of a turn looks the project up again, so the marker follows a session that runs `git init` or moves
+  (a few milliseconds; where git hangs, the turn waits up to the hook's 10 seconds). The end of a turn that asks
+  doesn't, since a hanging git would stop the question ever being asked, so a note answering it can still meet the old
+  project, or none with `--hooks stop`.
 - **Never in the way.** Any error, such as unreadable input or a missing inbox, prints nothing and exits 0, and
   each hook entry has a 10-second timeout: a session never fails or waits because of `kb`.
 
@@ -1057,7 +1061,7 @@ mypy and pytest on Python 3.13 and 3.14).
 | `status` note never resolved | later agents warned about a fixed problem | `kb inbox` marks it possibly stale after 14 days; `kb lint` lists it |
 | agent misnames itself (model name for tool name) | wrong `agent` on the note | the environment wins over a model name in `--agent`; a tool name in `--agent` wins, for an agent started by another; the hooks' marker wins over a flag it can disprove (§4.10) |
 | agents never call `kb note` | no notes | the start and stop hooks remind them (§4.10); measured in the phase 1 trial; reword the skill description |
-| the stop hook asks at the wrong moment | an extra turn per session; notes written to please it | once per session, not before 10 minutes; ingest drops thin notes; `--hooks` leaves it out |
+| the stop hook asks at the wrong moment | an extra turn per session; notes written to please it | once per session part (start, compaction, 8 hours), not before 10 minutes; ingest drops thin notes; `--hooks` leaves it out |
 | a hook fails or hangs | the agent's session start or turn end held up | any error prints nothing and exits 0; a 10-second timeout per entry |
 | a Codex hook not yet approved | no reminders in Codex | `kb doctor` says to approve it in Codex's `/hooks` |
 | injected or wrong note | bad advice | untrusted label; `kb` gathers its ref evidence for the model and for me; review gate |
