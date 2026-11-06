@@ -65,10 +65,11 @@ def _flag_resolved(current: Manifest, inbox: Inbox, env: Mapping[str, str]) -> b
     return flagged
 
 
-def _move_expired(inbox: Inbox, snapshot: Snapshot, now: datetime) -> None:
-    """An idea nobody took up in 30 days goes to `done/` unfiled (§4.10)."""
+def _move_expired(inbox: Inbox, snapshot: Snapshot, now: datetime, taken: set[str]) -> None:
+    """An idea nobody took up in 30 days goes to `done/` unfiled (§4.10). One the waiting branch has taken is in
+    flight: a run that stopped before filing it leaves it to the next."""
     for file, note in snapshot.open():
-        if expired(note, now):
+        if expired(note, now) and note.id not in taken:
             inbox.retire(file, note.time)
 
 
@@ -339,11 +340,12 @@ def _pass(ctx: Context, project: str | None, *, dry_run: bool) -> tuple[int, str
     wiki = Git(folder, env)
     merged = manifests.merged(wiki) if known else []
     current = manifests.unmerged(wiki) if known else None
+    taken = set(current.notes) if current else set()
     flagged = current is not None and not dry_run and _flag_resolved(current, inbox, env)
     if not dry_run:
         _move_resolved(inbox, inbox.read())
         _move_merged(inbox, inbox.read(), merged)
-        _move_expired(inbox, inbox.read(), ctx.now)
+        _move_expired(inbox, inbox.read(), ctx.now, taken)
     acted = _acted(merged)
     eligible = [
         note
@@ -352,7 +354,7 @@ def _pass(ctx: Context, project: str | None, *, dry_run: bool) -> tuple[int, str
         and note.scope in allowed
         and project in (None, note.scope)
         and note.id not in acted
-        and not expired(note, ctx.now)
+        and (note.id in taken or not expired(note, ctx.now))
     ]
     has_outcome = {
         note_id for manifest in (*merged, *([current] if current else [])) for note_id in manifest.outcomes

@@ -1615,6 +1615,22 @@ def test_an_ideas_text_cannot_forge_the_pages_structure(lab: Lab) -> None:
     assert f"\n- from: {idea} " in ideas
 
 
+def test_an_idea_taken_by_a_run_that_stopped_is_filed_by_the_next_even_after_thirty_days(lab: Lab) -> None:
+    """Its branch lists it as taken: it's in flight, not waiting for someone to take it up."""
+    three_notes(lab)
+    idea = lab.leave("idea", IDEA)
+    lab.fake.script["the wiki stays local"] = BackendError("login expired")
+    assert lab.kb("ingest").exit_code == 1
+    assert idea in lab.manifest()["notes"]  # type: ignore[operator]
+
+    del lab.fake.script["the wiki stays local"]
+    lab.kb.later(days=31)
+    assert lab.kb("ingest").exit_code == 0
+
+    assert lab.manifest()["outcomes"][idea] == {"action": "idea", "text": IDEA}  # type: ignore[index]
+    assert f"\n{IDEA}\n- from: {idea} " in lab.show(BRANCH, IDEAS)
+
+
 def test_an_idea_older_than_thirty_days_expires_instead_of_going_to_the_wiki(lab: Lab) -> None:
     old = lab.leave("idea", IDEA)
     lab.kb.later(days=31)
