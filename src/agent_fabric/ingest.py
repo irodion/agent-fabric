@@ -219,10 +219,13 @@ def _told(wiki: Git, env: Mapping[str, str], manifest: Manifest, take: list[Note
         told += f"kb ingest: {len(take)} notes on {manifest.branch}: {counts}\n"
     if resolved := sum("resolved" in outcome for outcome in manifest.outcomes.values()):
         told += f"kb ingest: {resolved} filed notes on {manifest.branch} have been resolved since\n"
-    return (
-        f"{told}Review {manifest.review_path} on that branch, then: "
-        f"git -C {tilde(wiki.folder, env)} merge {manifest.branch}\n"
-    )
+    return told + _review(wiki, env, manifest)
+
+
+def _review(wiki: Git, env: Mapping[str, str], manifest: Manifest) -> str:
+    """The next step while a branch waits: read its review list, then merge it."""
+    merge = f"git -C {tilde(wiki.folder, env)} merge {manifest.branch}"
+    return f"Review {manifest.review_path} on {manifest.branch}, then: {merge}\n"
 
 
 def _commit(wiki: Git, tree: Git, manifest: Manifest, found: list[Finding], what: str) -> None:
@@ -291,6 +294,17 @@ def ingest(ctx: Context, *, project: str | None = None, dry_run: bool = False) -
         return _pass(ctx, project, dry_run=False)
 
 
+def _nothing_to_take(env: Mapping[str, str], allowed: tuple[str, ...], project: str | None) -> str:
+    """Why there's nothing to take."""
+    config = tilde(config_file(env), env)
+    if not allowed:
+        return f"kb ingest: no project is allowed yet: add its id under [publish] allow in {config}\n"
+    if project is not None and project not in allowed:
+        return f"kb ingest: {project} isn't on [publish] allow in {config}\n"
+    kinds = f"{', '.join(KINDS[:-1])} or {KINDS[-1]}"
+    return f"kb ingest: no new {kinds} note in an allowed project\n"
+
+
 def _pass(ctx: Context, project: str | None, *, dry_run: bool) -> tuple[int, str]:
     env = ctx.env
     allowed = _allowed(env)
@@ -319,8 +333,11 @@ def _pass(ctx: Context, project: str | None, *, dry_run: bool) -> tuple[int, str
     oldest = ctx.now - min((note.time for note in counted), default=ctx.now)
     if len(counted) < MIN_NOTES and oldest < MAX_WAIT:
         wait = f"kb ingest: {len(counted)} open, the oldest {oldest.days} days old: waiting for {MIN_NOTES}\n"
-        said = report + (wait if counted else "")
-        return 0, said + (_flag_only(ctx, wiki, current, found) if flagged and current else "")
+        if flagged and current:
+            return 0, report + (wait if counted else "") + _flag_only(ctx, wiki, current, found)
+        if counted:
+            return 0, report + wait
+        return 0, report + _nothing_to_take(env, allowed, project) + (_review(wiki, env, current) if current else "")
     own = current.outcomes if current else {}
     take = [note for note in eligible if note.id not in own]  # step 2: with a note that failed on a merged branch
     if dry_run:

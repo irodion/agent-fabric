@@ -257,12 +257,13 @@ The wiki is optional, and these steps can be agent-guided too. Nothing goes to t
    allow = ["github.com/example/demo"]
    ```
 
-   Notes of other projects stay in the inbox. Done when `kb doctor` shows no `problem` row for `ingest`.
+   Notes of other projects stay in the inbox. Done when `kb ingest --dry-run` no longer says "no project is allowed
+   yet", and `kb doctor` shows no `problem` row for `ingest`.
 
 3. **See what a run would take** (agent or you): `kb ingest --dry-run`, which changes nothing. Done when it lists
-   the notes it would take, or says how many it's waiting for. With no open `gotcha`, `fix` or `decision` note in an
-   allowed project, it says nothing about notes. Once there's a wiki, it first prints `kb lint`'s findings, if any;
-   those are for you to look at, and don't mean the run failed.
+   the notes it would take, says how many it's waiting for, or says there's no new note to take. If it names a
+   project that isn't allowed, add it in step 2. Once there's a wiki, it first prints `kb lint`'s findings, if any; those
+   are for you to look at, and don't mean the run failed.
 
 4. **Run it** (you): `kb ingest`. It spends model requests, and writes `~/wiki`. Done when it prints the branch and
    the review list to read.
@@ -290,7 +291,7 @@ nd556b3 decision github.com/example/demo
 
 $ kb ingest
 kb ingest: 3 notes on ingest/2026-11-06: 2 add, 1 duplicate
-Review manifests/2026-11-06.md on that branch, then: git -C ~/wiki merge ingest/2026-11-06
+Review manifests/2026-11-06.md on ingest/2026-11-06, then: git -C ~/wiki merge ingest/2026-11-06
 ```
 
 `kb ingest [--project P] [--backend codex] [--dry-run]` takes the open `gotcha`, `fix` and `decision` notes of
