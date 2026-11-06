@@ -12,6 +12,7 @@ from conftest import BRANCH, LEAK, PAGE, PROJECT, FakeBackend, Kb, Lab
 from agent_fabric.backends import BackendError, InvalidAnswer, Question
 from agent_fabric.inbox import Inbox
 from agent_fabric.notes import Note, parse
+from agent_fabric.paths import config_file
 from agent_fabric.wikirepo import Git, GitError
 
 
@@ -96,6 +97,40 @@ def test_a_project_not_on_the_allow_list_stays_local(lab: Lab) -> None:
     assert not lab.wiki.exists()
 
 
+def test_with_no_project_allowed_it_says_where_to_allow_one(lab: Lab) -> None:
+    three_notes(lab)
+    config_file({"HOME": str(lab.kb.home), **lab.kb.env}).write_text("")
+
+    for args in ((), ("--dry-run",)):
+        result = lab.kb("ingest", *args)
+
+        assert result.exit_code == 0
+        assert "no project is allowed" in result.stdout
+        assert "[publish] allow in ~/.config/agent-fabric/config.toml" in result.stdout
+    assert lab.fake.calls == []
+
+
+def test_with_no_note_to_take_it_says_so(lab: Lab) -> None:
+    lab.leave("status", "integration tests fail on main")
+
+    for args in ((), ("--dry-run",)):
+        result = lab.kb("ingest", *args)
+
+        assert result.exit_code == 0
+        assert result.stdout == "kb ingest: no new gotcha, fix or decision note in an allowed project\n"
+    assert lab.fake.calls == []
+
+
+def test_a_project_asked_for_but_not_allowed_is_named(lab: Lab) -> None:
+    three_notes(lab)
+
+    result = lab.kb("ingest", "--project", "github.com/me/other")
+
+    assert result.exit_code == 0
+    assert "github.com/me/other isn't on [publish] allow in ~/.config/agent-fabric/config.toml" in result.stdout
+    assert lab.fake.calls == []
+
+
 def test_a_later_run_appends_to_the_unmerged_branch_and_skips_its_notes(lab: Lab) -> None:
     notes = three_notes(lab)
     assert lab.kb("ingest").exit_code == 0
@@ -122,6 +157,8 @@ def test_notes_on_the_unmerged_branch_do_not_count_towards_the_gate(lab: Lab) ->
 
     assert result.exit_code == 0
     assert len(lab.fake.calls) == asked
+    assert "no new gotcha, fix or decision note" in result.stdout
+    assert f"git -C ~/wiki merge {BRANCH}" in result.stdout
 
 
 def test_after_the_merge_a_filed_note_moves_to_done_and_the_next_run_starts_a_new_branch(lab: Lab) -> None:
@@ -1261,6 +1298,7 @@ def test_a_note_resolved_while_its_branch_waits_is_flagged_at_the_top_of_the_rev
     assert review.index("## Resolved since filing") < review.index(f"## {notes[1]} ")
     assert f"- {notes[0]}: no longer true since the uv upgrade\n" in review
     assert "resolved" in result.stdout
+    assert "no new" not in result.stdout  # it did commit: the flag
     assert "uv needs --cache-dir in the sandbox\n" in lab.show(BRANCH, PAGE)  # kb leaves the claim for me to take out
     assert notes[0] not in [path.stem.rpartition("-")[2] for path in lab.inbox.glob("*.md")]
 
