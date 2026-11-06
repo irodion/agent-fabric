@@ -302,7 +302,7 @@ def _nothing_to_take(env: Mapping[str, str], allowed: tuple[str, ...], project: 
     if project is not None and project not in allowed:
         return f"kb ingest: {project} isn't on [publish] allow in {config}\n"
     kinds = f"{', '.join(KINDS[:-1])} or {KINDS[-1]}"
-    return f"kb ingest: no new {kinds} note in an allowed project\n"
+    return f"kb ingest: no new {kinds} note in {project or 'an allowed project'}\n"
 
 
 def _pass(ctx: Context, project: str | None, *, dry_run: bool) -> tuple[int, str]:
