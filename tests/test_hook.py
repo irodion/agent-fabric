@@ -19,7 +19,7 @@ REMINDER = f"Run `kb inbox` before relying on the repo's state. {ADVICE}"
 QUESTION = (
     "kb: before you finish: did this session find something the next agent must know (a broken or flaky state, "
     "a trap, an error and its fix, a decision and its reason)? If so, leave it with `kb note`. If not, just stop. "
-    "kb asks this once per session."
+    "kb asks this once per session, and again after a compaction or 8 hours."
 )
 
 
@@ -32,10 +32,8 @@ def stop_input(kb: Kb, session: str = "s1", extra: dict[str, object] | None = No
     return json.dumps(fields | (extra or {}))
 
 
-def start_input(kb: Kb) -> str:
-    return json.dumps(
-        {"session_id": "s1", "cwd": str(kb.cwd), "source": "startup", "hook_event_name": "SessionStart"}
-    )
+def start_input(kb: Kb, source: str = "startup") -> str:
+    return json.dumps({"session_id": "s1", "cwd": str(kb.cwd), "source": source, "hook_event_name": "SessionStart"})
 
 
 def test_start_hook_tells_claude_code_how_many_notes_are_open_here(kb: Kb) -> None:
@@ -209,7 +207,7 @@ def test_stop_hook_asks_claude_code_at_the_first_turn_end_ten_minutes_in(kb: Kb)
     )
 
 
-def test_stop_hook_asks_only_once_per_session(kb: Kb) -> None:
+def test_stop_hook_does_not_ask_twice_within_eight_hours(kb: Kb) -> None:
     make_inbox(kb)
     kb("hook", "stop", "--agent", "claude-code", stdin=stop_input(kb))
     kb.later(minutes=10)
@@ -220,6 +218,52 @@ def test_stop_hook_asks_only_once_per_session(kb: Kb) -> None:
     other_session = kb("hook", "stop", "--agent", "claude-code", stdin=stop_input(kb, session="s2"))
 
     assert (again.stdout, other_session.stdout) == ("", "")
+
+
+def ask(kb: Kb) -> None:
+    """A session asked its question 10 minutes in."""
+    make_inbox(kb)
+    kb("hook", "start", "--agent", "claude-code", stdin=start_input(kb))
+    kb.later(minutes=10)
+    assert kb("hook", "stop", "--agent", "claude-code", stdin=stop_input(kb)).stdout
+
+
+def test_stop_hook_asks_again_eight_hours_after_its_last_question(kb: Kb) -> None:
+    """A long session moves on to other work; what it found since the question is worth asking about too."""
+    ask(kb)
+    kb.later(hours=8, minutes=-1)
+    early = kb("hook", "stop", "--agent", "claude-code", stdin=stop_input(kb))
+    kb.later(minutes=1)
+
+    again = kb("hook", "stop", "--agent", "claude-code", stdin=stop_input(kb))
+    then = kb("hook", "stop", "--agent", "claude-code", stdin=stop_input(kb))
+
+    assert (early.stdout, json.loads(again.stdout), then.stdout) == (
+        "",
+        {"decision": "block", "reason": QUESTION},
+        "",
+    )
+
+
+def test_stop_hook_asks_again_at_the_first_turn_end_after_a_compaction(kb: Kb) -> None:
+    """A compaction drops what the session saw, so a turn end after it is the last chance to ask about that."""
+    ask(kb)
+    kb.later(minutes=30)
+    kb("hook", "start", "--agent", "claude-code", stdin=start_input(kb, source="compact"))
+
+    again = kb("hook", "stop", "--agent", "claude-code", stdin=stop_input(kb))
+    then = kb("hook", "stop", "--agent", "claude-code", stdin=stop_input(kb))
+
+    assert (json.loads(again.stdout), then.stdout) == ({"decision": "block", "reason": QUESTION}, "")
+
+
+@pytest.mark.parametrize("source", ["startup", "resume", "clear"])
+def test_a_start_that_is_not_a_compaction_does_not_ask_again(kb: Kb, source: str) -> None:
+    ask(kb)
+    kb.later(minutes=30)
+    kb("hook", "start", "--agent", "claude-code", stdin=start_input(kb, source=source))
+
+    assert kb("hook", "stop", "--agent", "claude-code", stdin=stop_input(kb)).stdout == ""
 
 
 def test_stop_hook_counts_the_ten_minutes_from_the_start_hook(kb: Kb) -> None:

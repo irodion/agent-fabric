@@ -38,7 +38,8 @@ To set it up, follow [Install](#install), on your own or with an agent guiding y
 ```
 
 Two hooks remind each agent that notes exist: at session start (with a count of open notes, never their text) and
-once per session at the end of a turn (a question: did this session find something the next agent must know?).
+at the end of a turn, once per session and again after a compaction or 8 hours (a question: did this session find
+something the next agent must know?).
 
 The model never writes the wiki. In `kb ingest` it only answers narrow multiple-choice questions about one note, and
 `kb` turns the answers into an action and files the note's own text. So a bad answer can drop or misfile a note, but
@@ -78,8 +79,8 @@ prints.
 
    - `start`: at the start of a session, the number of open notes for the project, and a reminder of `kb inbox` and
      `kb note`.
-   - `stop`: once per session, at least 10 minutes in, a question at the end of a turn: did this session find
-     something the next agent must know? It costs one extra turn per session.
+   - `stop`: at least 10 minutes in, a question at the end of a turn: did this session find something the next
+     agent must know? It comes once per session, and again after a compaction or 8 hours, each costing one extra turn.
 
    Done when you've picked `start,stop` (the default), `start`, `stop` or `none`.
 
@@ -196,8 +197,9 @@ hand.
 
 - **Start** (session start, resume, clear, compaction): the number of open notes for the project, and a reminder of
   `kb inbox` and `kb note`.
-- **Stop** (end of a turn): once per session, at least 10 minutes in, it asks the agent whether the session found
-  something the next agent must know. In most sessions the answer is no, and the agent just stops.
+- **Stop** (end of a turn): at least 10 minutes in, it asks the agent whether the session found something the next
+  agent must know. It asks once per session, and again at the first turn end after a compaction, which drops what
+  the session saw, or 8 hours after its last question. In most sessions the answer is no, and the agent just stops.
 - A hook never breaks a session. On any error it prints nothing and exits 0, and each entry has a 10-second
   timeout.
 
