@@ -121,6 +121,14 @@ def test_with_no_note_to_take_it_says_so(lab: Lab) -> None:
     assert lab.fake.calls == []
 
 
+def test_with_no_note_to_take_in_the_project_asked_for_it_names_that_project(lab: Lab) -> None:
+    lab.leave("status", "integration tests fail on main")
+
+    result = lab.kb("ingest", "--project", PROJECT)
+
+    assert result.stdout == f"kb ingest: no new gotcha, fix or decision note in {PROJECT}\n"
+
+
 def test_a_project_asked_for_but_not_allowed_is_named(lab: Lab) -> None:
     three_notes(lab)
 
