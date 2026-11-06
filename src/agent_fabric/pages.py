@@ -9,12 +9,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from agent_fabric.notes import Note
+from agent_fabric.shown import shown
 
 SECTIONS = {"gotcha": "Gotchas", "fix": "Fixes", "decision": "Decisions"}
 SUPERSEDED = "Superseded"
 PROJECTS = "wiki/projects"
 MAX_TITLE = 80
-CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 STRUCTURE = re.compile(r"\s*(#|- source:|- superseded by:)")
 SOURCE = re.compile(
     r"- source: (?P<id>n[0-9a-f]{6}) \(.*, \d{4}-\d{2}-\d{2}\) · anchor: (?P<anchor>\S+)"
@@ -162,8 +162,8 @@ def raw_path(note: Note) -> str:
 
 
 def safe(text: str) -> str:
-    """Control characters out, so a claim can't drive a terminal."""
-    return CONTROL.sub(lambda m: f"\\x{ord(m[0]):02x}", text)
+    """A note's text as a claim shows it, line by line, so it can't drive a terminal or reorder itself."""
+    return shown(text, lines=True)
 
 
 def _title(text: str) -> str:

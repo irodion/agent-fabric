@@ -695,7 +695,7 @@ matter (`sessions`, `files`, `commands`, `tests`, `loops`, `notes`).
 | `kb loops [--all]` | `open_loops(project?)` | loops with evidence |
 | `kb loop close <id>` | — | (CLI only; agents can't close loops) |
 | `kb note --kind K [--ref R]… "text"`, `kb note --resolve <id>` | — | id and path of the new note (CLI only, §4.10) |
-| `kb inbox [--project P \| --all-projects] [--since] [--kind] [--all]` | `list_notes(project?, since?, kind?, all?)` | unresolved notes not yet ingested, under an "unchecked" header (`--all`: resolved ones too) |
+| `kb inbox [--project P \| --all-projects] [--since] [--kind] [--all]` | `list_notes(project?, since?, kind?, all?)` | unresolved notes not yet ingested, under an "unchecked" header, between markers (`--all`: resolved ones too) |
 | `kb hook start\|stop --agent A` | — | the hooks' reminder in agent A's format (CLI only, run by the agents' hooks, §4.10) |
 | `kb ingest`, `kb lint`, `kb prune`, `kb retro`, `kb reindex`, `kb doctor` | — | maintenance (§4.7) |
 
@@ -839,7 +839,13 @@ That file is the one copy of the skill text.
 
 **Hooks.** The skill waits for the agent to think of it. Two hooks remind it, at the start of a session and at the
 end of a turn. Like the skill, they carry an instruction and a count, never a note's text (§7): the agent reads the
-notes with `kb inbox`, under its "unchecked" header.
+notes with `kb inbox`, under its "unchecked" header and between two markers. The markers carry an id that is new on
+each run, and the header names the closing one, so a note can't end the list early and pass for `kb`'s own text. The
+one text in a reminder that `kb` doesn't write is the project id, from the `origin` remote or a folder name, which can
+carry an instruction as well as a note can. The reminder works without it, so it names the project only when the id
+is plain (letters, digits and `._/~:@+-`, up to 200 characters), and otherwise says "this project". Wherever `kb`
+shows a note's text (`kb inbox`, wiki pages, manifests), characters that act instead of showing are escaped: control
+characters, and Unicode format and separator characters such as bidi overrides, which reorder text on screen.
 
 ```text
 kb hook start --agent <claude-code|codex|copilot|cursor>   # session start: the reminder, in that agent's format

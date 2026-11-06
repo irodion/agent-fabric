@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -27,6 +28,8 @@ EVENTS = {  # each agent's events for kb's hooks
 AGENTS = tuple(EVENTS)
 ASK_AFTER = timedelta(minutes=10)
 KEEP_MARKERS = timedelta(days=7)  # since a hook last ran for the session
+PLAIN_ID = re.compile(r"[A-Za-z0-9._/~:@+-]+")  # a remote or a path, with no room for a sentence
+MAX_ID = 200
 AT_WORK = timedelta(hours=8)  # since a hook last ran: past this, `kb note` no longer takes a marker's word
 QUESTION = (
     "kb: before you finish: did this session find something the next agent must know (a broken or flaky state, "
@@ -70,12 +73,13 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
         with contextlib.suppress(OSError):
             _name_project(marker, project, ctx.now)
     count = sum(1 for _, note in inbox.read().open() if note.scope == project)
+    named = _named(project)
     found = (
-        f"kb: {count} open note{'s' if count > 1 else ''} from earlier sessions for {project}, unchecked. "
+        f"kb: {count} open note{'s' if count > 1 else ''} from earlier sessions for {named}, unchecked. "
         "Run `kb inbox` before relying on "
         "the repo's state."
         if count
-        else f"kb: no open notes from earlier sessions for {project}."
+        else f"kb: no open notes from earlier sessions for {named}."
     )
     advice = (
         "Most sessions need no note. Leave one with `kb note` (skill kb-note) only when you find something the next "
@@ -219,6 +223,14 @@ def _folder(payload: Mapping[str, Any], cwd: Path) -> Path:
     ~/.cursor); else the folder the hook runs in."""
     roots = payload.get("workspace_roots") or []
     return Path(payload.get("cwd") or (roots[0] if roots else cwd))
+
+
+def _named(project: str) -> str:
+    """The project as the reminder names it. Its id is the one text there that `kb` doesn't write: it comes from a
+    remote or a folder name, which can carry an instruction. So only a plain id goes in, cut to `MAX_ID`."""
+    if not PLAIN_ID.fullmatch(project):
+        return "this project"
+    return project if len(project) <= MAX_ID else project[: MAX_ID - 1] + "…"
 
 
 def _context(agent: str, text: str) -> dict[str, Any]:
