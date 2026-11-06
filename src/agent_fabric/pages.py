@@ -14,8 +14,10 @@ from agent_fabric.shown import shown
 SECTIONS = {"gotcha": "Gotchas", "fix": "Fixes", "decision": "Decisions"}
 SUPERSEDED = "Superseded"
 PROJECTS = "wiki/projects"
+IDEAS = "ideas.md"
+IDEAS_HEAD = ("# Ideas", "", "Suggestions agents left and nobody has decided on: not claims, and not checked.", "")
 MAX_TITLE = 80
-STRUCTURE = re.compile(r"\s*(#|- source:|- superseded by:)")
+STRUCTURE = re.compile(r"\s*(#|- source:|- superseded by:|- from:)")
 SOURCE = re.compile(
     r"- source: (?P<id>n[0-9a-f]{6}) \(.*, \d{4}-\d{2}-\d{2}\) · anchor: (?P<anchor>\S+)"
     r" · verified: (?P<verified>\S+) · supersedes: (?P<supersedes>\S+(?:, \S+)*)"
@@ -126,6 +128,10 @@ class Page:
     def add(self, kind: str, claim: Claim) -> None:
         self._section(SECTIONS[kind]).claims.append(claim)
 
+    def add_idea(self, project: str, idea: Claim) -> None:
+        """On the ideas page, a section per project."""
+        self._section(safe(project).replace("\n", " ")).claims.append(idea)
+
     def below(self, target: str, claim: Claim, kind: str) -> None:
         """Right below the target, whichever section it's in; at the end of the kind's section if it has gone."""
         for section in self.sections:
@@ -189,3 +195,17 @@ def new_claim(
     replaced = ", ".join(supersedes) or "none"
     meta = f"- source: {source} · anchor: {anchor} · verified: {now:%Y-%m-%d} · supersedes: {replaced}"
     return Claim((f"### {_title(note.text)}", *_body(note.text), meta + (f" · {relation}" if relation else "")))
+
+
+def ideas_page(text: str | None) -> Page:
+    """`ideas.md` as it stands, or a new one."""
+    return Page.parse(text) if text else Page(list(IDEAS_HEAD), [])
+
+
+def new_idea(note: Note) -> Claim:
+    """An idea as filed: its own text, escaped like a claim's, and who left it. No anchor or verified date: nobody
+    checked it, and it isn't a claim about the code."""
+    agent = safe(note.agent["name"]).replace("\n", " ")
+    return Claim(
+        (f"### {_title(note.text)}", *_body(note.text), f"- from: {note.id} ({agent}, {note.time:%Y-%m-%d})")
+    )

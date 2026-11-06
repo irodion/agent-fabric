@@ -17,11 +17,11 @@ def test_a_note_shows_up_in_the_inbox(kb: Kb) -> None:
     assert "uv needs --cache-dir in the sandbox" in kb("inbox").stdout
 
 
-@pytest.mark.parametrize("kind_args", [[], ["--kind", "idea"]], ids=["missing", "unknown"])
+@pytest.mark.parametrize("kind_args", [[], ["--kind", "wish"]], ids=["missing", "unknown"])
 def test_a_note_without_a_valid_kind_is_refused_with_the_kinds_listed(kb: Kb, kind_args: list[str]) -> None:
     result = kb("note", *kind_args, "--agent", "Codex", "uv needs --cache-dir in the sandbox")
 
-    assert (result.exit_code, "status, gotcha, fix, decision" in result.stderr) == (2, True)
+    assert (result.exit_code, "status, gotcha, fix, decision, idea" in result.stderr) == (2, True)
 
 
 def test_a_note_over_500_characters_is_refused_with_the_limit_named(kb: Kb) -> None:

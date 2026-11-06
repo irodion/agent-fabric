@@ -79,7 +79,9 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
     if marker:
         with contextlib.suppress(OSError):
             _name_project(marker, project, ctx.now)
-    count = sum(1 for _, note in inbox.read().open() if note.scope == project)
+    # An idea says nothing about the repo's state, which is what the reminder asks the agent to check.
+    state_notes = [note for _, note in inbox.read().open() if note.scope == project and note.kind != "idea"]
+    count = len(state_notes)
     named = _named(project)
     found = (
         f"kb: {count} open note{'s' if count > 1 else ''} from earlier sessions for {named}, unchecked. "

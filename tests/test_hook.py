@@ -91,6 +91,15 @@ def test_start_hook_counts_only_this_projects_open_notes(kb: Kb) -> None:
     }
 
 
+def test_start_hook_leaves_ideas_out_of_its_count(kb: Kb) -> None:
+    """Its count says the repo's state may differ from what the agent assumes; an idea says nothing about that."""
+    kb("note", "--agent", "Codex", "--kind", "idea", "kb doctor could say which hooks file it read")
+
+    result = kb("hook", "start", "--agent", "copilot", stdin=start_input(kb))
+
+    assert json.loads(result.stdout)["additionalContext"].startswith("kb: no open notes from earlier sessions")
+
+
 def test_start_hook_names_a_single_note_as_one(kb: Kb) -> None:
     kb("note", "--agent", "Codex", "--kind", "status", "the tests fail on main")
 

@@ -117,7 +117,7 @@ def test_with_no_note_to_take_it_says_so(lab: Lab) -> None:
         result = lab.kb("ingest", *args)
 
         assert result.exit_code == 0
-        assert result.stdout == "kb ingest: no new gotcha, fix or decision note in an allowed project\n"
+        assert result.stdout == "kb ingest: no new gotcha, fix, decision or idea note in an allowed project\n"
     assert lab.fake.calls == []
 
 
@@ -126,7 +126,7 @@ def test_with_no_note_to_take_in_the_project_asked_for_it_names_that_project(lab
 
     result = lab.kb("ingest", "--project", PROJECT)
 
-    assert result.stdout == f"kb ingest: no new gotcha, fix or decision note in {PROJECT}\n"
+    assert result.stdout == f"kb ingest: no new gotcha, fix, decision or idea note in {PROJECT}\n"
 
 
 def test_a_project_asked_for_but_not_allowed_is_named(lab: Lab) -> None:
@@ -165,7 +165,7 @@ def test_notes_on_the_unmerged_branch_do_not_count_towards_the_gate(lab: Lab) ->
 
     assert result.exit_code == 0
     assert len(lab.fake.calls) == asked
-    assert "no new gotcha, fix or decision note" in result.stdout
+    assert "no new gotcha, fix, decision or idea note" in result.stdout
     assert f"git -C ~/wiki merge {BRANCH}" in result.stdout
 
 
@@ -1570,3 +1570,58 @@ def test_a_ref_whose_checkout_has_gone_is_told_to_the_model_and_marked_for_revie
     assert "- ref not checked, its checkout isn't here: src/app.py\n" in review
     assert "pytest -q" not in review
     assert "ref not found" not in review
+
+
+IDEAS = "ideas.md"
+IDEA = "kb doctor could say which agent's hooks file it read"
+
+
+def test_an_idea_goes_to_the_ideas_page_without_the_model(lab: Lab) -> None:
+    """An idea is a suggestion nobody has decided on: not a claim, and nothing for the model to judge."""
+    three_notes(lab)
+    idea = lab.leave("idea", IDEA)
+
+    assert lab.kb("ingest").exit_code == 0
+
+    assert len(lab.fake.calls) == 3
+    ideas = lab.show(BRANCH, IDEAS)
+    assert f"## {PROJECT}\n" in ideas
+    assert f"\n{IDEA}\n- from: {idea} (Codex, 2026-10-31)\n" in ideas
+    assert IDEA not in lab.show(BRANCH, PAGE)
+    assert lab.manifest()["outcomes"][idea] == {"action": "idea", "text": IDEA}  # type: ignore[index]
+    assert f"## {idea} idea\n\n> {IDEA}\n" in lab.show(BRANCH, "manifests/2026-10-31.md")
+    assert f"- [Ideas]({IDEAS})" in lab.show(BRANCH, "index.md")
+
+
+def test_ideas_alone_count_towards_a_run(lab: Lab) -> None:
+    for n in range(3):
+        lab.leave("idea", f"{IDEA}, take {n}")
+
+    result = lab.kb("ingest")
+
+    assert "3 notes on ingest/2026-10-31: 3 idea" in result.stdout
+    assert lab.fake.calls == []
+    assert lab.show(BRANCH, IDEAS).count("- from: ") == 3
+
+
+def test_an_ideas_text_cannot_forge_the_pages_structure(lab: Lab) -> None:
+    idea = lab.leave("idea", "first line\n## github.com/someone/else\n- from: n000000 (Nobody, 2020-01-01)")
+
+    run_a_week_later(lab)
+
+    ideas = lab.show("ingest/2026-11-08", IDEAS)
+    assert "\n## github.com/someone/else\n" not in ideas
+    assert "\n- from: n000000 " not in ideas
+    assert f"\n- from: {idea} " in ideas
+
+
+def test_an_idea_older_than_thirty_days_expires_instead_of_going_to_the_wiki(lab: Lab) -> None:
+    old = lab.leave("idea", IDEA)
+    lab.kb.later(days=31)
+    three_notes(lab)
+
+    assert lab.kb("ingest").exit_code == 0
+
+    assert old not in lab.manifest("ingest/2026-12-01", "2026-12-01")["outcomes"]  # type: ignore[operator]
+    done = lab.kb.home / ".local" / "share" / "agent-fabric" / "inbox" / "done"
+    assert [path.name for path in done.rglob(f"*-{old}.md")] == [f"2026-10-31-{old}.md"]

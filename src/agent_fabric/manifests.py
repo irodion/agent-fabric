@@ -92,15 +92,21 @@ def next_name(git: Git, date: str) -> str:
 
 def _certainty(outcome: dict[str, Any]) -> int:
     """Failed notes first, then the least certain (§4.7, step 8)."""
-    return 0 if "failed" in outcome else CERTAINTY.get(outcome["answers"].get("sure"), 1)
+    if "failed" in outcome:
+        return 0
+    if outcome["action"] == "idea":
+        return len(CERTAINTY) + 1  # nothing was decided: last
+    return CERTAINTY.get(outcome["answers"].get("sure"), 1)
 
 
 def _entry(note_id: str, outcome: dict[str, Any]) -> str:
     if failed := outcome.get("failed"):
         rules = f" ({', '.join(outcome['rules'])})" if outcome.get("rules") else ""
         return f"## {note_id} {failed}{rules}\n"
-    answers = outcome["answers"]
     quoted = "".join(f"> {line}\n" for line in safe(outcome["text"]).split("\n"))
+    if outcome["action"] == "idea":
+        return f"## {note_id} idea\n\n{quoted}"
+    answers = outcome["answers"]
     listed = "".join(f"- {question}: {answer}\n" for question, answer in answers.items() if question != "sure")
     targets = f"- on: {', '.join(outcome['targets'])}\n" if outcome["targets"] else ""
     missing = "".join(f"- ref not found: {safe(ref)}\n" for ref in outcome.get("missing", ()))
