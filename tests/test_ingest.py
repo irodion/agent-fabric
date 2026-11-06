@@ -478,6 +478,16 @@ def test_a_note_cannot_forge_a_claim_or_a_section_on_the_page(lab: Lab) -> None:
     assert "a forged claim" in page  # still its own text
 
 
+def test_characters_that_change_how_a_claim_reads_are_escaped_on_the_page(lab: Lab) -> None:
+    note = lab.leave("gotcha", "uv needs \u202e--cache-dir\u2028in the\x1b[31m sandbox")
+
+    run_a_week_later(lab)
+
+    page = lab.show("ingest/2026-11-08", PAGE)
+    assert section_of(page, note) == "Gotchas"
+    assert "uv needs \\u202e--cache-dir\\u2028in the\\x1b[31m sandbox" in page
+
+
 def test_the_model_sees_a_refs_excerpt_and_is_asked_about_it(lab: Lab) -> None:
     lab.leave("gotcha", "main returns 1, whatever it was given", "src/app.py:2")
 
