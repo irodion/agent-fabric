@@ -25,11 +25,11 @@ To set it up, follow [Install](#install), on your own or with an agent guiding y
 
 ```text
  agent finds a trap, a fix, or a reason the code doesn't show
-   │  kb note --kind gotcha|fix|decision|status --ref <evidence> "text"
+   │  kb note --kind gotcha|fix|decision|status|idea --ref <evidence> "text"
    ▼
  inbox  ~/.local/share/agent-fabric/inbox/      one file per note, append-only
    │                                            kb inbox lists them, marked unchecked
-   │  kb ingest  (projects on your allow list; gotcha, fix and decision notes)
+   │  kb ingest  (projects on your allow list; gotcha, fix, decision and idea notes)
    ▼
  review branch  ingest/<date>  in ~/wiki        each note filed as a claim, or skipped
    │  you read the review list, then git merge
@@ -146,6 +146,7 @@ It prints the note's id and file.
 | `gotcha` | a trap or surprising behaviour | ingest |
 | `fix` | an error and what fixed it | ingest |
 | `decision` | a choice and its reason, when the code doesn't show it | ingest |
+| `idea` | an improvement the session ran into and didn't make, at most one per session | ingest, or 30 days |
 
 - **Text:** one to three sentences, at most 500 characters, written for an agent with none of your context. Use
   stdin (`-` and a quoted heredoc) when the text has quotes, backticks or `$`.
@@ -297,9 +298,11 @@ kb ingest: 3 notes on ingest/2026-11-06: 2 add, 1 duplicate
 Review manifests/2026-11-06.md on ingest/2026-11-06, then: git -C ~/wiki merge ingest/2026-11-06
 ```
 
-`kb ingest [--project P] [--backend codex] [--dry-run]` takes the open `gotcha`, `fix` and `decision` notes of
-allowed projects. `status` notes describe a moment and never reach the wiki. The first run creates `~/wiki` as a
-local git repo, with no remote. A run:
+`kb ingest [--project P] [--backend codex] [--dry-run]` takes the open `gotcha`, `fix`, `decision` and `idea` notes of
+allowed projects. `status` notes describe a moment and never reach the wiki. An idea isn't a claim: it skips the model
+and goes under its project in `ideas.md` at the wiki's root, for you to act on. One open for over 30 days expires:
+`kb inbox` stops listing it (`--all` still does), and ingest moves it to `inbox/done/` unfiled. The first run creates
+`~/wiki` as a local git repo, with no remote. A run:
 
 1. **Gates, with no model.** It runs `kb lint`, and moves resolved notes, and notes filed on a merged branch, to
    `inbox/done/<yyyy>/<mm>/`. With fewer than 3 notes to take and the oldest under 7 days old, it stops there and

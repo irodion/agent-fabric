@@ -211,7 +211,7 @@ def test_a_project_named_through_a_symlink_lists_the_real_folders_notes(kb: Kb) 
         ("resolves", '"n\\u001b[31mX"'),
         ("id", '"n\\u001b[31mX"'),
         ("refs", '"tests/test_client.py"'),
-        ("kind", '"idea"'),
+        ("kind", '"wish"'),
         ("time", "1"),
         ("project", "[]"),
     ],
@@ -230,3 +230,17 @@ def test_a_note_file_with_a_wrong_field_is_skipped(kb: Kb, field: str, value: st
 
     headers = [line.split()[0] for line in listing.splitlines() if line.startswith("n")]
     assert (headers, "\x1b" in listing, another.exit_code) == ([good], False, 0)
+
+
+def test_an_idea_is_listed_like_any_note(kb: Kb) -> None:
+    idea = leave(kb, "idea", "kb doctor could say which hooks file it read")
+
+    assert listed(kb, "--kind", "idea")[0].startswith(f"{idea}  2026-10-31 17:05  idea  Codex")
+
+
+def test_an_idea_older_than_thirty_days_has_expired(kb: Kb) -> None:
+    """Nobody took it up in a month; ingest no longer takes it either."""
+    leave(kb, "idea", "kb doctor could say which hooks file it read")
+    kb.later(days=31)
+
+    assert (kb("inbox").stdout, listed(kb, "--all")[0].endswith("(expired: 31 days old)")) == ("", True)

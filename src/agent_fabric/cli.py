@@ -23,7 +23,7 @@ from agent_fabric.hooks import run as run_hook
 from agent_fabric.inbox import Inbox, Snapshot
 from agent_fabric.ingest import Stopped, ingest
 from agent_fabric.lint import lint
-from agent_fabric.notes import KINDS, MAX_TEXT, STALE_AFTER, Note, missing_ref, new_id
+from agent_fabric.notes import KINDS, MAX_TEXT, STALE_AFTER, Note, expired, missing_ref, new_id
 from agent_fabric.paths import expand, inbox_dir, tilde
 from agent_fabric.secretgate import GateUnavailable
 from agent_fabric.shown import shown
@@ -68,7 +68,9 @@ def run_in(argv: list[str], ctx: Context) -> Result:
     inbox_cmd = commands.add_parser("inbox")
     inbox_cmd.add_argument("--kind", choices=KINDS)
     inbox_cmd.add_argument("--since", type=_age, metavar="AGE", help="e.g. 7d or 24h")
-    inbox_cmd.add_argument("--all", action="store_true", help="also notes resolved or ingested, and resolutions")
+    inbox_cmd.add_argument(
+        "--all", action="store_true", help="also notes resolved or ingested, expired ideas, and resolutions"
+    )
     scope = inbox_cmd.add_mutually_exclusive_group()
     scope.add_argument("--project", help="a project id, or a folder (default: the current one)")
     scope.add_argument("--all-projects", action="store_true", help="every project's notes")
@@ -240,6 +242,7 @@ def _inbox(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
         if scope in (None, note.scope)
         and args.kind in (None, note.kind)
         and (args.since is None or ctx.now - note.time <= args.since)
+        and (args.all or not expired(note, ctx.now))
     ]
     if not notes:
         return Result(0, "", "")
@@ -267,6 +270,8 @@ def _entry(note: Note, now: datetime, resolved_by: str | None) -> str:
         header += f"  (resolves {note.resolves})"
     elif note.kind == "status" and age > STALE_AFTER:
         header += f"  (possibly stale: {age.days} days old)"
+    elif expired(note, now):
+        header += f"  (expired: {age.days} days old)"
     lines = [header]
     lines += [f"  {shown(line)}" for line in note.text.split("\n")]
     if note.refs:

@@ -7,7 +7,7 @@ import fcntl
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from agent_fabric import manifests
 from agent_fabric.backends import Backend, CodexBackend, InvalidAnswer, Question
@@ -27,17 +27,17 @@ from agent_fabric.inbox import Inbox, Snapshot
 from agent_fabric.lint import Finding, findings, lint_tree
 from agent_fabric.lint import render as render_findings
 from agent_fabric.manifests import Manifest, review_list
-from agent_fabric.notes import Note, render
-from agent_fabric.pages import PROJECTS, Page, new_claim, page_path, raw_path
+from agent_fabric.notes import Note, expired, render
+from agent_fabric.pages import IDEAS, PROJECTS, Page, ideas_page, new_claim, new_idea, page_path, raw_path
 from agent_fabric.paths import config_file, inbox_dir, ingest_worktree, tilde, wiki_dir
 from agent_fabric.secretgate import redact, scan
 from agent_fabric.wikirepo import MAIN, Git, ensure_wiki, open_worktree, publish, ready
 
-KINDS = ("gotcha", "fix", "decision")
+KINDS = ("gotcha", "fix", "decision", "idea")  # what a run takes; an idea skips the model
 MIN_NOTES = 3
 MAX_WAIT = timedelta(days=7)
 FILED = ("add", "extend", "supersede", "conflict")  # the actions that put a claim on a page
-OUTCOMES = (*FILED, "duplicate", "skip", "failed")
+OUTCOMES = (*FILED, "idea", "duplicate", "skip", "failed")
 
 
 class Stopped(Exception):
@@ -63,6 +63,13 @@ def _flag_resolved(current: Manifest, inbox: Inbox, env: Mapping[str, str]) -> b
             outcome["resolved"] = "its text was withheld: gitleaks flagged it" if scan(text, env) else text
             flagged = True
     return flagged
+
+
+def _move_expired(inbox: Inbox, snapshot: Snapshot, now: datetime) -> None:
+    """An idea nobody took up in 30 days goes to `done/` unfiled (§4.10)."""
+    for file, note in snapshot.open():
+        if expired(note, now):
+            inbox.retire(file, note.time)
 
 
 def _acted(merged: Iterable[Manifest]) -> set[str]:
@@ -147,11 +154,25 @@ def _redacted(note: Note) -> Note:
     )
 
 
+def _idea(tree: Git, clean: Note, ctx: Context) -> dict[str, object]:
+    """An idea goes on `ideas.md` as it is: nothing for the model to judge, and so nothing sent to it."""
+    if rules := scan(render(clean), ctx.env):
+        return {"failed": "quarantined", "rules": rules}
+    path = tree.folder / IDEAS
+    page = ideas_page(path.read_text(encoding="utf-8") if path.exists() else None)
+    page.add_idea(clean.scope, new_idea(clean))
+    _write(tree, IDEAS, page.render())
+    _write(tree, raw_path(clean), render(clean))
+    return {"action": "idea", "text": clean.text}
+
+
 def _work_on(backend: Backend, tree: Git, note: Note, ctx: Context) -> dict[str, object]:
     """Steps 3 to 6 for one note: what became of it, for the manifest."""
     if not _readable(note):
         return {"failed": "unreadable"}
     clean = _redacted(note)
+    if clean.kind == "idea":
+        return _idea(tree, clean, ctx)
     page = _page(tree, clean.scope)
     evidence = gather(note, ctx.env)
     agents = tree.folder / "AGENTS.md"
@@ -190,6 +211,8 @@ def _index(tree: Git) -> str:
         project = path.relative_to(root).with_suffix("").as_posix()
         claims = len(Page.parse(path.read_text(encoding="utf-8")).live_claims())
         lines.append(f"- [{project}]({relative}): {claims} claims")
+    if (tree.folder / IDEAS).exists():
+        lines.append(f"- [Ideas]({IDEAS}): suggestions, not claims")
     return "\n".join(lines) + "\n"
 
 
@@ -320,11 +343,16 @@ def _pass(ctx: Context, project: str | None, *, dry_run: bool) -> tuple[int, str
     if not dry_run:
         _move_resolved(inbox, inbox.read())
         _move_merged(inbox, inbox.read(), merged)
+        _move_expired(inbox, inbox.read(), ctx.now)
     acted = _acted(merged)
     eligible = [
         note
         for _, note in inbox.read().open()
-        if note.kind in KINDS and note.scope in allowed and project in (None, note.scope) and note.id not in acted
+        if note.kind in KINDS
+        and note.scope in allowed
+        and project in (None, note.scope)
+        and note.id not in acted
+        and not expired(note, ctx.now)
     ]
     has_outcome = {
         note_id for manifest in (*merged, *([current] if current else [])) for note_id in manifest.outcomes

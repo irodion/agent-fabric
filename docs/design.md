@@ -483,9 +483,9 @@ small local model can run the same job as a hosted one: the move changes one set
 `kb prune` writes their first summary, and connections between notes appear only then.
 
 1. **Gate, no model.** Run `kb lint` first, since claims go stale while the inbox is quiet. Resolved notes, and notes
-   with an action on a merged manifest, move to `inbox/done/` (§4.10). Then count the open `gotcha`, `fix` and
-   `decision` notes of allowed projects with no outcome on any manifest. Under 3, with the oldest under 7 days: log it
-   and exit 0. An empty run is a success.
+   with an action on a merged manifest, move to `inbox/done/` (§4.10), and so do ideas open for over 30 days. Then
+   count the open `gotcha`, `fix`, `decision` and `idea` notes of allowed projects with no outcome on any manifest.
+   Under 3, with the oldest under 7 days: log it and exit 0. An empty run is a success.
 2. **Manifest.** Work in worktree `~/.local/share/agent-fabric/ingest-wt` on branch `ingest/<yyyy-mm-dd>`, or on an
    unmerged ingest branch if there is one. The run takes the open notes of those kinds and projects with no outcome on
    this branch, so a note that failed on a merged branch gets one more try. Commit their ids and the base commit. A
@@ -715,7 +715,7 @@ command and a skill that says when to use it. Neither needs agentsview or fabric
 `kb` reads it.
 
 ```text
-kb note --kind <status|gotcha|fix|decision> [--ref R]... [--agent NAME] "text"
+kb note --kind <status|gotcha|fix|decision|idea> [--ref R]... [--agent NAME] "text"
 kb note --kind <kind> [--ref R]... - <<'EOF'     # text on stdin: quotes, backticks and $ need no escaping
 kb note --resolve <id> ["what changed"]
 ```
@@ -728,6 +728,7 @@ The kind says what the next agent should do with the note, and decides how long 
 | `gotcha` | a trap or surprising behaviour | `uv run` in the sandbox needs `--cache-dir "$TMPDIR/uv"` | until ingest |
 | `fix` | an error and what fixed it | `pytest` hangs in the sandbox: the DB fixture needs a socket; run `-m 'not db'` | until ingest |
 | `decision` | a choice and its reason, when the code doesn't show it | retries use tenacity, because httpx ignores `Retry-After` | until ingest |
+| `idea` | an improvement the session ran into and didn't make | `kb doctor` could say which hooks file it read | until ingest, or 30 days |
 
 - **Text.** One to three sentences, at most 500 characters, written for an agent with none of the writer's context.
   Longer detail belongs in the repo (a doc, a comment, an issue), linked with `--ref`.
@@ -811,14 +812,18 @@ days as possibly stale. `kb catchup` (§4.9) includes the project's unresolved `
 notes; `kb search --kind note` searches all of them; `kb mcp` offers the same. Like all `kb` output they are labelled
 untrusted: an agent wrote them and nobody has checked them yet.
 
-**Into the wiki.** `kb ingest` (§4.7) takes the open `gotcha`, `fix` and `decision` notes of allowed projects. `status`
-notes stay out: they describe a moment, and end with `--resolve`. A resolved note skips the model too, and moves to
-`inbox/done/<yyyy>/<mm>/` with its resolution, where search still finds it. All of the first five notes in a real inbox
-(2026-11-02 to 04) were resolved within two days, and what lasted was already in this document or AGENTS.md. A
-resolution that holds a lasting fact should be its own note, and the skill says so. A note ingest uses is copied to
-`raw/notes/<project>/<yyyy>/<mm>/` in the wiki repo, after the redaction gate (§4.5), so pages can cite it. After the
-merge, every note the run used or dropped moves to `inbox/done/<yyyy>/<mm>/`, so the inbox holds only notes still to act
-on. Notes from projects not on the allow list stay local.
+**Into the wiki.** `kb ingest` (§4.7) takes the open `gotcha`, `fix`, `decision` and `idea` notes of allowed projects.
+An idea is a suggestion nobody has decided on, so it never becomes a claim and the model never sees it: ingest files
+its own text, escaped, under its project in `ideas.md` at the wiki's root, and the review list shows it last. An agent
+always has a suggestion, so the stop question doesn't ask for ideas, the skill allows one per session, and the start
+hook's count leaves them out. One left open for 30 days expires: `kb inbox` hides it and ingest retires it unfiled.
+`status` notes stay out: they describe a moment, and end with `--resolve`. A resolved note skips the model too, and
+moves to `inbox/done/<yyyy>/<mm>/` with its resolution, where search still finds it. All of the first five notes in a
+real inbox (2026-11-02 to 04) were resolved within two days, and what lasted was already in this document or
+AGENTS.md. A resolution that holds a lasting fact should be its own note, and the skill says so. A note ingest uses is
+copied to `raw/notes/<project>/<yyyy>/<mm>/` in the wiki repo, after the redaction gate (§4.5), so pages can cite it.
+After the merge, every note the run used or dropped moves to `inbox/done/<yyyy>/<mm>/`, so the inbox holds only notes
+still to act on. Notes from projects not on the allow list stay local.
 
 **Skill.** `src/agent_fabric/skills/kb-note/SKILL.md`, shipped in the package, copied into two user skills folders
 that between them reach all four CLI agents: `~/.claude/skills/` (read by Claude Code and Cursor CLI) and

@@ -13,9 +13,10 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "fabric.note/1"
-KINDS = ("status", "gotcha", "fix", "decision")
+KINDS = ("status", "gotcha", "fix", "decision", "idea")
 MAX_TEXT = 500
 STALE_AFTER = timedelta(days=14)  # a `status` note this old may no longer hold
+IDEA_EXPIRES = timedelta(days=30)  # an idea nobody took up in this long is dropped, not filed
 ID = re.compile(r"n[0-9a-f]{6}")
 
 
@@ -202,3 +203,8 @@ def render(note: Note) -> str:
     ]
     head = "".join(f"{key}: {json.dumps(value, ensure_ascii=False)}\n" for key, value in fields)
     return f"---\n{head}---\n{note.text}\n"
+
+
+def expired(note: Note, now: datetime) -> bool:
+    """An idea left open for over 30 days: `kb inbox` stops listing it, and ingest drops it instead of filing it."""
+    return note.kind == "idea" and now - note.time > IDEA_EXPIRES
