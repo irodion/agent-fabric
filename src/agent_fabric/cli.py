@@ -246,7 +246,9 @@ def _inbox(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
     ]
     if not notes:
         return Result(0, "", "")
-    entries = "\n".join(_entry(note, ctx.now, resolved_by.get(note.id)) for note in notes)
+    done = inbox.path / "done"
+    moved = {note.id for file, note in snapshot.notes if done in file.parents}
+    entries = "\n".join(_entry(note, ctx.now, resolved_by.get(note.id), note.id in moved) for note in notes)
     marker = f"kb-notes-{secrets.token_hex(8)}"  # new on each run, so a note can't write the closing one
     return Result(0, f"{UNTRUSTED.format(marker=marker)}\n<{marker}>\n{entries}</{marker}>\n", "")
 
@@ -259,7 +261,7 @@ def _project(value: str, ctx: Context) -> str:
     return project_id(folder, ctx.env)
 
 
-def _entry(note: Note, now: datetime, resolved_by: str | None) -> str:
+def _entry(note: Note, now: datetime, resolved_by: str | None, moved: bool) -> str:
     where = note.project or note.cwd
     agent = note.agent["name"] + (" (from hook)" if note.agent.get("from") == "hook" else "")
     header = shown(f"{note.id}  {note.time:%Y-%m-%d %H:%M}  {note.kind}  {agent}  {where}")
@@ -270,7 +272,7 @@ def _entry(note: Note, now: datetime, resolved_by: str | None) -> str:
         header += f"  (resolves {note.resolves})"
     elif note.kind == "status" and age > STALE_AFTER:
         header += f"  (possibly stale: {age.days} days old)"
-    elif expired(note, now):
+    elif expired(note, now) and not moved:  # one moved out was filed, or retired: done either way
         header += f"  (expired: {age.days} days old)"
     lines = [header]
     lines += [f"  {shown(line)}" for line in note.text.split("\n")]
