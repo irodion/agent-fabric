@@ -28,6 +28,7 @@ EVENTS = {  # each agent's events for kb's hooks
 AGENTS = tuple(EVENTS)
 ASK_AFTER = timedelta(minutes=10)
 ASK_AGAIN_AFTER = timedelta(hours=8)  # since the last question: a long session has moved on to other work
+ASK_AFTER_COMPACTION = timedelta(hours=1)  # since the last question: a small context can compact every few minutes
 KEEP_MARKERS = timedelta(days=7)  # since a hook last ran for the session
 PLAIN_ID = re.compile(r"[A-Za-z0-9._/~:@+-]+")  # a remote or a path, with no room for a sentence
 MAX_ID = 200
@@ -35,17 +36,20 @@ AT_WORK = timedelta(hours=8)  # since a hook last ran: past this, `kb note` no l
 QUESTION = (
     "kb: before you finish: did this session find something the next agent must know (a broken or flaky state, "
     "a trap, an error and its fix, a decision and its reason)? If so, leave it with `kb note`. If not, just stop. "
-    "kb asks this once per session, and again after a compaction or 8 hours."
+    "kb asks this once per session, and again later in a long one."
 )
 
 
 class _Session(NamedTuple):
     """What a session's marker holds. The file's own time says when a hook last ran for the session, so that a hook
-    that changes nothing else doesn't rewrite it, and can't put back an older copy over one that says `asked`."""
+    that changes nothing else doesn't rewrite it, and can't put back an older copy over one that says `asked_at`.
+    A compaction sets only `compacted`, from the marker as it is then."""
 
-    started: datetime  # when this part of the session began: its start, its last question, or a compaction
-    asked: bool
+    started: datetime
+    asked_at: datetime | None  # the last question; None until the first
+    compacted: bool  # since the last question (Claude Code's start hook says so; the other agents don't)
     project: str | None  # None until a hook has named it
+    from_before: bool = False  # asked, by a kb that didn't record when: `_seen` takes it as asked now
 
 
 def run(event: str, agent: str, ctx: Context) -> str:
@@ -68,10 +72,9 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
     marker = _marker(agent, payload, ctx.env)
     if marker:
         with contextlib.suppress(OSError):  # the reminder matters more than the marker
-            session = _seen(marker, ctx.now)  # the stop hook counts its 10 minutes from here; before git can hang
+            _seen(marker, ctx.now)  # the stop hook counts its 10 minutes from here; before git can hang
             if payload.get("source") == "compact":
-                # It drops what the session saw: ask at the next turn end, while the summary still holds some of it.
-                _record(marker, session._replace(started=ctx.now - ASK_AFTER, asked=False), ctx.now)
+                _compacted(marker, ctx.now)
     project = _project(payload, ctx)
     if marker:
         with contextlib.suppress(OSError):
@@ -93,17 +96,16 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
 
 
 def stop(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any] | None:
-    """At the first end of a turn 10 minutes into a session, after a compaction, or 8 hours after the last question:
-    make the agent continue with the question. Every other end of a turn keeps the marker's project current, as
-    nothing else tells it of `git init` or a move."""
+    """At the first end of a turn that `_due` allows, make the agent continue with the question. Every other end of a
+    turn keeps the marker's project current, as nothing else tells it of `git init` or a move."""
     marker = _marker(agent, payload, ctx.env)
     if marker is None or _not_for_us(agent, payload, inbox_dir(ctx.env)):
         return None
     session = _seen(marker, ctx.now)
     finished = _turn_completed(payload) and not payload.get("stop_hook_active")
-    if finished and ctx.now - session.started >= (ASK_AGAIN_AFTER if session.asked else ASK_AFTER):
+    if finished and _due(session, ctx.now):
         # first: a marker it can't update means no question
-        _record(marker, session._replace(started=ctx.now, asked=True), ctx.now)
+        _record(marker, session._replace(asked_at=ctx.now, compacted=False), ctx.now)
         return _continue(agent, QUESTION)  # no git before this: it can outlast the hook's 10 seconds
     _name_project(marker, _project(payload, ctx), ctx.now)
     return None
@@ -163,6 +165,23 @@ def _marker(agent: str, payload: Mapping[str, Any], env: Mapping[str, str]) -> P
     return hooks_dir(env) / f"{agent}-{digest}.json"
 
 
+def _due(session: _Session, now: datetime) -> bool:
+    """Whether the question is due: 10 minutes into the session, then 8 hours after the last question, or an hour
+    after it where a compaction has dropped what the session saw since."""
+    if session.asked_at is None:
+        return now - session.started >= ASK_AFTER
+    since = now - session.asked_at
+    return since >= ASK_AGAIN_AFTER or (session.compacted and since >= ASK_AFTER_COMPACTION)
+
+
+def _compacted(marker: Path, now: datetime) -> None:
+    """A compaction since the last question. From the marker as it is now, so a stop hook that asked meanwhile keeps
+    its `asked_at`; before the first question there's nothing to record, as the 10 minutes still apply."""
+    session = _state(marker)
+    if session and session.asked_at is not None and not session.compacted:
+        _record(marker, session._replace(compacted=True), now)
+
+
 def _seen(marker: Path, now: datetime) -> _Session:
     """The session, with a hook recorded as having run now. New the first time, and again where the marker can't be
     read (the session starts over rather than never being asked)."""
@@ -170,7 +189,10 @@ def _seen(marker: Path, now: datetime) -> _Session:
     if session is None:
         marker.parent.mkdir(parents=True, exist_ok=True)
         _prune(marker.parent, now)
-        session = _Session(started=now, asked=False, project=None)
+        session = _Session(started=now, asked_at=None, compacted=False, project=None)
+        _record(marker, session, now)
+    elif session.from_before:
+        session = session._replace(asked_at=now, from_before=False)
         _record(marker, session, now)
     else:
         os.utime(marker, (now.timestamp(), now.timestamp()))
@@ -190,14 +212,29 @@ def _state(marker: Path) -> _Session | None:
     try:
         state = json.loads(marker.read_text(encoding="utf-8"))
         project = state.get("project") if isinstance(state, dict) else None
-        started = datetime.fromisoformat(state["started"]).astimezone(UTC)  # always comparable with `now`
-        return _Session(started, state["asked"] is True, project if isinstance(project, str) else None)
+        started = _time(state["started"])
+        if started is None:
+            return None
+        asked_at = _time(state["asked_at"]) if "asked_at" in state else None
+        from_before = asked_at is None and state.get("asked") is True
+        compacted = state.get("compacted") is True
+        return _Session(started, asked_at, compacted, project if isinstance(project, str) else None, from_before)
     except (FileNotFoundError, ValueError, TypeError, KeyError, OverflowError, RecursionError):
         return None
 
 
+def _time(value: Any) -> datetime | None:
+    return None if value is None else datetime.fromisoformat(value).astimezone(UTC)  # comparable with `now`
+
+
 def _record(marker: Path, session: _Session, now: datetime) -> None:
-    fields = {"started": session.started.isoformat(), "asked": session.asked, "project": session.project}
+    fields = {
+        "started": session.started.isoformat(),
+        "asked": session.asked_at is not None,  # for a kb from before `asked_at`, still run by another agent's hooks
+        "asked_at": session.asked_at and session.asked_at.isoformat(),
+        "compacted": session.compacted,
+        "project": session.project,
+    }
     replace_file(marker, json.dumps(fields))  # whole, or not at all
     os.utime(marker, (now.timestamp(), now.timestamp()))
 

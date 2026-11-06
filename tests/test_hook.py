@@ -3,12 +3,14 @@
 import json
 import subprocess
 from collections.abc import Mapping
+from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 from conftest import Kb
 
-from agent_fabric import hooks
+from agent_fabric import hooks, sandboxes
 from agent_fabric.context import Context
 
 ADVICE = (
@@ -19,7 +21,7 @@ REMINDER = f"Run `kb inbox` before relying on the repo's state. {ADVICE}"
 QUESTION = (
     "kb: before you finish: did this session find something the next agent must know (a broken or flaky state, "
     "a trap, an error and its fix, a decision and its reason)? If so, leave it with `kb note`. If not, just stop. "
-    "kb asks this once per session, and again after a compaction or 8 hours."
+    "kb asks this once per session, and again later in a long one."
 )
 
 
@@ -245,16 +247,84 @@ def test_stop_hook_asks_again_eight_hours_after_its_last_question(kb: Kb) -> Non
     )
 
 
+def compact(kb: Kb) -> None:
+    kb("hook", "start", "--agent", "claude-code", stdin=start_input(kb, source="compact"))
+
+
+def turn_end(kb: Kb) -> str:
+    return kb("hook", "stop", "--agent", "claude-code", stdin=stop_input(kb)).stdout
+
+
 def test_stop_hook_asks_again_at_the_first_turn_end_after_a_compaction(kb: Kb) -> None:
     """A compaction drops what the session saw, so a turn end after it is the last chance to ask about that."""
     ask(kb)
+    kb.later(hours=1)
+    compact(kb)
+
+    again, then = turn_end(kb), turn_end(kb)
+
+    assert (json.loads(again), then) == ({"decision": "block", "reason": QUESTION}, "")
+
+
+def test_compactions_ask_again_no_sooner_than_an_hour_after_the_last_question(kb: Kb) -> None:
+    """A session with a small context can compact every few minutes; each question costs a turn."""
+    ask(kb)
+    compact(kb)  # also what a compaction overlapping the asking turn end leaves behind
     kb.later(minutes=30)
-    kb("hook", "start", "--agent", "claude-code", stdin=start_input(kb, source="compact"))
+    compact(kb)
+    early = turn_end(kb)
+    kb.later(minutes=30)
 
-    again = kb("hook", "stop", "--agent", "claude-code", stdin=stop_input(kb))
-    then = kb("hook", "stop", "--agent", "claude-code", stdin=stop_input(kb))
+    again = turn_end(kb)
 
-    assert (json.loads(again.stdout), then.stdout) == ({"decision": "block", "reason": QUESTION}, "")
+    assert (early, json.loads(again)) == ("", {"decision": "block", "reason": QUESTION})
+
+
+def test_a_compaction_in_the_first_ten_minutes_still_waits_for_them(kb: Kb) -> None:
+    make_inbox(kb)
+    kb("hook", "start", "--agent", "claude-code", stdin=start_input(kb))
+    kb.later(minutes=1)
+    compact(kb)
+    early = turn_end(kb)
+    kb.later(minutes=9)
+
+    first, then = turn_end(kb), turn_end(kb)
+
+    assert (early, json.loads(first), then) == ("", {"decision": "block", "reason": QUESTION}, "")
+
+
+def test_a_session_asked_before_the_upgrade_waits_eight_hours_from_it(kb: Kb) -> None:
+    """A marker from before kb kept the question's time: its `started` is the session's start, days ago."""
+    make_inbox(kb)
+    kb("hook", "start", "--agent", "claude-code", stdin=start_input(kb))
+    (marker,) = (kb.home / ".local" / "share" / "agent-fabric" / "hooks").iterdir()
+    old = {"started": (kb.now - timedelta(days=2)).isoformat(), "asked": True, "project": "~/code/scratch"}
+    marker.write_text(json.dumps(old))
+    now = turn_end(kb)
+    kb.later(hours=8)
+
+    later = turn_end(kb)
+
+    assert (now, json.loads(later)) == ("", {"decision": "block", "reason": QUESTION})
+
+
+@pytest.mark.parametrize("source", ["startup", "compact"])
+def test_a_new_marker_takes_as_many_writes_after_a_compaction(
+    kb: Kb, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    """A session first seen at a compaction (its marker pruned) has no question to come back to."""
+    make_inbox(kb)
+    writes: list[Path] = []
+    replace = sandboxes.replace_file
+
+    def counted(path: Path, text: str) -> None:
+        writes.append(path)
+        replace(path, text)
+
+    monkeypatch.setattr("agent_fabric.hooks.replace_file", counted)
+    kb("hook", "start", "--agent", "claude-code", stdin=start_input(kb, source=source))
+
+    assert len(writes) == 2  # the new marker, then its project
 
 
 @pytest.mark.parametrize("source", ["startup", "resume", "clear"])
