@@ -524,7 +524,10 @@ small local model can run the same job as a hosted one: the move changes one set
    It's tried once on each later branch, and doesn't count towards the gate.
 
 The model sees one note, its evidence and its candidate claims, and has no tools. It treats the note as one agent's
-claim, since the first inbox held a false alarm (2026-11-02).
+claim, since the first inbox held a false alarm (2026-11-02). Checked with Codex 0.166.0 (2026-11-07): run as the
+`codex` backend runs it, and told to `cat` a file holding a random word, it said it would read the file, made no tool
+call, and couldn't tell what the file held. With `code_mode_host` off, its code mode, through which every tool runs
+(§4.2), fails closed. A new Codex feature can add a tool, so the features turned off are checked on each upgrade.
 
 **Backends.**
 
@@ -1215,7 +1218,6 @@ Open (2026-11-01):
 
 Open (2026-11-04):
 
-- Whether Codex can run with no tools at all (§4.7). The first real run settles it: a note that asks it to read a file.
 - Which decision model passes §10 on each machine. The candidates' published scores are their authors' own.
 - Digests in ingest. A digest isn't a claim, so filing its text as one won't carry over (§4.7).
 - What `kb prune` runs on after `codex`, since it needs a model that writes.

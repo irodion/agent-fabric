@@ -91,8 +91,8 @@ def _schema(questions: list[Question]) -> dict[str, object]:
 
 
 class CodexBackend:
-    """`codex exec` with no tools, config, rules or session, in an empty folder (docs/design.md §4.7). The first real
-    run still has to show that it has no tools at all: a note that asks it to read a file (§11)."""
+    """`codex exec` with no tools, config, rules or session, in an empty folder (docs/design.md §4.7). Codex 0.166.0,
+    told to read a file, made no tool call (2026-11-07); `FEATURES_OFF` is checked again on each upgrade."""
 
     def __init__(self, env: Mapping[str, str], *, timeout: float = TIMEOUT) -> None:
         self.env = env
