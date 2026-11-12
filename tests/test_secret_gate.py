@@ -3,10 +3,10 @@ this file trips no scanner, and none of them works anywhere."""
 
 import os
 import shutil
-import stat
 from pathlib import Path
 
 import pytest
+from conftest import a_stub
 
 from agent_fabric.secretgate import GateUnavailable, redact, scan
 
@@ -84,11 +84,7 @@ def test_the_scan_names_the_rule_and_never_the_secret() -> None:
 
 
 def stub(tmp_path: Path, script: str) -> dict[str, str]:
-    folder = tmp_path / "stub"
-    folder.mkdir()
-    gitleaks = folder / "gitleaks"
-    gitleaks.write_text(f"#!/bin/sh\n{script}\n")
-    gitleaks.chmod(gitleaks.stat().st_mode | stat.S_IEXEC)
+    folder = a_stub(tmp_path / "stub", "gitleaks", f"#!/bin/sh\n{script}\n").parent
     return {"HOME": str(tmp_path), "PATH": f"{folder}:{os.environ['PATH']}"}
 
 

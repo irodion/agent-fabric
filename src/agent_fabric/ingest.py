@@ -54,6 +54,13 @@ class Stopped(Exception):
     """The run can't go on: nothing further is committed, and its notes wait for the next run."""
 
 
+class Busy(Stopped):
+    """Another `kb ingest` holds the lock. The timer's unit counts its exit, BUSY, as a success (design §5)."""
+
+
+BUSY = 75  # EX_TEMPFAIL: try again later
+
+
 def _move_resolved(inbox: Inbox, snapshot: Snapshot) -> None:
     """A resolved note skips the model, and goes to the note's own month with its resolution (§4.10)."""
     for file, note in snapshot.notes:
@@ -313,7 +320,7 @@ def _lock(env: Mapping[str, str]) -> Iterator[None]:
         try:
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as e:
-            raise Stopped("another kb ingest is running") from e
+            raise Busy("another kb ingest is running") from e
         yield
 
 

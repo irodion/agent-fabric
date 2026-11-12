@@ -3,14 +3,13 @@ and how kb reads the reply. Whether real Codex then has no tools is for the firs
 
 import json
 import os
-import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import BRANCH, PAGE, Lab
+from conftest import BRANCH, PAGE, Lab, a_stub
 
 from agent_fabric.backends import BackendError, CodexBackend, InvalidAnswer, Question
 
@@ -55,11 +54,7 @@ class Codex:
 
 
 def install_stub(tmp_path: Path) -> Codex:
-    folder = tmp_path / "codex-stub"
-    folder.mkdir()
-    binary = folder / "codex"
-    binary.write_text(STUB)
-    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+    folder = a_stub(tmp_path / "codex-stub", "codex", STUB).parent
     env = {"HOME": str(tmp_path), "PATH": f"{folder}:{os.environ['PATH']}", "CODEX_STUB": str(folder)}
     return Codex(folder, env)
 

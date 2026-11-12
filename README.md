@@ -15,9 +15,9 @@ To set it up, follow [Install](#install), on your own or with an agent guiding y
 | Part | State |
 |---|---|
 | Agent notes: `kb note`, `kb inbox`, the `kb-note` skill, start and stop hooks, `kb doctor` | Built and in use |
-| Notes into the wiki: `kb ingest` on the `codex` backend, `kb lint` | Built and tested against a stub model; not yet run on a real one |
+| Notes into the wiki: `kb ingest` on the `codex` backend and its daily timer, `kb lint` | Built; first run on Codex on 2026-11-12 |
 | CI that builds and vets a pinned [agentsview](https://github.com/kenn-io/agentsview) release | Built |
-| Ingest timer, `--backend local`, `kb prune`, `kb retro` | Planned (§4.7, §5) |
+| `--backend local`, `kb prune`, `kb retro` | Planned (§4.7) |
 | Session digests, the `fabricd` daemon, live panel, `kb search`, `kb catchup`, `kb mcp` | Planned (§3, §4.1–4.9) |
 | IDE agents (Cursor IDE, VS Code Copilot Chat) | Planned, phase 3 (§9) |
 
@@ -99,7 +99,9 @@ prints.
      (Codex and Copilot CLI), and to `$COPILOT_HOME/skills/` or `$CLAUDE_CONFIG_DIR/skills/` when those are set;
    - adds the inbox to Claude Code's and Codex's sandbox write lists, so `kb note` works inside them;
    - installs kb's hook entries in each installed agent's hooks file, leaving every other entry as it was;
-   - records the hooks you chose in `~/.config/agent-fabric/config.toml`, for later runs to keep to.
+   - records the hooks you chose in `~/.config/agent-fabric/config.toml`, for later runs to keep to;
+   - once a project is on the ingest allow list ([below](#turn-it-on)), installs `fabric-ingest.timer`, which runs
+     `kb ingest` daily at 03:00 (systemd only).
 
    Done when it prints a report that starts with `summary:`.
 
@@ -286,6 +288,16 @@ The wiki is optional, and these steps can be agent-guided too. Nothing goes to t
    Done when `git -C ~/wiki branch --no-merged main` lists no `ingest/` branch. The next run moves the merged notes
    to `inbox/done/`.
 
+6. **Let it run daily** (you): `kb doctor --fix`, or `scripts/install.sh` again, installs `fabric-ingest.timer` in
+   `~/.config/systemd/user/`. It runs `kb ingest` at 03:00, or on waking if the machine was asleep then; a run with
+   too few notes stops at its gate and costs nothing, and new notes go onto the branch waiting for review. The
+   service gets a `PATH` of the folders where `codex`, `gitleaks`, `git` and `node` were found, and your
+   `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `CODEX_HOME` if you set them; `kb doctor` says `outdated` once that `PATH`
+   no longer finds `codex` or `gitleaks` (an nvm upgrade, say), and `--fix` rewrites it. Done when `kb doctor`'s
+   `timer` row is `ok`; it says `problem` when the last run failed, and `journalctl --user -u fabric-ingest.service`
+   shows why. To stop the daily runs, `systemctl --user disable --now fabric-ingest.timer`: `--fix` leaves a timer you
+   disabled or masked off. Without systemd, as on macOS, run `kb ingest` yourself every few days.
+
 ### `kb ingest`
 
 ```text
@@ -337,7 +349,7 @@ couldn't be checked and excerpts gitleaks withheld. A note resolved after it was
 claim from the branch by hand if it no longer holds.
 
 A note that failed (quarantined, unreadable, or with no valid answer) stays in the inbox and is tried once on each
-later branch. Only one `kb ingest` runs at a time.
+later branch. Only one `kb ingest` runs at a time: a second exits 75 and says another is running.
 
 ### Pages
 
@@ -416,7 +428,8 @@ scripts/check.sh --red <rev>     # names new tests that pass on <rev>'s code: th
   such as actionlint or zizmor. CI runs every check, on Python 3.13 and 3.14.
 - Tests drive commands in-process through `cli.run(argv, env=, cwd=, stdin=, now=)`, with a fake home and a fixed
   clock (`tests/conftest.py`). Ingest's tests use a fake model and a stand-in gitleaks; `tests/test_codex.py` runs the
-  Codex adapter against a stub `codex`.
+  Codex adapter against a stub `codex`; the timer's tests use a stand-in `systemctl`, so no test reaches the real
+  user manager.
 - `kb note`, `kb hook` and `kb ingest` write real data, and `kb doctor --fix` edits real agent settings. To try one
   by hand, give it a throwaway home: `HOME="$(mktemp -d)" .venv/bin/kb <args>`, with `XDG_DATA_HOME` and
   `XDG_CONFIG_HOME` unset, and for ingest a stub `codex` on `PATH`.
@@ -431,6 +444,7 @@ src/agent_fabric/
 ├── agents.py       who signs a note       gitinfo.py    project ids
 ├── hooks.py        what each hook does    hookfiles.py  installs kb's hook entries
 ├── doctor.py       kb doctor's checks     sandboxes.py  the agents' sandbox write lists
+├── timer.py        fabric-ingest.timer's units, written by kb doctor --fix
 ├── report.py       TOON output            config.py     config.toml
 ├── ingest.py       kb ingest's steps      backends.py   the model, behind one protocol
 ├── decisions.py    answers → one action   evidence.py   what a note's refs show

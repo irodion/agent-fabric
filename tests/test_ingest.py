@@ -977,7 +977,7 @@ def test_a_second_run_at_the_same_time_stops_and_says_so(lab: Lab) -> None:
 
         result = lab.kb("ingest")
 
-    assert result.exit_code == 1
+    assert result.exit_code == 75  # EX_TEMPFAIL, which the timer's unit counts as a success
     assert "running" in result.stderr
     assert lab.fake.calls == []
 

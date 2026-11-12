@@ -38,7 +38,9 @@ itself.
   skill copies and the hooks, and has to run in the user's own terminal, because a sandbox can't write the agents'
   settings: ask the user to run it.
 - `kb note` and `kb hook` write to the real inbox and markers, and the inbox is append-only. `kb doctor --fix` edits
-  the real agents' settings. To try a command that writes, with `XDG_DATA_HOME` unset, give it a throwaway home:
+  the real agents' settings, and writes and starts `fabric-ingest.timer` once a project is allowed. Tests that run
+  `kb doctor` with an allow list use the `lab` fixture, whose stand-in `systemctl` keeps them off the real user
+  manager. To try a command that writes, with `XDG_DATA_HOME` unset, give it a throwaway home:
   `HOME="$(mktemp -d)" .venv/bin/kb <args>`.
 - `kb ingest` moves notes out of the inbox, writes `~/wiki` and spends model requests through `codex`, so ask first. To
   try it, use a throwaway home with a stub `codex` on PATH (`tests/test_codex.py` has one).
@@ -74,8 +76,9 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   answers into one action, `evidence.py` reads a note's refs, `secretgate.py` redacts and scans, `pages.py` is the page
   format and `manifests.py` records what each branch took. `lint.py` is `kb lint`, and ingest runs it too.
 - **`kb doctor`.** `doctor.py` gathers one `report.Row` per check, with `sandboxes.py` and `hookfiles.py` covering the
-  agents' settings, and `report.py` renders one TOON document. It writes TOON by hand: `toon-format` is a dev dependency
-  that tests use as an independent decoder, and the package has no runtime dependencies yet.
+  agents' settings, `timer.py` the systemd units that run `kb ingest` daily, and `report.py` renders one TOON
+  document. It writes TOON by hand: `toon-format` is a dev dependency that tests use as an independent decoder, and
+  the package has no runtime dependencies yet.
 
 These hold across the code:
 
