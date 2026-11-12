@@ -372,7 +372,8 @@ ingest and in `kb doctor`.
 - **Errors**, which stop an ingest commit that touches the page: `broken-link`, `no-source` (a claim with no source
   line), `missing-note` (a claim whose note isn't in `raw/notes/`) and `dangling-supersedes`.
 - **Warnings**, for you to look at: `stale-anchor` (the anchor file changed since `verified`), `anchor-unchecked`,
-  `near-duplicate` titles, `orphan-page`, `oversized-page`, and `stale-status` (a `status` note open over 14 days).
+  `near-duplicate` (two claims on a page where one shares most of its words with the other), `orphan-page`,
+  `oversized-page`, and `stale-status` (a `status` note open over 14 days).
 
 The wiki has no remote, so back it up yourself (`git -C ~/wiki bundle create <file> --all`) until the backup timer
 exists (§5).

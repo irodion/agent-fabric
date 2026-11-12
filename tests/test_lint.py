@@ -198,13 +198,54 @@ def test_an_oversized_page_is_a_warning(lab: Lab) -> None:
     assert ("warning", "oversized-page") in checks(lab.kb)
 
 
-def test_near_duplicate_titles_on_a_page_are_a_warning(lab: Lab) -> None:
+def test_near_duplicate_claims_on_a_page_are_a_warning(lab: Lab) -> None:
     notes = built_wiki(lab)
-    edit(lab, PAGE, "### the DB fixture needs a socket; run -m 'not db'", "### main returns 1, whatever given")
+    edit(lab, PAGE, "the DB fixture needs a socket; run -m 'not db'\n-", "main returns 1, whatever given\n-")
 
     assert checks(lab.kb) == [("warning", "near-duplicate")]
     assert notes[0] in findings(lab.kb)[0]["detail"]
     assert notes[1] in findings(lab.kb)[0]["detail"]
+
+
+def test_a_note_repeated_inside_a_longer_one_is_a_near_duplicate(lab: Lab) -> None:
+    short = lab.leave("fix", "the DB fixture needs a socket; run -m 'not db'")
+    lab.kb.later(minutes=1)
+    longer = lab.leave(
+        "fix",
+        "CI has no database. The DB fixture needs a socket; run -m 'not db' there, and keep the marker on every test"
+        " that opens a connection, whichever fixture it goes through",
+    )
+    lab.kb.later(minutes=1)
+    lab.leave("decision", "the wiki stays local, since the machines have no link")
+    lab.kb.later(days=8)
+    assert lab.kb("ingest").exit_code == 0
+    lab.merge("ingest/2026-11-08")
+
+    assert checks(lab.kb) == [("warning", "near-duplicate")]
+    assert short in findings(lab.kb)[0]["detail"]
+    assert longer in findings(lab.kb)[0]["detail"]
+
+
+def test_claims_that_only_open_alike_are_not_near_duplicates(lab: Lab) -> None:
+    opening = "the fine-grained token on this machine, the same one for every repository here, cannot"
+    endings = (
+        "dispatch workflows: `gh workflow run` answers 403 without Actions write access, so the owner starts each one"
+        " from the repo's Actions tab and you read the run's log afterwards, which also shows a skipped cached build",
+        "change security settings: the vulnerability-alerts API answers 403 without Administration permission, so ask"
+        " the owner to toggle Dependabot and CodeQL under Code security, then confirm alerts appear in the dashboard",
+    )
+    notes = []
+    for ending in endings:
+        notes.append(lab.leave("gotcha", f"{opening} {ending}"))
+        lab.kb.later(minutes=1)
+    lab.leave("decision", "the wiki stays local, since the machines have no link")
+    lab.kb.later(days=8)
+    assert lab.kb("ingest").exit_code == 0
+    lab.merge("ingest/2026-11-08")
+
+    page = (lab.wiki / PAGE).read_text()
+    assert all(f"source: {note} " in page for note in notes)
+    assert ("warning", "near-duplicate") not in checks(lab.kb)
 
 
 def test_a_status_note_never_resolved_is_a_warning(lab: Lab) -> None:

@@ -71,12 +71,14 @@ def _anchor(claim: Claim, raw: dict[str, Path], path: str, env: Mapping[str, str
 
 
 def _near_duplicates(claims: list[Claim], path: str) -> list[Finding]:
+    """By the whole text, since a title is only the first sentence, cut at 80 characters, so notes that open alike get
+    close titles. Shared words count against the shorter text, so a note repeated inside a longer one matches."""
     found = []
-    for at, one in enumerate(claims):
-        for other in claims[at + 1 :]:
-            a, b = words(one.title), words(other.title)
-            if a and b and len(a & b) / len(a | b) >= NEAR_DUPLICATE:
-                found.append(Finding("warning", "near-duplicate", path, f"{one.id} and {other.id} have close titles"))
+    texts = [(claim.id, words(claim.body)) for claim in claims]
+    for at, (one, a) in enumerate(texts):
+        for other, b in texts[at + 1 :]:
+            if a and b and len(a & b) / min(len(a), len(b)) >= NEAR_DUPLICATE:
+                found.append(Finding("warning", "near-duplicate", path, f"{one} and {other} say much the same"))
     return found
 
 

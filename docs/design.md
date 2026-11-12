@@ -558,12 +558,15 @@ to its claims.
 "lint" operation in Karpathy's gist, and `kb prune` does the writing his ingest does:
 
 - `kb lint` (deterministic; on every ingest run, even when the gate exits, and in `kb doctor`, which is where its
-  findings show when no branch is waiting for review) reports broken links, claims citing missing notes
-  or digests, claims whose anchor file changed since `verified`, a `supersedes` pointing at nothing, a summary citing a
-  missing claim, orphan pages, oversized pages and near-duplicate titles. Karpathy's lint compares pages with each
-  other and with newer sources, and the failure people report is a page "confidently wrong for months" that passes
-  those checks. A changed anchor is the check that looks at the source, and it replaces a 90-day age check. A
-  contradiction can't be found deterministically, so it appears only as a `conflict` or a `supersedes` from ingest.
+  findings show when no branch is waiting for review) reports broken links, claims citing missing notes or digests,
+  claims whose anchor file changed since `verified`, a `supersedes` pointing at nothing, a summary citing a missing
+  claim, orphan pages, oversized pages and near-duplicate claims, compared by their whole text: a title is the first
+  sentence cut at 80 characters, and on the first real run (Codex CLI 0.166.0, 2026-11-12) two notes that opened with
+  the same long phrase had close titles and different claims. Shared words count against the shorter text, so a note
+  repeated inside a longer one still matches. Karpathy's lint compares pages with each other and with newer sources,
+  and the failure people report is a page "confidently wrong for months" that passes those checks. A changed anchor is
+  the check that looks at the source, and it replaces a 90-day age check. A contradiction can't be found
+  deterministically, so it appears only as a `conflict` or a `supersedes` from ingest.
 - `kb prune` (manual + weekly timer) is the only pass that writes. It does nothing unless a page has 10 claims and no
   summary, 10 new claims since its summary, or a summary citing a claim that has since been superseded. Then, on branch
   `prune/<yyyy-mm-dd>`, a generative model with no tools (`codex` first) reads the page's claims and writes a
