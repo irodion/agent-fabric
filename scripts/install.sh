@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Install kb from this clone and set this machine up for agent notes (docs/design.md §4.10): `uv tool install`,
-# then `kb doctor --fix`, which creates the inbox, copies the kb-note skill into the agents' skills folders, adds
-# the inbox to Claude Code's and Codex's sandbox write lists, and installs kb's hooks in each agent. Run it in your
-# own terminal, not in an agent's sandbox, which can't write those settings. Rerun it after pulling to update kb,
-# the skill and the hooks. What it prints is kb doctor's report, a TOON document an agent can read and explain.
+# Install kb from this clone and set this machine up for agent notes (docs/design.md §4.10): `uv tool install`, then
+# `kb doctor --fix`, which creates the inbox, copies the kb-note skill into the agents' skills folders, adds the
+# inbox to Claude Code's and Codex's sandbox write lists, installs kb's hooks in each agent, and, once a project is
+# on the ingest allow list, installs fabric-ingest.timer to run kb ingest daily. Run it in your own terminal, not in
+# an agent's sandbox, which can't write those settings. Rerun it after pulling to update kb, the skill and the
+# hooks. What it prints is kb doctor's report, a TOON document an agent can read and explain.
 # Usage: scripts/install.sh [--hooks start,stop|start|stop|none]
 #   --hooks  which hooks to install (default: both, or what an earlier --hooks recorded)
 set -euo pipefail

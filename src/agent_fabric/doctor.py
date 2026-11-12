@@ -9,7 +9,7 @@ from datetime import date, datetime
 from importlib.resources import files
 from pathlib import Path
 
-from agent_fabric import config, hookfiles
+from agent_fabric import config, hookfiles, timer
 from agent_fabric.lint import findings, summary
 from agent_fabric.manifests import Manifest, unmerged
 from agent_fabric.paths import config_file, expand, inbox_dir, tilde, uv_tool_dir, wiki_dir
@@ -222,7 +222,7 @@ def _ingest_tools(env: Mapping[str, str]) -> list[Row]:
         return [Row("problem", "ingest", shown, f"can't read [publish] allow ({e})")]
     return [
         Row("problem", "ingest", tool, f"{tool} isn't on PATH, and kb ingest needs it")
-        for tool in ("gitleaks", "codex")
+        for tool in timer.NEEDED
         if shutil.which(tool, path=env.get("PATH", "")) is None
     ]
 
@@ -263,7 +263,8 @@ def doctor(
     env: Mapping[str, str], now: datetime, *, fix: bool = False, hooks: tuple[str, ...] | None = None
 ) -> tuple[int, str]:
     """Check the inbox, the skill copies, the sandboxes' write lists, the agents' hooks, Copilot CLI's session sync,
-    and the wiki and what `kb ingest` needs; with `fix`, set up what's missing, except the sync and the last two.
+    what `kb ingest` needs, its timer and the wiki; with `fix`, set up what's missing, except the sync, ingest's tools
+    and the wiki.
     `hooks` (with `fix`) records which hooks to install."""
     found = agents(env)
     inbox = inbox_dir(env)
@@ -303,5 +304,5 @@ def doctor(
             rows.append(hooks_row)
     if found.has_copilot:
         rows.append(_copilot_sync(found.copilot / "settings.json", env))
-    rows += [*_ingest_tools(env), *_wiki(env, now)]
+    rows += [*_ingest_tools(env), *timer.check(env, fix=fix), *_wiki(env, now)]
     return (0 if all(row.status in ("ok", "fixed") for row in rows) else 1), render(rows, fix=fix)

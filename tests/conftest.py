@@ -31,6 +31,44 @@ else
 fi
 """
 
+# Stands in for systemctl, so no test reaches the real user manager. It logs each call to $HOME/systemctl.log and
+# keeps its state in $HOME/systemctl/: `no-bus` makes every call fail as an agent's sandbox does, `enabled` holds the
+# timer's UnitFileState, `stopped` stops it, `active` holds an ActiveState to report instead, `result` is the
+# service's last result and `cannot-enable` makes enabling fail. Like systemd, it prints a unit's properties in its
+# own order.
+SYSTEMCTL = """#!/bin/sh
+PATH=/usr/bin:/bin  # for its own tools, whatever PATH a test gives kb
+state="$HOME/systemctl"
+mkdir -p "$state"
+echo "$*" >> "$HOME/systemctl.log"
+if [ -e "$state/no-bus" ]; then
+  echo 'Failed to connect to user scope bus via local transport: Operation not permitted' >&2
+  exit 1
+fi
+case "$*" in
+  "--user show --property=UnitFileState,ActiveState,Result fabric-ingest.timer fabric-ingest.service")
+    enabled=$(cat "$state/enabled" 2>/dev/null)
+    active=inactive
+    [ "$enabled" = enabled ] && [ ! -e "$state/stopped" ] && active=active
+    [ -e "$state/active" ] && active=$(cat "$state/active")
+    printf 'ActiveState=%s\nUnitFileState=%s\nResult=success\n\n' "$active" "$enabled"
+    result=$(cat "$state/result" 2>/dev/null || echo success)
+    printf 'ActiveState=inactive\nUnitFileState=static\nResult=%s\n' "$result" ;;
+  "--user daemon-reload") ;;
+  "--user enable --now fabric-ingest.timer") [ -e "$state/cannot-enable" ] && { echo 'Access denied' >&2; exit 1; }
+    printf enabled > "$state/enabled"; rm -f "$state/stopped" ;;
+  *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+"""
+
+
+def a_stub(folder: Path, name: str, script: str) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_text(script)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return path
+
 
 @dataclass
 class Kb:
@@ -129,13 +167,10 @@ class Lab:
 @pytest.fixture
 def lab(kb: Kb, tmp_path: Path) -> Lab:
     stubs = tmp_path / "stubs"
-    stubs.mkdir()
-    gitleaks = stubs / "gitleaks"
-    gitleaks.write_text(GITLEAKS)
-    gitleaks.chmod(gitleaks.stat().st_mode | stat.S_IEXEC)
-    codex = stubs / "codex"  # for `kb doctor`, whatever this machine has: the fake model answers instead
-    codex.write_text("#!/bin/sh\nexit 1\n")
-    codex.chmod(codex.stat().st_mode | stat.S_IEXEC)
+    a_stub(stubs, "gitleaks", GITLEAKS)
+    # For `kb doctor`, whatever codex this machine has: in ingest, the fake model answers instead.
+    a_stub(stubs, "codex", "#!/bin/sh\nexit 1\n")
+    a_stub(stubs, "systemctl", SYSTEMCTL)
     kb.env.update(
         PATH=f"{stubs}:{os.environ['PATH']}",
         GIT_AUTHOR_NAME="Test",

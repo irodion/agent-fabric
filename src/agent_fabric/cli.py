@@ -21,7 +21,7 @@ from agent_fabric.gitinfo import git_facts, project_id
 from agent_fabric.hooks import AGENTS, HOOKS, at_work
 from agent_fabric.hooks import run as run_hook
 from agent_fabric.inbox import Inbox, Snapshot
-from agent_fabric.ingest import Stopped, ingest
+from agent_fabric.ingest import BUSY, Busy, Stopped, ingest
 from agent_fabric.lint import lint
 from agent_fabric.notes import KINDS, MACHINE, MAX_TEXT, STALE_AFTER, Note, expired, missing_ref, new_id
 from agent_fabric.paths import expand, inbox_dir, tilde
@@ -129,6 +129,8 @@ def _wiki_command(args: argparse.Namespace, ctx: Context) -> Result:
             return Result(*lint(ctx.env, ctx.now), "")
         project = _project(args.project, ctx) if args.project else None
         return Result(*ingest(ctx, project=project, dry_run=args.dry_run), "")
+    except Busy as e:
+        return Result(BUSY, "", f"kb: {e}\n")
     except (BackendError, GateUnavailable, Stopped, *WIKI_ERRORS) as e:
         return Result(1, "", f"kb: {e}\n")
 

@@ -531,8 +531,8 @@ call, and couldn't tell what the file held. With `code_mode_host` off, its code 
 
 **Backends.**
 
-- `codex`, first, on a weekly timer: no tools, with a schema that allows only the questions' options. Expect about a
-  dollar a month.
+- `codex`, first, on the daily timer (§5): no tools, with a schema that allows only the questions' options. Expect
+  about a dollar a month.
 - `local`, nightly once it passes §10: a decision model on `llama-server`'s `/v1/systemone`, on loopback. Nightly runs
   append to one branch, so review stays weekly. These models are small enough for an 8 GB machine, and should take
   seconds per note on a CPU, which still has to be measured. Speed and RAM aren't the constraint; whether the decisions
@@ -1004,7 +1004,7 @@ changes no other, so the user's hooks survive every run. Copilot CLI's `kb.json`
 | `agentsview.service` (sandboxed; user or system unit, §4.1) | `agentsview serve --no-browser --no-update-check --port <port> --replace` | `127.0.0.1:<port>` (8080 by default) |
 | `fabricd.service` | tracker, observer, digester, panel | 127.0.0.1:8090 |
 | `llama-panel.service` | `llama-server` with E4B | 127.0.0.1:8091 |
-| `fabric-ingest.timer` | `kb ingest`, weekly on `codex`, nightly at 03:00 on `local` (which starts a llama-server on 8092), §4.7. `Persistent=true`, so a machine asleep at that time runs it on waking; `OnFailure=` leaves a marker for `kb doctor` | — |
+| `fabric-ingest.timer` | `kb ingest` daily at 03:00, on `codex` and later on `local` (which starts a llama-server on 8092), §4.7. The run's gate decides whether there's work and a run adds to the branch waiting for review, so a daily run costs no more than a weekly one and review stays weekly. `Persistent=true`, so a machine asleep at 03:00 runs it on waking. `kb doctor --fix` writes it once a project is allowed, with a `PATH` of the folders of the tools ingest runs and of node, since a unit gets none of a shell's (codex lives under nvm), and the shell's `XDG_*_HOME` and `CODEX_HOME`. That `PATH` depends on the shell, so a unit counts as current while its own still finds the tools. A run that finds another holding ingest's lock exits 75, which the unit counts as a success, and a timer the user disabled or masked stays off, even when `--fix` rewrites its units. `kb doctor` asks systemd whether it's on and running and how its last run went, which needs no marker: a reboot forgets a failure, and the next failed run shows it again | — |
 | `fabric-prune.timer` | `kb prune` weekly, which writes only when a page meets its trigger (§4.7; `kb lint` runs in `kb ingest`, before its gate) | — |
 | `fabric-backup.timer` | daily SQLite backup of agentsview archive and `state.db`, and a `git bundle` of the wiki, which has no remote | — |
 
@@ -1132,14 +1132,14 @@ The CLI agents come first (§2). Items 1 and 7 for them ran on the devbox on 202
 Claude Code, Codex and Copilot CLI; no-go for Cursor CLI, which gets its own reader in phase 1. Item 2 (watch lag) and
 item 3 (cross-agent search) are still to do for the CLIs. Items 1–3 and 7 for the IDE agents move to phase 3.
 
-**Phase 1 — digests and query.** First `kb note`, `kb inbox`, the `kb-note` skill and its hooks (§4.10): they
-need neither agentsview nor fabricd, so a one-week trial in one or two projects runs while the rest is built.
-Notes-only `kb ingest` and `kb lint` on the `codex` backend follow, for the same reason (§4.7). They are built, but
-haven't run on a real model. Their timer and `OnFailure=` marker come with that first run, and `kb lint`'s summary
-check with `kb prune`. Then CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.x (from
-2026-11-06, §4.1); adapter, normalizer, tracker, digester with allow list/redaction/gate/commit, for the CLI agents:
-agentsview for Claude Code, Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI +
-`kb mcp`; a prototype session for the panel layout, then the panel with rules only (incl. open loops and carry-over).
+**Phase 1 — digests and query.** First `kb note`, `kb inbox`, the `kb-note` skill and its hooks (§4.10): they need
+neither agentsview nor fabricd, so a one-week trial in one or two projects runs while the rest is built. Notes-only
+`kb ingest` and `kb lint` on the `codex` backend follow, for the same reason (§4.7). They are built and first ran on a
+real model on 2026-11-12; their daily timer followed (§5), and `kb lint`'s summary check comes with `kb prune`. Then
+CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.x (from 2026-11-06, §4.1); adapter,
+normalizer, tracker, digester with allow list/redaction/gate/commit, for the CLI agents: agentsview for Claude Code,
+Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI + `kb mcp`; a prototype session
+for the panel layout, then the panel with rules only (incl. open loops and carry-over).
 
 **Phase 2 — models.** SLM bullets in the panel after it passes the eval (§10); `kb ingest` takes digests too (§11);
 the comparison with the `local` backend, then nightly on it (§10); `kb prune` and `kb retro`.
@@ -1261,10 +1261,11 @@ project with `kb note --machine`, and the start hook counts `status` notes apart
   `kb inbox`, act on a note and leave their own (§10). Until then the inbox is shown to work as one agent's
   memory across sessions, not yet across agents.
 - Open notes piling up before ingest. One project reached 17 open notes within a week. Most were gotchas and
-  decisions: ingest had never run, as no project was on the allow list and `fabric-ingest.timer` isn't built, and
-  the first run took 22 notes from four projects (2026-11-12). Of the project's 3 `status` notes, one was an
-  unchecked assumption, which the skill now calls a gotcha, and one recorded a task's progress that the repo's task
-  list didn't have yet, which the skill now sends to that list. Open: the timer, and whether ingest should also run
-  once a project passes a number of open notes.
+  decisions: ingest had never run, as no project was on the allow list and `fabric-ingest.timer` wasn't built, and the
+  first run took 22 notes from four projects (2026-11-12). Of the project's 3 `status` notes, one was an unchecked
+  assumption, which the skill now calls a gotcha, and one recorded a task's progress that the repo's task list didn't
+  have yet, which the skill now sends to that list. Since then the timer runs ingest daily (§5), and its gate, 3 notes
+  or one 7 days old, is the trigger by count, so notes wait at most a day past it. Open: whether that keeps a busy
+  project's count down, which a few weeks of the timer show.
 
 The phase 0 spike (§9) settles the remaining unknowns.

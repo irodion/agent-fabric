@@ -39,6 +39,12 @@ def config_file(env: Mapping[str, str]) -> Path:
     return config_home / "agent-fabric" / "config.toml"
 
 
+def units_dir(env: Mapping[str, str]) -> Path:
+    """Where systemd's user manager looks for a user's own units. Not under kb's XDG_CONFIG_HOME: the manager has its
+    own environment, which a shell's export doesn't reach, so it reads ~/.config unless set up otherwise."""
+    return Path(env["HOME"]) / ".config" / "systemd" / "user"
+
+
 def hooks_dir(env: Mapping[str, str]) -> Path:
     """The hooks' markers, one per agent session (docs/design.md §4.10)."""
     return inbox_dir(env).parent / "hooks"
