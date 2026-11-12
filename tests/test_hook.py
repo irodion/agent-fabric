@@ -17,7 +17,9 @@ ADVICE = (
     "Most sessions need no note. Leave one with `kb note` (skill kb-note) only when you find something the next "
     "agent must know."
 )
-REMINDER = f"Run `kb inbox` before relying on the repo's state. {ADVICE}"
+STATUS = "unchecked: run `kb inbox` before relying on the repo's state."
+OTHERS = "on gotchas, fixes and decisions"
+READ = "read the ones about what you work on."
 QUESTION = (
     "kb: before you finish: did this session find something the next agent must know (a broken or flaky state, "
     "a trap, an error and its fix, a decision and its reason)? If so, leave it with `kb note`. If not, just stop. "
@@ -49,34 +51,67 @@ def test_start_hook_tells_claude_code_how_many_notes_are_open_here(kb: Kb) -> No
         {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
-                "additionalContext": "kb: 2 open notes from earlier sessions for ~/code/scratch, unchecked. "
-                + REMINDER,
+                "additionalContext": f"kb: 1 status note from earlier sessions for ~/code/scratch, {STATUS} It also"
+                f" lists 1 note {OTHERS} for ~/code/scratch: {READ} {ADVICE}",
             }
         },
     )
 
 
-def test_start_hook_counts_the_machines_notes_apart_from_the_projects(kb: Kb) -> None:
+def test_start_hook_asks_for_no_check_when_no_note_is_a_status(kb: Kb) -> None:
+    """A gotcha, fix or decision waits for the wiki; only a status says the repo may not be as the agent assumes."""
+    kb("note", "--agent", "Codex", "--kind", "gotcha", "uv needs --cache-dir in the sandbox")
+    kb("note", "--agent", "Codex", "--kind", "decision", "retries use tenacity, as httpx ignores Retry-After")
+
+    result = kb("hook", "start", "--agent", "claude-code", stdin=start_input(kb))
+
+    assert json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"] == (
+        f"kb: no status notes from earlier sessions for ~/code/scratch. `kb inbox` lists 2 notes {OTHERS} for"
+        f" ~/code/scratch: {READ}"
+        f" {ADVICE}"
+    )
+
+
+def test_start_hook_counts_the_machines_notes_with_the_projects(kb: Kb) -> None:
     kb("note", "--agent", "Codex", "--kind", "status", "the tests fail on main")
+    kb("note", "--agent", "Codex", "--kind", "status", "--machine", "the GPU box is down")
+    kb("note", "--agent", "Codex", "--kind", "gotcha", "uv needs --cache-dir in the sandbox")
     kb("note", "--agent", "Codex", "--kind", "gotcha", "--machine", "pnpm fails in the sandbox")
-    kb("note", "--agent", "Codex", "--kind", "fix", "--machine", "uv needs --cache-dir in the sandbox")
+    kb("note", "--agent", "Codex", "--kind", "fix", "--machine", "corepack needs its cache outside the sandbox")
     kb("note", "--agent", "Codex", "--kind", "idea", "--machine", "kb doctor could check pnpm")
 
     result = kb("hook", "start", "--agent", "claude-code", stdin=start_input(kb))
 
     assert json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"] == (
-        "kb: 1 open note from earlier sessions for ~/code/scratch and 2 for this machine, unchecked. " + REMINDER
+        "kb: 2 status notes from earlier sessions for ~/code/scratch, 1 of them for this machine, unchecked: run"
+        " `kb inbox` before relying on the repo's state or the machine's setup. It also lists 3 notes"
+        f" {OTHERS} for ~/code/scratch, 2 of them for this machine: {READ} {ADVICE}"
     )
 
 
-def test_start_hook_names_the_machines_notes_when_the_project_has_none(kb: Kb) -> None:
+def test_start_hook_names_the_machine_when_only_its_notes_are_open(kb: Kb) -> None:
+    kb("note", "--agent", "Codex", "--kind", "status", "--machine", "the GPU box is down")
     kb("note", "--agent", "Codex", "--kind", "gotcha", "--machine", "pnpm fails in the sandbox")
 
     result = kb("hook", "start", "--agent", "claude-code", stdin=start_input(kb))
 
     assert json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"] == (
-        "kb: no open notes from earlier sessions for ~/code/scratch, but 1 for this machine, unchecked. "
-        + REMINDER.replace("the repo's state", "the machine's setup")
+        "kb: 1 status note from earlier sessions for this machine, none for ~/code/scratch, unchecked: run `kb inbox`"
+        f" before relying on the machine's setup. It also lists 1 note {OTHERS} for this machine, none for"
+        f" ~/code/scratch: {READ} {ADVICE}"
+    )
+
+
+def test_start_hook_names_the_project_when_only_the_machine_has_a_status_note(kb: Kb) -> None:
+    kb("note", "--agent", "Codex", "--kind", "status", "--machine", "the GPU box is down")
+    kb("note", "--agent", "Codex", "--kind", "gotcha", "uv needs --cache-dir in the sandbox")
+    kb("note", "--agent", "Codex", "--kind", "decision", "retries use tenacity, as httpx ignores Retry-After")
+
+    result = kb("hook", "start", "--agent", "claude-code", stdin=start_input(kb))
+
+    assert json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"] == (
+        "kb: 1 status note from earlier sessions for this machine, none for ~/code/scratch, unchecked: run `kb inbox`"
+        f" before relying on the machine's setup. It also lists 2 notes {OTHERS} for ~/code/scratch: {READ} {ADVICE}"
     )
 
 
@@ -86,8 +121,7 @@ def test_start_hook_names_the_machines_notes_when_the_project_has_none(kb: Kb) -
 )
 def test_start_hook_answers_in_each_agents_format(kb: Kb, agent: str, key: str) -> None:
     kb("note", "--agent", "Codex", "--kind", "status", "the tests fail on main")
-    kb("note", "--agent", "Codex", "--kind", "gotcha", "uv needs --cache-dir in the sandbox")
-    text = f"kb: 2 open notes from earlier sessions for ~/code/scratch, unchecked. {REMINDER}"
+    text = f"kb: 1 status note from earlier sessions for ~/code/scratch, {STATUS} {ADVICE}"
     expected = {
         "hookSpecificOutput": {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}},
         "additionalContext": {"additionalContext": text},
@@ -130,7 +164,7 @@ def test_start_hook_names_a_single_note_as_one(kb: Kb) -> None:
     result = kb("hook", "start", "--agent", "cursor", stdin=start_input(kb))
 
     assert json.loads(result.stdout)["additional_context"].startswith(
-        "kb: 1 open note from earlier sessions for ~/code/scratch, unchecked."
+        f"kb: 1 status note from earlier sessions for ~/code/scratch, {STATUS}"
     )
 
 
@@ -145,7 +179,7 @@ def test_start_hook_names_a_git_repos_project_as_kb_note_does(kb: Kb, remote: bo
     result = kb("hook", "start", "--agent", "copilot", stdin=start_input(kb))
 
     assert json.loads(result.stdout)["additionalContext"].startswith(
-        f"kb: 1 open note from earlier sessions for {project}, unchecked."
+        f"kb: 1 status note from earlier sessions for {project}, {STATUS}"
     )
 
 
@@ -163,7 +197,7 @@ def test_start_hook_leaves_out_a_project_id_that_is_not_plainly_a_name(kb: Kb, f
     result = kb("hook", "start", "--agent", "copilot", stdin=start_input(kb))
 
     assert json.loads(result.stdout)["additionalContext"].startswith(
-        "kb: 1 open note from earlier sessions for this project, unchecked."
+        f"kb: 1 status note from earlier sessions for this project, {STATUS}"
     )
 
 
@@ -177,7 +211,7 @@ def test_start_hook_cuts_a_long_project_id(kb: Kb) -> None:
 
     project = ("github.com/me/" + "a" * 300)[:199] + "…"
     assert json.loads(result.stdout)["additionalContext"].startswith(
-        f"kb: 1 open note from earlier sessions for {project}, unchecked."
+        f"kb: 1 status note from earlier sessions for {project}, {STATUS}"
     )
 
 
@@ -191,7 +225,7 @@ def test_start_hook_takes_cursors_folder_from_its_workspace_roots(kb: Kb) -> Non
     result = kb("hook", "start", "--agent", "cursor", stdin=json.dumps(cursor_input))
 
     assert json.loads(result.stdout)["additional_context"].startswith(
-        "kb: 1 open note from earlier sessions for ~/code/scratch, unchecked."
+        f"kb: 1 status note from earlier sessions for ~/code/scratch, {STATUS}"
     )
 
 

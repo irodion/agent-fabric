@@ -797,11 +797,11 @@ The kind says what the next agent should do with the note, and decides how long 
   `~`: the folder it was written in would name a project that may not be on the allow list. It takes no `--ref`, as a
   path means something else in each project where it's read, so the evidence goes in the text. `kb inbox` lists the
   machine's notes in every project with the project's own, and `kb inbox --project machine` lists them alone, even
-  beside a folder called `machine`. The start hook counts them apart: "2 open notes … for <project> and 1 for this
-  machine". Ingest takes them only once `machine` is on the allow list (§4.5), and files them on `wiki/machine.md`,
-  outside `wiki/projects`, where a folder outside git called `machine` would get the same page. In a real inbox, five
-  of the first 43 notes were about the machine and sat in one project's notes, where the next project couldn't see
-  them (2026-11-12). A resolution takes neither flag.
+  beside a folder called `machine`. The start hook counts them with the project's and says how many are the machine's:
+  "2 status notes … for <project>, 1 of them for this machine". Ingest takes them only once `machine` is on the allow
+  list (§4.5), and files them on `wiki/machine.md`, outside `wiki/projects`, where a folder outside git called
+  `machine` would get the same page. In a real inbox, five of the first 43 notes were about the machine and sat in one
+  project's notes, where the next project couldn't see them (2026-11-12). A resolution takes neither flag.
 - **`--resolve <id>`** closes an earlier note, usually a `status` once the tests pass again. It writes a new note
   that points at the old one, so the inbox stays append-only; resolved notes drop out of `kb inbox` and
   `kb catchup`. A note already filed on the wiki can't be resolved: what's true now goes in a new note, which ingest
@@ -881,10 +881,13 @@ kb hook start --agent <claude-code|codex|copilot|cursor>   # session start: the 
 kb hook stop --agent <claude-code|codex|copilot|cursor>    # end of a turn: the question (Stop, below)
 ```
 
-- **Start** runs when a session starts, resumes, is cleared or is compacted (the last two drop the earlier
-  reminder). It gives the number of open notes for the project, says to run `kb inbox` before relying on the repo's
-  state, and reminds the agent of `kb note`. "Most sessions need no note" is in the wording because the first one
-  drew a note that only described the repo, from a session asked what the project does (Copilot CLI, 2026-11-02).
+- **Start** runs when a session starts, resumes, is cleared or is compacted (the last two drop the earlier reminder).
+  It gives the number of open `status` notes for the project, says to run `kb inbox` before relying on the repo's
+  state, then gives the number of other notes (gotchas, fixes, decisions) and says to read the ones about the work,
+  and reminds the agent of `kb note`. Only a `status` note says the repo may not be as the agent assumes; the others
+  wait for the wiki. With one count for all, 9 gotchas and decisions waiting for a first ingest told every session in
+  a project to check the repo's state (2026-11-12). "Most sessions need no note" is in the wording because the first
+  one drew a note that only described the repo, from a session asked what the project does (Copilot CLI, 2026-11-02).
   Cursor CLI's `--resume` ran no start hook in the one session that logged it (2026-11-03).
 - **Stop** runs at the end of each turn, not at session end: when the session ends, the agent can no longer act. At
   the first end of a turn at least 10 minutes after the session started, it makes the agent continue with a question:
@@ -1247,17 +1250,18 @@ Open (2026-11-04):
 
 Open (2026-11-12), from the first ten days of a real inbox: 43 notes in four projects. The notes were specific and
 checkable, only one was filler, and 9 resolved an earlier one, two of them correcting it with new measurements.
-Decided: a note about another repo names it with `kb note --project`, and a fact about the machine is filed for
-every project with `kb note --machine` (§4.10). Open (§4.10):
+Decided: a note about another repo names it with `kb note --project`, a fact about the machine is filed for every
+project with `kb note --machine`, and the start hook counts `status` notes apart from the rest (§4.10). Open (§4.10):
 
 - Whether notes reach other agents. 41 of the 43 were Claude Code's, every resolution was too, and nothing records
   a read. A few real work sessions of Codex and Copilot CLI in a project with open notes settle it: whether they run
   `kb inbox`, act on a note and leave their own (§10). Until then the inbox is shown to work as one agent's
   memory across sessions, not yet across agents.
-- Open notes piling up before ingest. One project reached 17 open notes within a week, and the start hook tells
-  every session there to read them all. Some were `status` notes for releases and deployments that the repo's own
-  handoff file also recorded, and they stay until resolved. Whether ingest should also run once a project passes a
-  number of open notes, not only weekly; and whether the skill should say that lasting state goes in the repo's docs,
-  with the note resolved once it's there.
+- Open notes piling up before ingest. One project reached 17 open notes within a week. Most were gotchas and
+  decisions: ingest had never run, as no project was on the allow list and `fabric-ingest.timer` isn't built, and
+  the first run took 22 notes from four projects (2026-11-12). Of the project's 3 `status` notes, one was an
+  unchecked assumption, which the skill now calls a gotcha, and one recorded a task's progress that the repo's task
+  list didn't have yet, which the skill now sends to that list. Open: the timer, and whether ingest should also run
+  once a project passes a number of open notes.
 
 The phase 0 spike (§9) settles the remaining unknowns.

@@ -77,8 +77,9 @@ prints.
 3. **Choose the hooks** (you decide; an agent asks). The `kb-note` skill tells agents when and how to leave a note,
    and two hooks remind them of it:
 
-   - `start`: at the start of a session, the number of open notes for the project, and a reminder of `kb inbox` and
-     `kb note`.
+   - `start`: at the start of a session, the number of open `status` notes for the project and the machine, which
+     are a reason to check before relying on the repo, then the number of other open notes, and a reminder of
+     `kb inbox` and `kb note`.
    - `stop`: at least 10 minutes in, a question at the end of a turn: did this session find something the next
      agent must know? It comes once per session and again later in a long one, each costing one extra turn.
 
@@ -196,8 +197,9 @@ the worktrees of a repo, and its clones with the same `origin`, share one projec
 `kb hook start|stop --agent <claude-code|codex|copilot|cursor>` is what the hook entries run; you don't run it by
 hand.
 
-- **Start** (session start, resume, clear, compaction): the number of open notes for the project, and a reminder of
-  `kb inbox` and `kb note`.
+- **Start** (session start, resume, clear, compaction): the number of open `status` notes for the project and the
+  machine, with a reminder to read them before relying on the repo's state; then the number of other open notes
+  (gotchas, fixes, decisions), to read when the work touches them; and a reminder of `kb note`.
 - **Stop** (end of a turn): at least 10 minutes in, it asks the agent whether the session found something the next
   agent must know. It asks again 8 hours after its last question, or in Claude Code an hour after it if a compaction
   has dropped what the session saw since. In most sessions the answer is no, and the agent just stops.
