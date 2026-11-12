@@ -204,8 +204,10 @@ def check(env: Mapping[str, str], *, fix: bool) -> list[Row]:
         reason = e.strerror if isinstance(e, OSError) and e.strerror else e
         step = f"Look at {tilde(folder, env)}/fabric-ingest.*: kb checks and rewrites them once it can read them"
         return [Row("problem", "timer", shown, f"can't read the units ({reason})", step=step)]
-    if any(os.path.realpath(folder / name) == os.devnull for name in (SERVICE, TIMER)):
-        return [Row("ok", "timer", shown, _turned_off("masked"))]  # a mask is a link to /dev/null: kb keeps it
+    # A mask is a link to /dev/null, which kb never rewrites. A masked timer doesn't fire.
+    masked = {name for name in (SERVICE, TIMER) if os.path.realpath(folder / name) == os.devnull}
+    if TIMER in masked:
+        return [Row("ok", "timer", shown, _turned_off("masked"))]
     installed = any(text is not None for text in current.values())
     wanted = _wanted(env)
     if not wanted and not installed:
@@ -214,9 +216,20 @@ def check(env: Mapping[str, str], *, fix: bool) -> list[Row]:
     if command is None:
         detail = "no systemd here, so kb ingest runs only when you start it"
         return [Row("ok", "timer", shown, detail, step="Run kb ingest yourself every few days")]
-    if not wanted:
-        return [_state(command, env, shown, fix=False)]
+    if masked or not wanted:  # checked, never written
+        return [_service_masked(command, env, shown) if masked else _state(command, env, shown, fix=False)]
     return [_installed(command, env, current, shown, fix=fix)]
+
+
+def _service_masked(command: str, env: Mapping[str, str], shown: str) -> Row:
+    """Only the service masked: off, unless the timer still fires it, and then each run fails."""
+    asked = _ask(command, env)
+    if asked is None:
+        return Row("ok", "timer", shown, "the service is masked; can't ask systemd from here whether the timer runs")
+    if asked[0].get("ActiveState") == "active":
+        step = f"Run systemctl --user disable --now {TIMER} to keep it off, or systemctl --user unmask {SERVICE}"
+        return Row("problem", "timer", shown, "the service is masked, but the timer still fires it", step=step)
+    return Row("ok", "timer", shown, _turned_off("masked"))
 
 
 def _without_path(text: str | None) -> str | None:
