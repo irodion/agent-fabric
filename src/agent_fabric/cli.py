@@ -23,7 +23,7 @@ from agent_fabric.hooks import run as run_hook
 from agent_fabric.inbox import Inbox, Snapshot
 from agent_fabric.ingest import Stopped, ingest
 from agent_fabric.lint import lint
-from agent_fabric.notes import KINDS, MAX_TEXT, STALE_AFTER, Note, expired, missing_ref, new_id
+from agent_fabric.notes import KINDS, MACHINE, MAX_TEXT, STALE_AFTER, Note, expired, missing_ref, new_id
 from agent_fabric.paths import expand, inbox_dir, tilde
 from agent_fabric.secretgate import GateUnavailable
 from agent_fabric.shown import shown
@@ -64,9 +64,11 @@ def run_in(argv: list[str], ctx: Context) -> Result:
     note_cmd.add_argument("--agent")
     note_cmd.add_argument("--ref", action="append", default=[])
     note_cmd.add_argument("--resolve", metavar="ID")
-    note_cmd.add_argument(
+    about = note_cmd.add_mutually_exclusive_group()
+    about.add_argument(
         "--project", metavar="FOLDER", help="the folder of the repo the note is about, if not the current one"
     )
+    about.add_argument("--machine", action="store_true", help="the note holds on this machine, in every project")
     note_cmd.add_argument("text", nargs="?", default="")
     inbox_cmd = commands.add_parser("inbox")
     inbox_cmd.add_argument("--kind", choices=KINDS)
@@ -141,8 +143,9 @@ def _kind(args: argparse.Namespace, snapshot: Snapshot, inbox: Inbox) -> str | R
         raise UsageError("--resolve needs the id of the note it resolves; `kb inbox` lists the open ones")
     if args.kind is not None:
         raise UsageError("drop --kind: a resolution takes the kind of the note it resolves")
-    if args.project is not None:
-        raise UsageError("drop --project: kb finds the note by its id, wherever it's filed")
+    if args.project is not None or args.machine:
+        flag = "--machine" if args.machine else "--project"
+        raise UsageError(f"drop {flag}: kb finds the note by its id, wherever it's filed")
     everything = inbox.read(with_done=True)  # a retried resolve may find its note moved to `done/`
     target = everything.find(args.resolve)
     if target is None or target.resolves:
@@ -170,6 +173,11 @@ def _note(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
         raise UsageError(
             f"the note is {len(text)} characters; keep it to {MAX_TEXT} characters and link longer detail with --ref"
         )
+    if args.machine and args.ref:
+        raise UsageError(
+            "drop --ref: a machine note is read in every project, where a path means something else;"
+            " give the evidence in the text"
+        )
     own = cwd.resolve()  # physical, as `project_id` names a folder for the hooks' markers
     where = own if args.project is None else _folder(args.project, ctx)
     facts = git_facts(where)
@@ -189,7 +197,7 @@ def _note(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
         if (missing := missing_ref(ref, bases))
     ]
     advice = ""
-    if facts.project is None and not args.resolve and (args.project is None or where != own):
+    if facts.project is None and not args.resolve and not args.machine and (args.project is None or where != own):
         advice = (  # `--project .` alone says the folder is meant
             f"kb: {tilde(where, env)} isn't in git, so the note is filed under that folder. If it's about a repo,"
             " resolve it and write it again with --project <the repo's folder>.\n"
@@ -199,10 +207,10 @@ def _note(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
         id=new_id(),
         kind=kind,
         agent=agent,
-        project=facts.project,
-        cwd=tilde(where, env),
-        branch=facts.branch,
-        commit=facts.commit,
+        project=MACHINE if args.machine else facts.project,
+        cwd="~" if args.machine else tilde(where, env),  # the folder would name a project that may not be published
+        branch=None if args.machine else facts.branch,
+        commit=None if args.machine else facts.commit,
         time=time,
         refs=args.ref,
         resolves=args.resolve,
@@ -257,7 +265,7 @@ def _inbox(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
     notes = [
         note
         for _, note in (snapshot.notes if args.all else snapshot.open())
-        if scope in (None, note.scope)
+        if (scope is None or note.holds_in(scope))
         and args.kind in (None, note.kind)
         and (args.since is None or ctx.now - note.time <= args.since)
         and (args.all or not expired(note, ctx.now))
@@ -281,7 +289,10 @@ def _folder(value: str, ctx: Context) -> Path:
 
 
 def _project(value: str, ctx: Context) -> str:
-    """`--project`: a folder names its project as `kb note` would there; anything else is a project id."""
+    """`--project`: `machine` is the machine's notes, a folder names its project as `kb note` would there, and
+    anything else is a project id."""
+    if value == MACHINE:
+        return MACHINE
     folder = ctx.cwd / expand(value, ctx.env)
     if not folder.is_dir():
         return value

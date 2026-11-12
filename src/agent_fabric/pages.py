@@ -8,13 +8,16 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from agent_fabric.notes import Note
+from agent_fabric.notes import MACHINE, Note
 from agent_fabric.shown import shown
 
 SECTIONS = {"gotcha": "Gotchas", "fix": "Fixes", "decision": "Decisions"}
 SUPERSEDED = "Superseded"
 PROJECTS = "wiki/projects"
 IDEAS = "ideas.md"
+# Outside `wiki/projects`: there a folder outside git called `machine` would slug to the same page. Its raw copies
+# can share `raw/notes/machine` with such a folder's, as each file is named by its note's id.
+MACHINE_PAGE = "wiki/machine.md"
 IDEAS_HEAD = ("# Ideas", "", "Suggestions agents left and nobody has decided on: not claims, and not checked.", "")
 MAX_TITLE = 80
 STRUCTURE = re.compile(r"\s*(#|- source:|- superseded by:|- from:)")
@@ -159,7 +162,7 @@ def _slug(project: str) -> str:
 
 def page_path(project: str) -> str:
     """`github.com/me/repo` → `wiki/projects/github.com/me/repo.md`."""
-    return f"{PROJECTS}/{_slug(project)}.md"
+    return MACHINE_PAGE if project == MACHINE else f"{PROJECTS}/{_slug(project)}.md"
 
 
 def raw_path(note: Note) -> str:

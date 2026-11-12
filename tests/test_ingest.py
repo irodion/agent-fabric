@@ -97,6 +97,59 @@ def test_a_project_not_on_the_allow_list_stays_local(lab: Lab) -> None:
     assert not lab.wiki.exists()
 
 
+def test_a_machine_note_is_filed_on_the_machines_page_once_machine_is_allowed(lab: Lab) -> None:
+    config = lab.kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.write_text(f'[publish]\nallow = ["{PROJECT}", "machine"]\n')
+    result = lab.kb("note", "--kind", "gotcha", "--agent", "Codex", "--machine", "pnpm fails in the sandbox")
+
+    run_a_week_later(lab)
+
+    note = result.stdout.split()[0]
+    claim_lines(lab.show("ingest/2026-11-08", "wiki/machine.md"), note)
+    assert "- [This machine](wiki/machine.md): 1 claims, in every project" in lab.show(
+        "ingest/2026-11-08", "index.md"
+    )
+
+
+def test_a_machine_note_names_no_project_folder_on_the_wiki_or_to_the_model(lab: Lab) -> None:
+    config = lab.kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.write_text('[publish]\nallow = ["machine"]\n')  # not the project the note was written in
+    result = lab.kb("note", "--kind", "gotcha", "--agent", "Codex", "--machine", "pnpm fails in the sandbox")
+    note = result.stdout.split()[0]
+
+    run_a_week_later(lab)
+    raw = lab.show("ingest/2026-11-08", f"raw/notes/machine/2026/10/{next(lab.inbox.rglob(f'*-{note}.md')).name}")
+
+    assert ('cwd: "~"' in raw.splitlines(), "code/proj" in raw, "code/proj" in str(lab.fake.calls[0])) == (
+        True,
+        False,
+        False,
+    )
+
+
+def test_a_folder_named_machine_outside_git_keeps_its_own_page(lab: Lab) -> None:
+    folder = lab.kb.home / "machine"
+    folder.mkdir()
+    config = lab.kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.write_text('[publish]\nallow = ["~/machine", "machine"]\n')
+    lab.kb("note", "--kind", "gotcha", "--agent", "Codex", "--project", str(folder), "a trap in the folder")
+    lab.kb("note", "--kind", "gotcha", "--agent", "Codex", "--machine", "pnpm fails in the sandbox")
+
+    run_a_week_later(lab)
+    folders = lab.show("ingest/2026-11-08", "wiki/projects/machine.md")
+    machines = lab.show("ingest/2026-11-08", "wiki/machine.md")
+
+    assert ("a trap in the folder" in folders, "pnpm" in folders, "pnpm" in machines) == (True, False, True)
+
+
+def test_a_machine_note_stays_local_unless_machine_is_allowed(lab: Lab) -> None:
+    lab.kb("note", "--kind", "gotcha", "--agent", "Codex", "--machine", "pnpm fails in the sandbox")
+
+    run_a_week_later(lab)
+
+    assert lab.fake.calls == []
+
+
 def test_with_no_project_allowed_it_says_where_to_allow_one(lab: Lab) -> None:
     three_notes(lab)
     config_file({"HOME": str(lab.kb.home), **lab.kb.env}).write_text("")

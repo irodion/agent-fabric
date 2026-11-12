@@ -722,7 +722,7 @@ def test_a_note_already_filed_on_the_wiki_says_to_write_a_new_note_instead_of_re
     assert list(inbox.glob("*.md")) == []
 
 
-def other_repo(kb: Kb) -> Path:
+def other_repo(kb: Kb, origin: str = "git@github.com:me/other.git") -> Path:
     """A repo next to the current folder, with a commit, as a note written from a workspace above it is about."""
     repo = kb.home / "code" / "other"
     (repo / "src").mkdir(parents=True)
@@ -730,7 +730,7 @@ def other_repo(kb: Kb) -> Path:
     env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(kb.home)}
     for args in (
         ["init", "-q", "-b", "main"],
-        ["remote", "add", "origin", "git@github.com:me/other.git"],
+        ["remote", "add", "origin", origin],
         ["add", "-A"],
         ["-c", "user.name=T", "-c", "user.email=t@example.test", "commit", "-q", "-m", "init"],
     ):
@@ -839,3 +839,77 @@ def test_a_missing_ref_is_reported_from_the_folder_under_home_as_tilde(kb: Kb) -
     )
 
     assert ("not found from ~/code/scratch" in result.stderr, str(kb.home) in result.stderr) == (True, False)
+
+
+def test_a_machine_note_is_listed_in_every_project(kb: Kb) -> None:
+    other_repo(kb)
+    _, path = kb(
+        "note", "--kind", "gotcha", "--agent", "Codex", "--machine", "the gh token can't dispatch workflows"
+    ).stdout.split()
+    lines = Path(path).read_text().splitlines()
+    here = kb("inbox").stdout
+    kb.cwd = kb.home / "code" / "other"
+
+    assert (
+        'project: "machine"' in lines,
+        'cwd: "~"' in lines,
+        "branch: null" in lines,
+        "the gh token can't dispatch workflows" in here,
+        "the gh token can't dispatch workflows" in kb("inbox").stdout,
+    ) == (True, True, True, True, True)
+
+
+def test_a_repo_whose_origin_is_machine_is_named_by_its_folder_not_as_the_machine(kb: Kb) -> None:
+    repo = other_repo(kb, origin="machine")
+    kb.cwd = repo
+    _, path = kb("note", "--kind", "gotcha", "--agent", "Codex", "a trap in this repo").stdout.split()
+    lines = Path(path).read_text().splitlines()
+    kb.cwd = kb.home / "code" / "scratch"
+
+    assert (f"project: {json.dumps(str(repo.resolve()))}" in lines, kb("inbox").stdout) == (True, "")
+
+
+def test_the_machines_notes_alone_are_listed_with_project_machine(kb: Kb) -> None:
+    kb("note", "--kind", "gotcha", "--agent", "Codex", "--project", ".", "a trap in this folder")
+    kb("note", "--kind", "gotcha", "--agent", "Codex", "--machine", "pnpm fails in the sandbox")
+    listed = kb("inbox", "--project", "machine").stdout
+
+    assert ("pnpm fails in the sandbox" in listed, "a trap in this folder" in listed) == (True, False)
+
+
+def test_project_machine_lists_the_machines_notes_even_beside_a_folder_called_machine(kb: Kb) -> None:
+    (kb.cwd / "machine").mkdir()
+    kb("note", "--kind", "gotcha", "--agent", "Codex", "--project", "machine", "a trap in the machine folder")
+    kb("note", "--kind", "gotcha", "--agent", "Codex", "--machine", "pnpm fails in the sandbox")
+    listed = kb("inbox", "--project", "machine").stdout
+
+    assert ("pnpm fails in the sandbox" in listed, "a trap in the machine folder" in listed) == (True, False)
+
+
+def test_a_machine_note_with_a_ref_is_refused(kb: Kb) -> None:
+    (kb.cwd / "check.sh").write_text("")
+    result = kb("note", "--kind", "gotcha", "--agent", "Codex", "--machine", "--ref", "check.sh", "pnpm fails")
+
+    assert (result.exit_code, "drop --ref" in result.stderr, list(kb.home.rglob("*.md"))) == (2, True, [])
+
+
+def test_a_machine_note_outside_git_gets_no_advice(kb: Kb) -> None:
+    result = kb("note", "--kind", "gotcha", "--agent", "Codex", "--machine", "pnpm fails in the sandbox")
+
+    assert (result.exit_code, result.stderr) == (0, "")
+
+
+@pytest.mark.parametrize("extra", [["--project", "."], ["--resolve", "n000000"]], ids=["project", "resolve"])
+def test_machine_with_project_or_resolve_is_refused(kb: Kb, extra: list[str]) -> None:
+    kind = [] if extra[0] == "--resolve" else ["--kind", "gotcha"]
+    result = kb("note", *kind, "--agent", "Codex", "--machine", *extra, "pnpm fails in the sandbox")
+
+    assert (result.exit_code, "--machine" in result.stderr) == (2, True)
+
+
+def test_every_projects_notes_are_still_filtered_by_kind(kb: Kb) -> None:
+    kb("note", "--kind", "gotcha", "--agent", "Codex", "--machine", "pnpm fails in the sandbox")
+    kb("note", "--kind", "status", "--agent", "Codex", "the tests fail on main")
+    listed = kb("inbox", "--all-projects", "--kind", "status").stdout
+
+    assert ("the tests fail on main" in listed, "pnpm" in listed) == (True, False)

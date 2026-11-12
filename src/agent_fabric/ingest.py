@@ -28,7 +28,17 @@ from agent_fabric.lint import Finding, findings, lint_tree
 from agent_fabric.lint import render as render_findings
 from agent_fabric.manifests import Manifest, review_list
 from agent_fabric.notes import Note, expired, render
-from agent_fabric.pages import IDEAS, PROJECTS, Page, ideas_page, new_claim, new_idea, page_path, raw_path
+from agent_fabric.pages import (
+    IDEAS,
+    MACHINE_PAGE,
+    PROJECTS,
+    Page,
+    ideas_page,
+    new_claim,
+    new_idea,
+    page_path,
+    raw_path,
+)
 from agent_fabric.paths import config_file, inbox_dir, ingest_worktree, tilde, wiki_dir
 from agent_fabric.secretgate import redact, scan
 from agent_fabric.wikirepo import MAIN, Git, ensure_wiki, open_worktree, publish, ready
@@ -212,6 +222,9 @@ def _index(tree: Git) -> str:
         project = path.relative_to(root).with_suffix("").as_posix()
         claims = len(Page.parse(path.read_text(encoding="utf-8")).live_claims())
         lines.append(f"- [{project}]({relative}): {claims} claims")
+    if (machine := tree.folder / MACHINE_PAGE).exists():
+        claims = len(Page.parse(machine.read_text(encoding="utf-8")).live_claims())
+        lines.append(f"- [This machine]({MACHINE_PAGE}): {claims} claims, in every project")
     if (tree.folder / IDEAS).exists():
         lines.append(f"- [Ideas]({IDEAS}): suggestions, not claims")
     return "\n".join(lines) + "\n"
