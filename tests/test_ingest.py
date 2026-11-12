@@ -527,6 +527,20 @@ def test_a_ref_written_from_a_subfolder_is_found_from_there(lab: Lab) -> None:
     assert f"· anchor: src/app.py@{head} ·" in claim_lines(lab.show("ingest/2026-11-08", PAGE), note)[-1]
 
 
+def test_a_ref_in_a_note_written_from_outside_its_repo_is_checked_in_that_repo(lab: Lab) -> None:
+    lab.kb.cwd = lab.kb.home / "code"
+    result = lab.kb(
+        "note", "--kind", "gotcha", "--agent", "Codex", "--project", "proj", "--ref", "src/app.py",
+        "main returns 1, whatever it was given",
+    )  # fmt: skip
+    head = lab.git("rev-parse", "--short", "HEAD").strip()
+
+    run_a_week_later(lab)
+
+    claim = claim_lines(lab.show("ingest/2026-11-08", PAGE), result.stdout.split()[0])
+    assert f"· anchor: src/app.py@{head} ·" in claim[-1]
+
+
 def test_the_model_is_told_when_a_file_changed_since_the_note(lab: Lab) -> None:
     lab.leave("gotcha", "main returns 1, whatever it was given", "src/app.py")
     lab.commit_in_repo("src/app.py", "def main():\n    return 2\n")

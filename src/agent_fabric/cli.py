@@ -64,6 +64,9 @@ def run_in(argv: list[str], ctx: Context) -> Result:
     note_cmd.add_argument("--agent")
     note_cmd.add_argument("--ref", action="append", default=[])
     note_cmd.add_argument("--resolve", metavar="ID")
+    note_cmd.add_argument(
+        "--project", metavar="FOLDER", help="the folder of the repo the note is about, if not the current one"
+    )
     note_cmd.add_argument("text", nargs="?", default="")
     inbox_cmd = commands.add_parser("inbox")
     inbox_cmd.add_argument("--kind", choices=KINDS)
@@ -138,6 +141,8 @@ def _kind(args: argparse.Namespace, snapshot: Snapshot, inbox: Inbox) -> str | R
         raise UsageError("--resolve needs the id of the note it resolves; `kb inbox` lists the open ones")
     if args.kind is not None:
         raise UsageError("drop --kind: a resolution takes the kind of the note it resolves")
+    if args.project is not None:
+        raise UsageError("drop --project: kb finds the note by its id, wherever it's filed")
     everything = inbox.read(with_done=True)  # a retried resolve may find its note moved to `done/`
     target = everything.find(args.resolve)
     if target is None or target.resolves:
@@ -165,24 +170,37 @@ def _note(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
         raise UsageError(
             f"the note is {len(text)} characters; keep it to {MAX_TEXT} characters and link longer detail with --ref"
         )
-    facts = git_facts(cwd)
+    own = cwd.resolve()  # physical, as `project_id` names a folder for the hooks' markers
+    where = own if args.project is None else _folder(args.project, ctx)
+    facts = git_facts(where)
+
+    def here() -> str:
+        """The session's own project, where its hooks' markers are: not the one the note is about."""
+        return (facts.project or tilde(own, env)) if where == own else project_id(own, env)
+
     try:
-        agent = detect_agent(env, args.agent, lambda: at_work(facts.project or tilde(cwd, env), env, ctx.now))
+        agent = detect_agent(env, args.agent, lambda: at_work(here(), env, ctx.now))
     except AgentUnknown as e:
         raise UsageError(str(e)) from None
-    bases = [cwd, *([facts.root] if facts.root else [])]
+    bases = [where, *([facts.root] if facts.root else [])]
     warnings = [
-        f"kb: warning: --ref {ref}: {missing} not found from {cwd}\n"
+        f"kb: warning: --ref {ref}: {missing} not found from {tilde(where, env)}\n"
         for ref in args.ref
         if (missing := missing_ref(ref, bases))
     ]
+    advice = ""
+    if facts.project is None and not args.resolve and (args.project is None or where != own):
+        advice = (  # `--project .` alone says the folder is meant
+            f"kb: {tilde(where, env)} isn't in git, so the note is filed under that folder. If it's about a repo,"
+            " resolve it and write it again with --project <the repo's folder>.\n"
+        )
     time = ctx.now.astimezone(UTC).replace(microsecond=0)
     note = Note(
         id=new_id(),
         kind=kind,
         agent=agent,
         project=facts.project,
-        cwd=tilde(cwd, env),
+        cwd=tilde(where, env),
         branch=facts.branch,
         commit=facts.commit,
         time=time,
@@ -206,7 +224,7 @@ def _note(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
                 " Inside an agent's sandbox, add that folder to the sandbox's write list (docs/design.md §4.10)."
             )
         return Result(1, "", message + "\n")
-    return Result(0, f"{note.id} {path}\n", "".join(warnings))
+    return Result(0, f"{note.id} {path}\n", "".join(warnings) + advice)
 
 
 def _hooks(value: str) -> tuple[str, ...]:
@@ -251,6 +269,15 @@ def _inbox(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
     entries = "\n".join(_entry(note, ctx.now, resolved_by.get(note.id), note.id in moved) for note in notes)
     marker = f"kb-notes-{secrets.token_hex(8)}"  # new on each run, so a note can't write the closing one
     return Result(0, f"{UNTRUSTED.format(marker=marker)}\n<{marker}>\n{entries}</{marker}>\n", "")
+
+
+def _folder(value: str, ctx: Context) -> Path:
+    """`kb note --project`: an existing folder, by its physical path as the system gives `kb note` its own. Not an
+    id, so that a mistyped one can't file a note under a project nobody reads."""
+    folder = (ctx.cwd / expand(value, ctx.env)).resolve()
+    if not folder.is_dir():
+        raise UsageError(f"--project {value}: no such folder; give the folder of the repo the note is about")
+    return folder
 
 
 def _project(value: str, ctx: Context) -> str:

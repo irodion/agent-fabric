@@ -718,7 +718,7 @@ command and a skill that says when to use it. Neither needs agentsview or fabric
 `kb` reads it.
 
 ```text
-kb note --kind <status|gotcha|fix|decision|idea> [--ref R]... [--agent NAME] "text"
+kb note --kind <status|gotcha|fix|decision|idea> [--ref R]... [--agent NAME] [--project FOLDER] "text"
 kb note --kind <kind> [--ref R]... - <<'EOF'     # text on stdin: quotes, backticks and $ need no escaping
 kb note --resolve <id> ["what changed"]
 ```
@@ -781,6 +781,15 @@ The kind says what the next agent should do with the note, and decides how long 
     started in `~` would sign notes in every folder under it outside git.
   - A Cursor CLI session with several roots (`--add-dir`) counts only for its first, where its reminder counts notes
     too.
+- **`--project <folder>`**: the repo the note is about, when it isn't the current folder's. The note is written as
+  if from that folder: its project, branch, commit and `cwd` are that folder's, and its refs are checked there, by
+  `kb note` now and by ingest later. The markers are still read where the session runs, since they say who is at
+  work there. It takes a folder that exists, not a project id, so a mistyped id can't file a note under a project
+  nobody reads. A note filed under a folder outside git, given or not, gets advice on stderr to resolve it and write
+  it again with `--project` if it's about a repo; only `--project .` files it there without that advice. A
+  resolution takes no `--project`: `kb` finds the note by its id wherever either is filed, and the note counts as
+  resolved in every project. In a real inbox, 4 of the first 43 notes were about a repo but written from a workspace
+  above it, outside git, so none reached that repo's sessions (2026-11-12).
 - **`--resolve <id>`** closes an earlier note, usually a `status` once the tests pass again. It writes a new note
   that points at the old one, so the inbox stays append-only; resolved notes drop out of `kb inbox` and
   `kb catchup`. A note already filed on the wiki can't be resolved: what's true now goes in a new note, which ingest
@@ -1221,5 +1230,23 @@ Open (2026-11-04):
 - Which decision model passes §10 on each machine. The candidates' published scores are their authors' own.
 - Digests in ingest. A digest isn't a claim, so filing its text as one won't carry over (§4.7).
 - What `kb prune` runs on after `codex`, since it needs a model that writes.
+
+Open (2026-11-12), from the first ten days of a real inbox: 43 notes in four projects. The notes were specific and
+checkable, only one was filler, and 9 resolved an earlier one, two of them correcting it with new measurements.
+Decided: a note about another repo names it with `kb note --project` (§4.10). Open (§4.10):
+
+- Whether notes reach other agents. 41 of the 43 were Claude Code's, every resolution was too, and nothing records
+  a read. A few real work sessions of Codex and Copilot CLI in a project with open notes settle it: whether they run
+  `kb inbox`, act on a note and leave their own (§10). Until then the inbox is shown to work as one agent's
+  memory across sessions, not yet across agents.
+- Facts about the machine, not the project: what the GitHub token can't do, a tool that fails in the sandbox. They
+  hold in every project, but a note shows only in the one where it was found, so the next project finds it again.
+  Options: a note with no project, which `kb inbox` lists everywhere; or ingest filing such claims on a page for the
+  machine, which agents can't read at start until `kb catchup` exists (§4.9).
+- Open notes piling up before ingest. One project reached 17 open notes within a week, and the start hook tells
+  every session there to read them all. Some were `status` notes for releases and deployments that the repo's own
+  handoff file also recorded, and they stay until resolved. Whether ingest should also run once a project passes a
+  number of open notes, not only weekly; and whether the skill should say that lasting state goes in the repo's docs,
+  with the note resolved once it's there.
 
 The phase 0 spike (§9) settles the remaining unknowns.
