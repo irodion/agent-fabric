@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+from collections import Counter
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,7 +16,7 @@ from typing import Any, NamedTuple
 from agent_fabric.context import Context
 from agent_fabric.gitinfo import project_id
 from agent_fabric.inbox import Inbox
-from agent_fabric.notes import MACHINE
+from agent_fabric.notes import MACHINE, Note
 from agent_fabric.paths import hooks_dir, inbox_dir
 from agent_fabric.sandboxes import replace_file
 
@@ -80,24 +81,50 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
     if marker:
         with contextlib.suppress(OSError):
             _name_project(marker, project, ctx.now)
-    # An idea says nothing about the repo's state, which is what the reminder asks the agent to check.
-    state_notes = [note for _, note in inbox.read().open() if note.kind != "idea"]
-    count = sum(note.scope == project for note in state_notes)
-    machine = sum(note.scope == MACHINE for note in state_notes)
-    named = _named(project)
-    here = f"{count} open note{'s' if count > 1 else ''}" if count else "no open notes"
-    also = (f" and {machine}" if count else f", but {machine}") + " for this machine" if machine else ""
-    relying = "the repo's state" if count else "the machine's setup"
-    found = (
-        f"kb: {here} from earlier sessions for {named}{also}, unchecked. Run `kb inbox` before relying on {relying}."
-        if count or machine
-        else f"kb: no open notes from earlier sessions for {named}."
-    )
+    found = _reminder(project, [note for _, note in inbox.read().open()])
     advice = (
         "Most sessions need no note. Leave one with `kb note` (skill kb-note) only when you find something the next "
         "agent must know."
     )
     return _context(agent, f"{found} {advice}")
+
+
+def _reminder(project: str, notes: list[Note]) -> str:
+    """What the start hook says of the open notes. Only a `status` note says what state the repo or the machine is in,
+    so only those are a reason to check before relying on it; the other kinds wait for the wiki (§4.10). An idea is
+    left out: an agent always has one."""
+    counts = Counter((note.kind == "status", note.scope) for note in notes if note.kind != "idea")
+    here, machine = counts[True, project], counts[True, MACHINE]
+    mine, theirs = counts[False, project], counts[False, MACHINE]
+    named = _named(project)
+    if here or machine:
+        relying = " or ".join(text for text, n in (("the repo's state", here), ("the machine's setup", machine)) if n)
+        found = (
+            f"kb: {_counted(here + machine, 'status note')} from earlier sessions {_whose(here, machine, named)},"
+            f" unchecked: run `kb inbox` before relying on {relying}."
+        )
+    elif mine or theirs:
+        found = f"kb: no status notes from earlier sessions for {named}."
+    else:
+        return f"kb: no open notes from earlier sessions for {named}."
+    if not (mine or theirs):
+        return found
+    lists = "It also lists" if here or machine else "`kb inbox` lists"
+    return (
+        f"{found} {lists} {_counted(mine + theirs, 'note')} on gotchas, fixes and decisions"
+        f" {_whose(mine, theirs, named)}: read the ones about what you work on."
+    )
+
+
+def _whose(here: int, machine: int, named: str) -> str:
+    """Whose the counted notes are, naming the project in every case: the reminder carries its id (§4.10)."""
+    if here and machine:
+        return f"for {named}, {machine} of them for this machine"
+    return f"for this machine, none for {named}" if machine else f"for {named}"
+
+
+def _counted(n: int, thing: str) -> str:
+    return f"{n} {thing}{'' if n == 1 else 's'}"
 
 
 def stop(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any] | None:
