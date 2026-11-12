@@ -84,7 +84,12 @@ def test_a_path_ref_that_does_not_exist_is_kept_with_a_warning(kb: Kb) -> None:
     ids=["command", "url", "commit", "error", "dotted-name", "function", "module", "host", "version", "git-ref"],
 )
 def test_refs_that_are_not_paths_get_no_warning(kb: Kb, ref: str) -> None:
-    assert kb("note", "--kind", "fix", "--agent", "Codex", "--ref", ref, "the fixture needs a socket").stderr == ""
+    assert (
+        kb(
+            "note", "--kind", "fix", "--agent", "Codex", "--project", ".", "--ref", ref, "the fixture needs a socket"
+        ).stderr
+        == ""
+    )
 
 
 CLAUDE_CODE_ENV = {
@@ -656,7 +661,12 @@ def test_refs_to_files_that_exist_get_no_warning(kb: Kb, ref: str) -> None:
     (kb.cwd / "tests" / "test_client.py").touch()
     (kb.cwd / "README.md").touch()
 
-    assert kb("note", "--kind", "fix", "--agent", "Codex", "--ref", ref, "the fixture needs a socket").stderr == ""
+    assert (
+        kb(
+            "note", "--kind", "fix", "--agent", "Codex", "--project", ".", "--ref", ref, "the fixture needs a socket"
+        ).stderr
+        == ""
+    )
 
 
 def test_a_missing_file_name_gets_a_warning(kb: Kb) -> None:
@@ -710,3 +720,122 @@ def test_a_note_already_filed_on_the_wiki_says_to_write_a_new_note_instead_of_re
     assert result.exit_code == 2
     assert "new note" in result.stderr
     assert list(inbox.glob("*.md")) == []
+
+
+def other_repo(kb: Kb) -> Path:
+    """A repo next to the current folder, with a commit, as a note written from a workspace above it is about."""
+    repo = kb.home / "code" / "other"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("print('hi')\n")
+    env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(kb.home)}
+    for args in (
+        ["init", "-q", "-b", "main"],
+        ["remote", "add", "origin", "git@github.com:me/other.git"],
+        ["add", "-A"],
+        ["-c", "user.name=T", "-c", "user.email=t@example.test", "commit", "-q", "-m", "init"],
+    ):
+        subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True)
+    return repo
+
+
+def test_a_note_given_another_repos_folder_is_filed_under_that_repo(kb: Kb) -> None:
+    repo = other_repo(kb)
+    _, path = kb(
+        "note", "--kind", "gotcha", "--agent", "Codex", "--project", "../other", "the bench needs lean.py build"
+    ).stdout.split()
+    lines = Path(path).read_text().splitlines()
+    here = kb("inbox").stdout
+    kb.cwd = repo
+
+    assert (
+        'project: "github.com/me/other"' in lines,
+        'cwd: "~/code/other"' in lines,
+        'branch: "main"' in lines,
+        "the bench needs lean.py build" in kb("inbox").stdout,
+        here,
+    ) == (True, True, True, True, "")
+
+
+def test_a_ref_is_checked_from_the_project_folder_given(kb: Kb) -> None:
+    other_repo(kb)
+    result = kb(
+        "note", "--kind", "gotcha", "--agent", "Codex", "--project", "~/code/other", "--ref", "src/app.py:1",
+        "app.py prints on import",
+    )  # fmt: skip
+
+    assert (result.exit_code, "--ref" in result.stderr) == (0, False)
+
+
+def test_a_project_folder_that_does_not_exist_is_refused(kb: Kb) -> None:
+    result = kb("note", "--kind", "gotcha", "--agent", "Codex", "--project", "../nowhere", "a trap")
+
+    assert (result.exit_code, "../nowhere" in result.stderr, list(kb.home.glob("**/inbox/*.md"))) == (2, True, [])
+
+
+def test_a_note_outside_git_says_how_to_file_it_under_a_repo_and_its_resolution_does_not(kb: Kb) -> None:
+    result = kb("note", "--kind", "status", "--agent", "Codex", "integration tests fail on main")
+    resolution = kb("note", "--agent", "Codex", "--resolve", result.stdout.split()[0], "they pass")
+
+    assert (result.exit_code, "--project" in result.stderr, resolution.stderr) == (0, True, "")
+
+
+def test_a_project_folder_outside_git_gets_the_advice_too(kb: Kb) -> None:
+    (kb.home / "code" / "workspace").mkdir()
+    result = kb("note", "--kind", "gotcha", "--agent", "Codex", "--project", "../workspace", "a trap")
+
+    assert (result.exit_code, "~/code/workspace isn't in git" in result.stderr) == (0, True)
+
+
+def test_a_resolution_given_a_project_is_refused(kb: Kb) -> None:
+    other_repo(kb)
+    broken = note_id(kb, "integration tests fail on main", kind="status")
+    result = kb("note", "--agent", "Codex", "--resolve", broken, "--project", "../other", "they pass")
+
+    assert (result.exit_code, "--project" in result.stderr, "integration tests" in kb("inbox").stdout) == (
+        2,
+        True,
+        True,
+    )
+
+
+def test_a_note_filed_under_its_folder_on_purpose_gets_no_advice(kb: Kb) -> None:
+    result = kb("note", "--kind", "gotcha", "--agent", "Codex", "--project", ".", "a trap")
+    lines = Path(result.stdout.split()[1]).read_text().splitlines()
+
+    assert (result.stderr, "project: null" in lines, 'cwd: "~/code/scratch"' in lines) == ("", True, True)
+
+
+def test_the_marker_of_the_session_signs_a_note_about_another_repo(kb: Kb) -> None:
+    """The marker says who is at work where the session runs, not in the repo the note is about."""
+    other_repo(kb)
+    hook_ran(kb, "copilot")
+
+    assert agent_line(kb, "--project", "../other") == 'agent: {"name": "Copilot CLI", "from": "hook"}'
+
+
+def test_a_repeated_note_outside_git_gets_no_advice_since_nothing_was_written(kb: Kb) -> None:
+    kb("note", "--kind", "gotcha", "--agent", "Codex", "a trap")
+
+    assert kb("note", "--kind", "gotcha", "--agent", "Codex", "a trap").stderr == ""
+
+
+def test_a_session_in_a_symlinked_folder_is_known_by_its_marker_with_or_without_project_dot(kb: Kb) -> None:
+    """The marker names the physical folder, so the note must look there whichever way the folder was given."""
+    hook_ran(kb, "copilot")
+    link = kb.home / "code" / "link"
+    link.symlink_to(kb.cwd)
+    kb.cwd = link
+
+    assert (agent_line(kb), agent_line(kb, "--project", ".")) == (
+        'agent: {"name": "Copilot CLI", "from": "hook"}',
+        'agent: {"name": "Copilot CLI", "from": "hook"}',
+    )
+
+
+def test_a_missing_ref_is_reported_from_the_folder_under_home_as_tilde(kb: Kb) -> None:
+    (kb.cwd / "tests").mkdir()
+    result = kb(
+        "note", "--kind", "fix", "--agent", "Codex", "--ref", "tests/missing.py", "the fixture needs a socket"
+    )
+
+    assert ("not found from ~/code/scratch" in result.stderr, str(kb.home) in result.stderr) == (True, False)
