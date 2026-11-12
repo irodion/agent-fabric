@@ -13,7 +13,7 @@ from agent_fabric.decisions import words
 from agent_fabric.evidence import checkout
 from agent_fabric.inbox import Inbox
 from agent_fabric.notes import STALE_AFTER, Note, parse
-from agent_fabric.pages import PROJECTS, Claim, Page
+from agent_fabric.pages import MACHINE_PAGE, PROJECTS, Claim, Page
 from agent_fabric.paths import inbox_dir, tilde, wiki_dir
 from agent_fabric.report import value
 
@@ -120,7 +120,8 @@ def lint_tree(folder: Path, env: Mapping[str, str]) -> list[Finding]:
     raw = _raw_notes(folder)
     listed = set(LINK.findall(index_text))
     root = folder / PROJECTS
-    for file in sorted(root.rglob("*.md")) if root.is_dir() else []:
+    pages = sorted(root.rglob("*.md")) if root.is_dir() else []
+    for file in [*pages, *[machine for machine in [folder / MACHINE_PAGE] if machine.exists()]]:
         found += _page_findings(folder, file, raw, env)
         path = file.relative_to(folder).as_posix()
         if path not in listed:

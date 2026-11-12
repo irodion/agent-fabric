@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import toon_format
-from conftest import PAGE, Kb, Lab
+from conftest import PAGE, PROJECT, Kb, Lab
 
 
 def findings(kb: Kb) -> list[dict[str, Any]]:
@@ -57,6 +57,20 @@ def test_a_wiki_as_ingest_built_it_has_no_findings(lab: Lab) -> None:
 
     assert result.exit_code == 0, result.stdout
     assert findings(lab.kb) == []
+
+
+def test_the_machines_page_is_linted_like_a_projects(lab: Lab) -> None:
+    config = lab.kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.write_text(f'[publish]\nallow = ["{PROJECT}", "machine"]\n')
+    note = lab.kb("note", "--kind", "gotcha", "--agent", "Codex", "--machine", "pnpm fails").stdout.split()[0]
+    lab.kb.later(days=8)  # a note this old gets a run by itself
+    assert lab.kb("ingest").exit_code == 0
+    lab.merge("ingest/2026-11-08")
+    next((lab.wiki / "raw").rglob(f"*-{note}.md")).unlink()
+
+    result = lab.kb("lint")
+
+    assert (result.exit_code, checks(lab.kb)) == (1, [("error", "missing-note")])
 
 
 def test_a_claim_citing_a_note_that_is_missing_is_an_error(lab: Lab) -> None:

@@ -56,6 +56,30 @@ def test_start_hook_tells_claude_code_how_many_notes_are_open_here(kb: Kb) -> No
     )
 
 
+def test_start_hook_counts_the_machines_notes_apart_from_the_projects(kb: Kb) -> None:
+    kb("note", "--agent", "Codex", "--kind", "status", "the tests fail on main")
+    kb("note", "--agent", "Codex", "--kind", "gotcha", "--machine", "pnpm fails in the sandbox")
+    kb("note", "--agent", "Codex", "--kind", "fix", "--machine", "uv needs --cache-dir in the sandbox")
+    kb("note", "--agent", "Codex", "--kind", "idea", "--machine", "kb doctor could check pnpm")
+
+    result = kb("hook", "start", "--agent", "claude-code", stdin=start_input(kb))
+
+    assert json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"] == (
+        "kb: 1 open note from earlier sessions for ~/code/scratch and 2 for this machine, unchecked. " + REMINDER
+    )
+
+
+def test_start_hook_names_the_machines_notes_when_the_project_has_none(kb: Kb) -> None:
+    kb("note", "--agent", "Codex", "--kind", "gotcha", "--machine", "pnpm fails in the sandbox")
+
+    result = kb("hook", "start", "--agent", "claude-code", stdin=start_input(kb))
+
+    assert json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"] == (
+        "kb: no open notes from earlier sessions for ~/code/scratch, but 1 for this machine, unchecked. "
+        + REMINDER.replace("the repo's state", "the machine's setup")
+    )
+
+
 @pytest.mark.parametrize(
     ("agent", "key"),
     [("codex", "hookSpecificOutput"), ("copilot", "additionalContext"), ("cursor", "additional_context")],

@@ -47,10 +47,11 @@ def _in_work_tree(cwd: Path) -> bool:
 
 
 def _project(cwd: Path) -> str | None:
-    """The remote `origin`, normalised; without one, the folder that holds the repo's .git."""
+    """The remote `origin`, normalised; without one, the folder that holds the repo's .git. So is a relative origin
+    with no `/`, such as `machine`: every project id has one, which keeps them apart from `notes.MACHINE`."""
     remote = _git(cwd, "remote", "get-url", "origin")
-    if remote:
-        return normalise_remote(remote)
+    if remote and "/" in (normalised := normalise_remote(remote)):
+        return normalised
     common = _git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
     return str(Path(common).parent) if common else None
 

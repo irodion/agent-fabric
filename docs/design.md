@@ -718,7 +718,7 @@ command and a skill that says when to use it. Neither needs agentsview or fabric
 `kb` reads it.
 
 ```text
-kb note --kind <status|gotcha|fix|decision|idea> [--ref R]... [--agent NAME] [--project FOLDER] "text"
+kb note --kind <status|gotcha|fix|decision|idea> [--ref R]... [--agent NAME] [--project FOLDER | --machine] "text"
 kb note --kind <kind> [--ref R]... - <<'EOF'     # text on stdin: quotes, backticks and $ need no escaping
 kb note --resolve <id> ["what changed"]
 ```
@@ -790,6 +790,18 @@ The kind says what the next agent should do with the note, and decides how long 
   resolution takes no `--project`: `kb` finds the note by its id wherever either is filed, and the note counts as
   resolved in every project. In a real inbox, 4 of the first 43 notes were about a repo but written from a workspace
   above it, outside git, so none reached that repo's sessions (2026-11-12).
+- **`--machine`**: the note holds on this machine in every project, such as what the GitHub token may do or a tool
+  that fails in the sandbox. Its project is `machine`, which no project id `kb` makes can be, since those all have a
+  `/` (a repo whose origin is a relative path without one, such as `machine`, is named by its folder), so the format
+  stays `fabric.note/1` and an older `kb` reads it as one more project. It has no branch or commit, and its cwd is
+  `~`: the folder it was written in would name a project that may not be on the allow list. It takes no `--ref`, as a
+  path means something else in each project where it's read, so the evidence goes in the text. `kb inbox` lists the
+  machine's notes in every project with the project's own, and `kb inbox --project machine` lists them alone, even
+  beside a folder called `machine`. The start hook counts them apart: "2 open notes … for <project> and 1 for this
+  machine". Ingest takes them only once `machine` is on the allow list (§4.5), and files them on `wiki/machine.md`,
+  outside `wiki/projects`, where a folder outside git called `machine` would get the same page. In a real inbox, five
+  of the first 43 notes were about the machine and sat in one project's notes, where the next project couldn't see
+  them (2026-11-12). A resolution takes neither flag.
 - **`--resolve <id>`** closes an earlier note, usually a `status` once the tests pass again. It writes a new note
   that points at the old one, so the inbox stays append-only; resolved notes drop out of `kb inbox` and
   `kb catchup`. A note already filed on the wiki can't be resolved: what's true now goes in a new note, which ingest
@@ -1026,7 +1038,9 @@ mypy and pytest on Python 3.13 and 3.14).
   note can't get `~/.ssh` or an untracked file sent. The `local` backend sends nothing off the machine.
 - Agent notes (§4.10) can carry a prompt injection from whatever the agent read. They are labelled untrusted, never
   injected into prompts (the start hook gives only their count and the project id), and reach the wiki only through
-  reviewed ingest. The inbox is writable from the agents'
+  reviewed ingest. A note filed with `--machine` is listed in every project's sessions, so text written in one
+  project reaches agents working in all the others, still under the untrusted header. The inbox is writable from the
+  agents'
   sandboxes, so a note is not tamper-proof; that is acceptable for advice that is checked before it becomes canon.
   Content screening doesn't catch a plain false note (arXiv 2608.21230: it refused 0 of 360), so the ref evidence and
   my review are the defence, and nobody has measured how well that works.
@@ -1233,16 +1247,13 @@ Open (2026-11-04):
 
 Open (2026-11-12), from the first ten days of a real inbox: 43 notes in four projects. The notes were specific and
 checkable, only one was filler, and 9 resolved an earlier one, two of them correcting it with new measurements.
-Decided: a note about another repo names it with `kb note --project` (§4.10). Open (§4.10):
+Decided: a note about another repo names it with `kb note --project`, and a fact about the machine is filed for
+every project with `kb note --machine` (§4.10). Open (§4.10):
 
 - Whether notes reach other agents. 41 of the 43 were Claude Code's, every resolution was too, and nothing records
   a read. A few real work sessions of Codex and Copilot CLI in a project with open notes settle it: whether they run
   `kb inbox`, act on a note and leave their own (§10). Until then the inbox is shown to work as one agent's
   memory across sessions, not yet across agents.
-- Facts about the machine, not the project: what the GitHub token can't do, a tool that fails in the sandbox. They
-  hold in every project, but a note shows only in the one where it was found, so the next project finds it again.
-  Options: a note with no project, which `kb inbox` lists everywhere; or ingest filing such claims on a page for the
-  machine, which agents can't read at start until `kb catchup` exists (§4.9).
 - Open notes piling up before ingest. One project reached 17 open notes within a week, and the start hook tells
   every session there to read them all. Some were `status` notes for releases and deployments that the repo's own
   handoff file also recorded, and they stay until resolved. Whether ingest should also run once a project passes a

@@ -15,6 +15,7 @@ from typing import Any, NamedTuple
 from agent_fabric.context import Context
 from agent_fabric.gitinfo import project_id
 from agent_fabric.inbox import Inbox
+from agent_fabric.notes import MACHINE
 from agent_fabric.paths import hooks_dir, inbox_dir
 from agent_fabric.sandboxes import replace_file
 
@@ -80,14 +81,16 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
         with contextlib.suppress(OSError):
             _name_project(marker, project, ctx.now)
     # An idea says nothing about the repo's state, which is what the reminder asks the agent to check.
-    state_notes = [note for _, note in inbox.read().open() if note.scope == project and note.kind != "idea"]
-    count = len(state_notes)
+    state_notes = [note for _, note in inbox.read().open() if note.kind != "idea"]
+    count = sum(note.scope == project for note in state_notes)
+    machine = sum(note.scope == MACHINE for note in state_notes)
     named = _named(project)
+    here = f"{count} open note{'s' if count > 1 else ''}" if count else "no open notes"
+    also = (f" and {machine}" if count else f", but {machine}") + " for this machine" if machine else ""
+    relying = "the repo's state" if count else "the machine's setup"
     found = (
-        f"kb: {count} open note{'s' if count > 1 else ''} from earlier sessions for {named}, unchecked. "
-        "Run `kb inbox` before relying on "
-        "the repo's state."
-        if count
+        f"kb: {here} from earlier sessions for {named}{also}, unchecked. Run `kb inbox` before relying on {relying}."
+        if count or machine
         else f"kb: no open notes from earlier sessions for {named}."
     )
     advice = (

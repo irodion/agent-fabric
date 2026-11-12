@@ -17,6 +17,9 @@ KINDS = ("status", "gotcha", "fix", "decision", "idea")
 MAX_TEXT = 500
 STALE_AFTER = timedelta(days=14)  # a `status` note this old may no longer hold
 IDEA_EXPIRES = timedelta(days=30)  # an idea nobody took up in this long is dropped, not filed
+# The project of a note that holds on this machine in every project (`kb note --machine`). Not a project id `kb`
+# makes: those are a remote's host and path, or a folder, and both have a "/".
+MACHINE = "machine"
 ID = re.compile(r"n[0-9a-f]{6}")
 
 
@@ -38,6 +41,10 @@ class Note:
     def scope(self) -> str:
         """The project a note belongs to: its project id, or outside git the folder it was written in."""
         return self.project or self.cwd
+
+    def holds_in(self, project: str) -> bool:
+        """Whether the note bears on this project: its own notes, and the machine's, which hold in every one."""
+        return self.scope in (project, MACHINE)
 
     @property
     def filename(self) -> str:
