@@ -7,6 +7,8 @@ import pytest
 import toon_format
 from conftest import Kb, Lab, a_stub
 
+from agent_fabric import timer
+
 UNITS = Path(".config") / "systemd" / "user"
 DAILY = "runs kb ingest daily at 03:00"
 
@@ -337,9 +339,13 @@ def test_a_timer_disabled_without_now_still_fires_and_doctor_says_how_to_stop_it
     assert "Run systemctl --user stop fabric-ingest.timer, or tonight's run still happens" in steps(lab.kb)
 
 
-def test_a_unit_whose_saved_path_lost_node_is_outdated(lab: Lab, tmp_path: Path) -> None:
+def test_a_unit_whose_saved_path_lost_node_is_outdated(
+    lab: Lab, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(timer, "BASE_PATH", ())  # a machine's own node, as on CI, would still be found there
     node = a_stub(tmp_path / "old-node", "node", "#!/bin/sh\n")
-    lab.kb.env["PATH"] = f"{tmp_path / 'stubs'}:{node.parent}:/usr/bin:/bin"
+    git = a_stub(tmp_path / "git-only", "git", "#!/bin/sh\n").parent  # the folder of git, and nothing else
+    lab.kb.env["PATH"] = f"{tmp_path / 'stubs'}:{node.parent}:{git}"
     lab.kb("doctor", "--fix")
     node.unlink()  # as when nvm removes a version
     lab.kb.env["PATH"] = f"{a_stub(tmp_path / 'new-node', 'node', '#!/bin/sh\n').parent}:{lab.kb.env['PATH']}"
@@ -392,3 +398,17 @@ def test_a_first_install_systemd_would_not_turn_on_is_removed_so_fix_tries_again
     (lab.kb.home / "systemctl" / "cannot-enable").unlink()
 
     assert timer_rows(lab.kb, "--fix") == [("fixed", DAILY)]
+
+
+def test_a_masked_service_whose_timer_still_fires_is_a_problem(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    service = lab.kb.home / UNITS / "fabric-ingest.service"
+    service.unlink()
+    service.symlink_to("/dev/null")
+
+    assert timer_rows(lab.kb, "--fix") == [("problem", "the service is masked, but the timer still fires it")]
+    assert service.is_symlink()
+
+    systemd_state(lab.kb, "stopped")
+
+    assert timer_rows(lab.kb)[0][1].startswith("turned off (masked)")
