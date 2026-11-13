@@ -799,8 +799,8 @@ The kind says what the next agent should do with the note, and decides how long 
   A marker says who ran in the project lately, not who is calling, and these limits are accepted for now, since a
   wrong name on a note is a small error and `(from hook)` in `kb inbox` shows which notes it can touch:
   - A note written by hand, or by an agent `kb` doesn't know, in a project where Copilot CLI or Cursor CLI ran in the
-    last 8 hours is signed with that agent, whatever other name its `--agent` gives. Sibling clones of a repo share
-    a project, and so its markers.
+    last 8 hours is signed with that agent, whatever other name its `--agent` gives. Sibling clones of a repo in one
+    workspace share a project, and so its markers; clones in two workspaces don't (§4.11).
   - After 8 hours with no hook, a session's marker no longer counts, and the model's `--agent` does, until its next
     hook: no hook runs at the start of a turn. That means idle time, a single turn longer than that, or with
     `--hooks start` any session past 8 hours. With `--hooks stop` there's no marker during the first turn.
@@ -938,13 +938,14 @@ kb hook stop --agent <claude-code|codex|copilot|cursor>    # end of a turn: the 
   an interactive session (2026-11-02). A `-p` turn and two interactive ones logged two stop hooks, which fits `-p`
   running none (2026-11-03).
 - **Markers.** One per session in `~/.local/share/agent-fabric/hooks/` records when the session started, when it was
-  last asked (`asked_at`; a marker from before it counts as asked at its next hook), whether it has compacted since,
-  and its project. The file's own time says when a hook last ran, which tells `kb note` who is at work (above) and
-  `kb doctor` whether the hooks run. Markers no hook has run for in 7 days are removed. Where a marker can't be
-  written, the stop hook stays silent rather than ask every turn. Each end of a turn looks the project up again, so
-  the marker follows a session that runs `git init` or moves (a few milliseconds; where git hangs, the turn waits up
-  to the hook's 10 seconds). The end of a turn that asks doesn't, since a hanging git would stop the question ever
-  being asked, so a note answering it can still meet the old project, or none with `--hooks stop`.
+  last asked (`asked_at`; a marker from before it counts as asked at its next hook), whether it has compacted since, and
+  its workspace and project, since one repo cloned into two workspaces has one project id (§4.11); a marker from before
+  v0.7 counts for the default workspace. The file's own time says when a hook last ran, which tells `kb note` who is at
+  work (above) and `kb doctor` whether the hooks run. Markers no hook has run for in 7 days are removed. Where a marker
+  can't be written, the stop hook stays silent rather than ask every turn. Each end of a turn looks the workspace and
+  project up again, so the marker follows a session that runs `git init` or moves (a few milliseconds; where git hangs,
+  the turn waits up to the hook's 10 seconds). The end of a turn that asks doesn't, since a hanging git would stop the
+  question ever being asked, so a note answering it can still meet the old project, or none with `--hooks stop`.
 - **Never in the way.** Any error, such as unreadable input or a missing inbox, prints nothing and exits 0, and
   each hook entry has a 10-second timeout: a session never fails or waits because of `kb`.
 
@@ -1147,7 +1148,7 @@ and notes don't load it.
 | `fabricd.service` | tracker, observer, digester, panel | 127.0.0.1:8090 |
 | `llama-panel.service` | `llama-server` with E4B | 127.0.0.1:8091 |
 | `fabric-ingest@<workspace>.timer` | `kb ingest --workspace <workspace>` daily at 03:00, one instance per workspace (`default`, or the root's escaped path, which the unit passes back as the root), each on its own backend: `codex` by default, another agent's CLI, or later `local` (which starts a llama-server on 8092), §4.7. One unit per workspace keeps their locks, failures and last runs apart, so a locked or failing workspace hides nothing about the others, and `kb doctor` reads each from systemd. The run's gate decides whether there's work and a run adds to the branch waiting for review, so a daily run costs no more than a weekly one and review stays weekly. `Persistent=true`, so a machine asleep at 03:00 runs it on waking. `kb doctor --fix` writes a workspace's instance once a project is allowed there, with a `PATH` of the folders of the tools ingest runs, its backend's CLI and node, since a unit gets none of a shell's (codex lives under nvm), and the shell's `XDG_*_HOME` and its backend's home variable (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`), and removes the instance of a workspace that's gone. It replaces the `fabric-ingest.timer` and `.service` of v0.6 with the `default` instance, which starts disabled or masked if the old timer was. That `PATH` depends on the shell, so a unit counts as current while its own still finds the tools. A run that finds another holding ingest's lock exits 75, which the unit counts as a success, and a timer the user disabled or masked stays off, even when `--fix` rewrites its units. `kb doctor` asks systemd whether it's on and running and how its last run went, which needs no marker: a reboot forgets a failure, and the next failed run shows it again | — |
-| `fabric-prune@<workspace>.timer` | `kb prune` weekly, per workspace, which writes only when a page meets its trigger (§4.7; `kb lint` runs in `kb ingest`, before its gate) | — |
+| `fabric-prune@<workspace>.timer` | `kb prune --workspace <workspace>` weekly, one instance per workspace as for ingest, which writes only when a page meets its trigger (§4.7; `kb lint` runs in `kb ingest`, before its gate) | — |
 | `fabric-backup.timer` | daily SQLite backup of agentsview archive and `state.db`, and of every workspace's inbox and a `git bundle` of its wiki, which has no remote | — |
 
 | Path | Contents | In git |
