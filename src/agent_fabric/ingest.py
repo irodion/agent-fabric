@@ -26,7 +26,7 @@ from agent_fabric.evidence import gather
 from agent_fabric.inbox import Inbox, Snapshot
 from agent_fabric.lint import Finding, findings, lint_tree
 from agent_fabric.lint import render as render_findings
-from agent_fabric.manifests import Manifest, review_list
+from agent_fabric.manifests import Manifest, context_candidates, review_list
 from agent_fabric.notes import Note, expired, render
 from agent_fabric.pages import (
     IDEAS,
@@ -47,6 +47,7 @@ KINDS = ("gotcha", "fix", "decision", "idea")  # what a run takes; an idea skips
 MIN_NOTES = 3
 MAX_WAIT = timedelta(days=7)
 FILED = ("add", "extend", "supersede", "conflict")  # the actions that put a claim on a page
+CURRENT = tuple(action for action in FILED if action != "conflict")  # those that file the claim that holds now
 OUTCOMES = (*FILED, "idea", "duplicate", "skip", "failed")
 
 
@@ -184,6 +185,17 @@ def _idea(tree: Git, clean: Note, ctx: Context) -> dict[str, object]:
     return {"action": "idea", "text": clean.text}
 
 
+def _context(note: Note, decision: Decision, answers: Mapping[str, str]) -> str | None:
+    """The project, or `machine`, whose instructions a note every session needs belongs in, for me to add by hand:
+    the review list says where. kb never edits instructions (design §4.7,
+    step 8). Only for a note filed as the current claim: not one dropped, a duplicate of a claim or of the project's
+    docs, or a conflict, whose fact is in dispute. A note written outside git has no repo whose AGENTS.md could hold
+    it."""
+    if answers.get("context") != "yes" or decision.action not in CURRENT or note.project is None:
+        return None
+    return note.project
+
+
 def _work_on(backend: Backend, tree: Git, note: Note, ctx: Context) -> dict[str, object]:
     """Steps 3 to 6 for one note: what became of it, for the manifest."""
     if not _readable(note):
@@ -212,12 +224,14 @@ def _work_on(backend: Backend, tree: Git, note: Note, ctx: Context) -> dict[str,
         "unchecked": [redact(ref.ref) for ref in evidence.refs if ref.unchecked],
         "withheld": [redact(ref.path) for ref in evidence.refs if ref.withheld and ref.path],
     }
+    where = _context(clean, decision, answers)
     return {
         "action": decision.action,
         "answers": answers,
         "targets": list(decision.targets),
         "text": clean.text,
         **{mark: refs for mark, refs in marks.items() if refs},
+        **({"context": where} if where else {}),
     }
 
 
@@ -261,6 +275,11 @@ def _told(wiki: Git, env: Mapping[str, str], manifest: Manifest, take: list[Note
         outcomes = [manifest.outcomes[note.id].get("action", "failed") for note in take]
         counts = ", ".join(f"{outcomes.count(what)} {what}" for what in OUTCOMES if what in outcomes)
         told += f"kb ingest: {len(take)} notes on {manifest.branch}: {counts}\n"
+        # Said only when this run files a candidate, so that a daily run doesn't repeat the branch's count.
+        candidates = dict(context_candidates(manifest))
+        if any(note.id in candidates for note in take) and (context := len(candidates)):
+            notes = f"{context} note{'' if context == 1 else 's'} on {manifest.branch}"
+            told += f"kb ingest: {notes} may belong in agent instructions: see the review list\n"
     if resolved := sum("resolved" in outcome for outcome in manifest.outcomes.values()):
         told += f"kb ingest: {resolved} filed notes on {manifest.branch} have been resolved since\n"
     return told + _review(wiki, env, manifest)

@@ -22,6 +22,10 @@ WORDING = {
         " unrelated? Contradicting means both can't be true, not that one is newer."
     ),
     "useful": "Would a future agent plausibly act better for knowing this?",
+    "context": (
+        "Does every session need this before it starts, as a command, a setup step or a convention, rather than as a"
+        " fact to look up when it comes up?"
+    ),
     "sure": "How sure are you of these answers?",
 }
 WORDING_LINE = re.compile(rf"^- ({'|'.join(WORDING)}): (.+)$", re.MULTILINE)
@@ -102,6 +106,7 @@ def questions_for(
         parts.append(f"Claim {claim.id}, already on the wiki:\n{claim.body}\n")
         questions.append(Question(f"claim-{claim.id}", f"Claim {claim.id}: {wording['claim']}", CLAIM_OPTIONS))
     questions.append(Question("useful", wording["useful"], ("yes", "no")))
+    questions.append(Question("context", wording["context"], ("yes", "no")))
     questions.append(Question("sure", wording["sure"], ("low", "medium", "high")))
     return "\n".join(parts), questions
 
@@ -113,6 +118,11 @@ def valid_answers(questions: list[Question], raw: object) -> dict[str, str] | No
     if not all(raw[question.id] in question.options for question in questions):
         return None
     return {question.id: raw[question.id] for question in questions}
+
+
+def documented(answers: Mapping[str, str]) -> bool:
+    """Whether a line of the project's own docs states the note's fact."""
+    return any(question.startswith("doc-") and answer == "yes" for question, answer in answers.items())
 
 
 @dataclass(frozen=True)
@@ -133,7 +143,7 @@ def decide(answers: Mapping[str, str]) -> Decision:
     if refuted:
         return Decision("skip")
     same = claims("same")
-    if same or any(question.startswith("doc-") and answer == "yes" for question, answer in answers.items()):
+    if same or documented(answers):
         return Decision("duplicate", same)
     for verdict, action in (("contradicts", "conflict"), ("replaces", "supersede")):
         if targets := claims(verdict):

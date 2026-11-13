@@ -334,7 +334,8 @@ and goes under its project in `ideas.md` at the wiki's root, for you to act on. 
 5. **Asks typed questions.** Codex runs with its tools, user config and rules off, and an output schema that allows
    only each question's options: does each excerpt support the note, contradict it, or say nothing; is the note the
    same as each candidate claim, does it add to it, replace it or contradict it, or is it unrelated; does `AGENTS.md`
-   already say it; would a future agent act better for knowing it; how sure are you.
+   already say it; would a future agent act better for knowing it; does every session need it before it starts;
+   how sure are you.
 6. **Acts.** `kb` turns the answers into one action. A ref that contradicts the note means `skip`, so a false alarm
    can't replace a good claim. The same fact already recorded is a `duplicate`. Otherwise it files a `conflict`
    (both claims kept side by side), a `supersede` (the old claim moves under `## Superseded` with a pointer), an
@@ -344,9 +345,13 @@ and goes under its project in `ideas.md` at the wiki's root, for you to act on. 
    run that dies before this commits nothing, and the next run takes those notes again.
 
 Then you review and merge ([Turn it on](#turn-it-on), step 5). The review list, `manifests/<date>.md` on the branch,
-gives each note with its answers and action, least certain first, and marks refs that weren't found, refs that
-couldn't be checked and excerpts gitleaks withheld. A note resolved after it was filed heads the list; remove its
-claim from the branch by hand if it no longer holds.
+gives each note with its answers and action, least certain first, and marks refs that weren't found, refs that couldn't
+be checked and excerpts gitleaks withheld. A note resolved after it was filed heads the list; remove its claim from the
+branch by hand if it no longer holds. New claims every session needs before it starts head the list under "Belongs in
+agent instructions", least certain first, with where each goes (the repo's `AGENTS.md`, or your agents' global
+instructions for a `machine` note); one that supersedes a claim says to replace that claim's rule if the file has it.
+Conflicts and the notes they dispute, notes written outside git and notes resolved or superseded since are left out.
+They're filed as claims all the same; kb never edits instructions, so you add the ones you agree with.
 
 A note that failed (quarantined, unreadable, or with no valid answer) stays in the inbox and is tried once on each
 later branch. Only one `kb ingest` runs at a time: a second exits 75 and says another is running.
