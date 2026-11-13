@@ -1,8 +1,9 @@
 # agent-fabric — design
 
-Status: draft v0.6, 2026-11-04 (v0.3 had two review rounds; v0.4 put the CLI agents first and added the CLI
-capture check, §4.1; v0.5 adds agent notes, §4.10; v0.6 rebuilds ingest around notes, §4.7). Name: agent-fabric; CLI:
-`kb`.
+Status: draft v0.7, 2026-11-13 (v0.3 had two review rounds; v0.4 put the CLI agents first and added the CLI
+capture check, §4.1; v0.5 adds agent notes, §4.10; v0.6 rebuilds ingest around notes, §4.7; v0.7 splits a machine into
+workspaces, lets each choose its ingest backend, and sets up through `kb setup`, §4.11). Name: agent-fabric;
+CLI: `kb`.
 Background research: `~/code/reports/Cross agent coding memory harness.md`, `~/code/reports/Inbox to wiki.md`.
 
 ## 1. Goal
@@ -26,7 +27,7 @@ Switch freely between coding agents without losing the history of what was done 
 
 - Replacing or wrapping the agents. They run in their native UIs, untouched.
 - Blocking or approving agent actions. The panel is advisory only.
-- Multi-user or multi-machine sync. Each machine keeps its own inbox and wiki (§2).
+- Multi-user or multi-machine sync. Each workspace on a machine keeps its own inbox and wiki (§2, §4.11).
 - Parsing vendor storage formats ourselves (delegated to agentsview, §4.1).
 
 ## 2. Context and decisions so far
@@ -35,6 +36,7 @@ Switch freely between coding agents without losing the history of what was done 
 |---|---|---|
 | Host | Linux desktop (Ubuntu 24.04 or newer), Core Ultra 7 265H (Arc 140T iGPU), 64 GB RAM; all agents run locally on it | IDE chat history lives where the IDE runs |
 | Machines | Each machine keeps its own inbox and wiki, with no sync (2026-11-04) | Machines need no link to each other |
+| Workspaces | A machine has a default workspace and any number of registered workspace roots; each holds its own inbox, wiki and settings, and a project belongs to the root that contains it (§4.11, 2026-11-13) | Folders on one machine can hold separate work whose notes must not meet, even in one inbox |
 | Agents first | The CLI agents: Claude Code, Codex, Copilot CLI, Cursor CLI; the IDE agents in phase 3 | Current focus (2026-10-31) |
 | Capture | agentsview, built on CI from a pinned tag, sandboxed, behind an adapter; Cursor CLI through its own reader | agentsview parses Claude Code, Codex, Copilot CLI, Cursor IDE and VS Code Copilot Chat on Linux; for Cursor CLI it drops tool results and fails under a read-only home (§4.1) |
 | Supply chain | SafeDep `vet` gate on agentsview's dependencies and on ours from the first commit | One reviewed build per version; malware and fresh-package checks before anything runs on the desktop |
@@ -44,9 +46,10 @@ Switch freely between coding agents without losing the history of what was done 
 | Compaction | Deterministic extraction; no LLM in the digest | Facts are extractable; only "why" needs a model |
 | Retrieval | Pull only (CLI/MCP), manually triggered | Avoids context pollution and memory-poisoning via injection |
 | Agent notes | `kb note` CLI + `kb-note` skill → local inbox; the wiki only through ingest (§4.10) | Agents notice things no digest records; a CLI works in every agent, and a skill loads only when used |
-| Note reminders | A session-start hook (reminder + count of open notes) and an end-of-turn hook (asks once per session, and again in a long one), installed by `scripts/install.sh`; either can be left out (§4.10) | A skill alone waits for the agent to think of it; at session end the agent can no longer act |
-| Setup report | `kb doctor` (and so `install.sh`) prints one TOON document after AXI: counts, a row per check, next steps for the user (§4.10) | Agents run `kb doctor` and must tell me what to do; their sandbox can't do setup |
-| Wiki ingest | Notes first, manual (`kb ingest`) and on a timer, onto a review branch. The model answers typed questions about each note and `kb` files the note's text; `codex` first, a local decision model nightly later. `kb prune` adds cited summaries on a trigger and never removes a claim (§4.7) | Review gate before anything becomes canon; no model text reaches a claim, a small model can run the same job, and a bad summary can be thrown away |
+| Note reminders | A session-start hook (reminder + count of open notes) and an end-of-turn hook (asks once per session, and again in a long one), installed by `kb setup`; either can be left out (§4.10, §4.11) | A skill alone waits for the agent to think of it; at session end the agent can no longer act |
+| Setup | `kb setup`, a small interactive UI in my own terminal, asks the choices and applies them through `kb doctor --fix`; `install.sh` only installs `kb` and starts it (§4.11) | Workspaces, allow lists, backends and hooks are choices; a script with flags covered only the hooks, and the allow list took a hand edit of the config |
+| Setup report | `kb doctor` (and so `kb setup`) prints one TOON document after AXI: counts, a row per check, next steps for the user (§4.10) | Agents run `kb doctor` and must tell me what to do; their sandbox can't do setup |
+| Wiki ingest | Notes first, manual (`kb ingest`) and on a timer, onto a review branch. The model answers typed questions about each note and `kb` files the note's text; `codex` by default, another agent's CLI by a workspace's choice, a local decision model nightly later. `kb prune` adds cited summaries on a trigger and never removes a claim (§4.7) | Review gate before anything becomes canon; no model text reaches a claim, a small model can run the same job, and a bad summary can be thrown away |
 | Live panel | Rules detect, small model only phrases and extracts decisions | Rules measurably work; LLM judgement alone did not |
 | OpenHands | Not used; event model borrowed | It cannot observe IDE sessions |
 
@@ -409,10 +412,11 @@ when the session is first seen and stored with it.
 
 **Allow list first.** Only sessions whose project is on the allow list reach the wiki repo. Every other session
 gets the same digest under `~/.local/share/agent-fabric/local/`: it is indexed for `kb` and shown in the panel, but
-never committed. The list starts empty, so nothing is published until I add a project.
+never committed. The list starts empty, so nothing is published until I add a project. Each workspace has its own
+list, in its own `[[workspace]]` entry (§4.11), and the paths in this section are the default workspace's.
 
 ```toml
-# ~/.config/agent-fabric/config.toml
+# ~/.config/agent-fabric/config.toml: the default workspace's; a root's are in its [[workspace]] entry
 [publish]
 allow = ["github.com/me/agent-fabric", "github.com/me/billing-api"]   # project ids, §4.4
 headless = []   # allowed projects whose headless runs (§4.3) are published too
@@ -438,7 +442,8 @@ a separate worktree.
 
 ### 4.6 Wiki repo
 
-One local repo per machine, for all its projects (`~/wiki`), with no remote.
+One local repo per workspace, for all its projects, with no remote: `~/wiki` for the default workspace and
+`<root>/.fabric/wiki` for a workspace root (§4.11).
 
 ```
 AGENTS.md          schema: the wording of ingest's questions, and the rules for `kb prune`'s summaries
@@ -474,8 +479,11 @@ year/month sharding. The wiki only grows, since no claim is ever removed; §4.7'
 
 ### 4.7 Ingest, lint and prune, retro
 
-`kb ingest [--project P] [--backend codex|local] [--dry-run]`, run by `fabric-ingest.timer` (§5). It starts with notes;
-digests join when they exist (§11).
+`kb ingest [--workspace default|ROOT] [--project P] [--backend NAME] [--dry-run]`, run by
+`fabric-ingest@<workspace>.timer` (§5). It works on one workspace's inbox and wiki (§4.11), the one given or the current
+folder's, under that
+workspace's lock and on its backend. It starts with notes; digests join when they exist (§11). Paths below
+are the default workspace's.
 
 The model only decides. It answers typed questions about a note, as a decision model does, and `kb` acts on the answers
 and files the note's own text as the claim. No model text reaches a claim, so this step can't make anything up, and a
@@ -542,10 +550,20 @@ claim, since the first inbox held a false alarm (2026-11-02). Checked with Codex
 call, and couldn't tell what the file held. With `code_mode_host` off, its code mode, through which every tool runs
 (§4.2), fails closed. A new Codex feature can add a tool, so the features turned off are checked on each upgrade.
 
-**Backends.**
+**Backends.** Each workspace chooses one, as `backend` in its `[[workspace]]` entry or the default's `[ingest] backend`
+(§4.11), and `kb setup` offers only the ones installed. `kb prune` and `kb retro` use the same. A client workspace can
+choose `local` and opt out of shared machine notes (§4.11), so its notes never leave the machine, or keep its allow
+list empty, so they never leave the inbox. `local` alone isn't enough: a machine note it shares is ingested by the other
+workspaces on their backends.
 
-- `codex`, first, on the daily timer (§5): no tools, with a schema that allows only the questions' options. Expect
-  about a dollar a month.
+- `codex`, the default, on the daily timer (§5): no tools, with a schema that allows only the questions' options.
+  Expect about a dollar a month.
+- `claude`, `copilot` and `cursor`: the other agents' CLIs in their headless mode, for a workspace whose plan is with
+  that vendor. Each is offered only once it meets the bar `codex` met above, checked on the version it runs: no tools,
+  no user config, rules, skills, hooks or MCP servers, an answer held to the questions' options, a run its own agent
+  doesn't keep as a session (§8's feedback loop), and the same live check, a `cat` of a file holding a random word that
+  makes no tool call. One that can't hold its answer to a schema answers in JSON that `kb` checks, as for any invalid
+  answer. `kb doctor` checks that a workspace's backend is installed, and a failed login shows as a failed run (§8).
 - `local`, nightly once it passes §10: a decision model on `llama-server`'s `/v1/systemone`, on loopback. Nightly runs
   append to one branch, so review stays weekly. These models are small enough for an 8 GB machine, and should take
   seconds per note on a CPU, which still has to be measured. Speed and RAM aren't the constraint; whether the decisions
@@ -792,7 +810,8 @@ The kind says what the next agent should do with the note, and decides how long 
   - With both at work, a caller that is neither of them, such as a person or another tool, gets exit 2 and has no
     true name to give until one marker lapses. Taking its word would also take a model's name or a wrong tool, and the
     refusal is what makes a model name its tool.
-  - A marker counts only where `kb note` works out the same project. Outside git, each subfolder is a project of its
+  - A marker counts only where `kb note` works out the same workspace and project (§4.11), so a clone of the same repo
+    in another workspace isn't signed by it. Outside git, each subfolder is a project of its
     own, and a nested repo or submodule is another project. Matching by folder prefix would be worse: a session
     started in `~` would sign notes in every folder under it outside git.
   - A Cursor CLI session with several roots (`--add-dir`) counts only for its first, where its reminder counts notes
@@ -806,7 +825,8 @@ The kind says what the next agent should do with the note, and decides how long 
   resolution takes no `--project`: `kb` finds the note by its id wherever either is filed, and the note counts as
   resolved in every project. In a real inbox, 4 of the first 43 notes were about a repo but written from a workspace
   above it, outside git, so none reached that repo's sessions (2026-11-12).
-- **`--machine`**: the note holds on this machine in every project, such as what the GitHub token may do or a tool
+- **`--machine`**: the note holds on this machine in every project of every workspace that shares machine notes
+  (§4.11), such as what the GitHub token may do or a tool
   that fails in the sandbox. Its project is `machine`, which no project id `kb` makes can be, since those all have a
   `/` (a repo whose origin is a relative path without one, such as `machine`, is named by its folder), so the format
   stays `fabric.note/1` and an older `kb` reads it as one more project. It has no branch or commit, and its cwd is
@@ -953,17 +973,18 @@ and Copilot CLI has none, so the hook can write its marker. Two agents need more
   Codex function, so `kb` checks that one is there, not that it matches: after a change to kb's hook it can read as
   approved until Codex asks again.
 
-**Setup.** `scripts/install.sh` installs `kb` from the clone with `uv tool install`, then runs `kb doctor --fix`.
-The install is not editable, so agents keep the installed `kb` while the clone switches branches; rerunning the
-script after a pull updates `kb` and the skill copies. It runs in the user's own terminal, because an agent's sandbox
-can't write the agents' settings. `kb doctor` is the one place that knows what setup means: a setup UI, if one comes
-later, shows its checks. `scripts/install.sh --hooks start,stop` (the default), `start`, `stop` or `none` chooses
-the hooks: it passes the choice to `kb doctor --fix --hooks`, which records it as `hooks` under `[notes]` in
-`~/.config/agent-fabric/config.toml`, installs those hooks and removes kb's entries for the others. Later
-`kb doctor` runs, and the script rerun without `--hooks`, keep to the recorded choice; with none recorded, both.
+**Setup.** `scripts/install.sh` installs `kb` from the clone with `uv tool install`, then starts `kb setup` (§4.11),
+which asks the choices and applies them through `kb doctor --fix`. The install is not editable, so agents keep the
+installed `kb` while the clone switches branches; rerunning the script after a pull updates `kb` and the skill copies.
+Both run in the user's own terminal, because an agent's sandbox can't write the agents' settings. `kb doctor` is the
+one place that knows what setup means, and `kb setup` shows its checks. The hooks are one choice for the machine:
+`kb setup` offers start, stop, both (the default) or none, and passes it to `kb doctor --fix --hooks`, which records
+it as `hooks` under `[notes]` in `~/.config/agent-fabric/config.toml`, installs those hooks and removes kb's entries
+for the others. Later `kb doctor` runs keep to the recorded choice; with none recorded, both. `install.sh --hooks`
+stays for a setup without a terminal UI, and skips `kb setup`.
 
 **What `kb doctor` prints.** An agent reads the report as often as I do: it runs `kb doctor` when a note fails (the
-checks only read, so they work in its sandbox), or reads what `install.sh` printed. So the report follows AXI's
+checks only read, so they work in its sandbox), or reads what `kb setup` printed. So the report follows AXI's
 principles for agent-facing CLIs ([axi.md](https://axi.md/)): one TOON document (spec 4.4) with the counts first,
 one row per check, an explicit "nothing to do", and next steps that say who takes them. Setup steps are always the
 user's, because an agent's sandbox can't change the agents' settings; the closing `help` line asks the agent to
@@ -982,7 +1003,7 @@ checks[9]{status,check,path,detail}:
   missing,hooks,~/.codex/hooks.json,start and stop
   ok,hooks,~/.cursor/hooks.json,start and stop; hasn't run yet
 next[2]{by,step}:
-  user,"In your own terminal, not in an agent's session, run kb doctor --fix (or rerun scripts/install.sh)"
+  user,"In your own terminal, not in an agent's session, run kb doctor --fix (or kb setup)"
   user,Add /home/me/.local/share/agent-fabric/inbox to sandbox_workspace_write.writable_roots in ~/.codex/config.toml
 help: "These steps are for the user: an agent's sandbox can't change the agents' settings. Agents: explain them to the user in plain words."
 ```
@@ -995,10 +1016,13 @@ help: "These steps are for the user: an agent's sandbox can't change the agents'
   last ran, by the markers. A right file with no run behind it drew a note doubting a hook that worked (2026-11-02).
 - **`sync` row:** whether Copilot CLI's session sync is off (§7), where Copilot CLI is installed. `--fix` doesn't
   change it: what leaves the machine is my choice, not part of setting up notes.
-- **`install.sh`** keeps uv quiet, so what it prints is this report.
+- **`kb setup`** ends with this report, and `install.sh --hooks`, which skips `kb setup`, keeps uv quiet so that what
+  it prints is this report too.
+- **Workspaces:** the rows that belong to a workspace (inbox, sandbox, ingest) come once per workspace, with its root
+  in the path (§4.11).
 
-**Setup per agent.** Claude Code's and Codex's sandboxes allow writes only in the project and temp folders, so the
-inbox folder goes on each one's write list (Claude Code: `sandbox.filesystem.allowWrite` in
+**Setup per agent.** Claude Code's and Codex's sandboxes allow writes only in the project and temp folders, so every
+workspace's inbox folder goes on each one's write list (Claude Code: `sandbox.filesystem.allowWrite` in
 `~/.claude/settings.json`; Codex: `sandbox_workspace_write.writable_roots` in `~/.codex/config.toml`). A sandbox can
 only grant writes to a folder that exists, so `kb doctor --fix` creates the inbox first. It changes nothing else in
 these files, and one it can't edit safely it reports with the path to add by hand. Cursor CLI's sandbox needs the
@@ -1010,6 +1034,111 @@ lists yet.
 The hooks go into the four hooks files in the table above. `kb doctor` knows its own entries by their command and
 changes no other, so the user's hooks survive every run. Copilot CLI's `kb.json` holds only kb's hooks.
 
+### 4.11 Workspaces and `kb setup`
+
+One inbox and one wiki per machine mixes work that must stay apart: a client's repos and my own, or two clients, whose
+notes would meet in one inbox, one ingest run and one wiki. That came up as a complaint when adding another set of
+repos (2026-11-13). So a machine holds workspaces, each a folder whose projects share one memory, the way a root
+repo holds its subprojects:
+
+```
+~/work/acme/                 a workspace root
+  .fabric/
+    inbox/                   notes from every project below
+    wiki/                    its wiki repo (§4.6), no remote
+    ingest-wt/               its ingest worktree (§4.7)
+  billing-api/               a project, its own git repo
+  infra/
+~/code/agent-fabric/         under no root: the default workspace
+```
+
+```toml
+# ~/.config/agent-fabric/config.toml: every workspace's settings, the default's in [publish] and [ingest] as before
+[[workspace]]
+root = "~/work/acme"
+allow = ["github.com/acme/billing-api", "machine"]   # project ids, as [publish] allow (§4.5)
+headless = []                                        # as [publish] headless (§4.5)
+backend = "local"                                    # as [ingest] backend (§4.7)
+share_machine_notes = false                          # keep this workspace's machine notes in, and others' out
+```
+
+- **Which workspace.** A folder belongs to the deepest registered root that contains it, and to the default workspace
+  under none. A registered root is one with a `[[workspace]]` entry in `~/.config/agent-fabric/config.toml`, which
+  `kb setup` adds and removes. A `.fabric/` folder that isn't registered means nothing, so a cloned repo that ships one
+  can't move where its notes go. A git checkout is placed by its main checkout (`git rev-parse --git-common-dir`),
+  since some agents put worktrees outside the project (Codex's `~/.codex/worktrees/…`).
+- **Settings stay out of the root.** The allow list and the backend decide what leaves the machine, so they live in
+  `~/.config`, which no agent's sandbox can write, as the default workspace's do. Kept in `.fabric/`, an agent working
+  in the root could allow every project or switch a client's backend from `local` to a hosted one.
+- **The default workspace** is the one that existed before v0.7: `~/.local/share/agent-fabric/inbox/`, `~/wiki` and
+  the settings in `~/.config/agent-fabric/config.toml`. A machine that registers no root works as it did.
+- **What's per workspace:** the inbox, the wiki, the ingest worktree and lock, the allow list (§4.5) and the backend
+  (§4.7). Later the digests, `state.db` and `index.db` follow the same split, by the session's project.
+- **What stays per machine:** `kb` itself, the config, the skill, the hooks and their choice, and the markers. Each
+  hook works out its workspace from the session's folder, so one hook entry per agent serves them all. Project ids
+  don't change (§4.4): the same repo cloned into two workspaces is two separate memories, which is the point.
+- **Machine notes.** `kb note --machine` (§4.10) writes the note into every sharing workspace's inbox (below), with
+  the same id, because a fact about the machine holds wherever an agent works. Each copy is created on its own: one
+  inbox that can't be written doesn't stop the others, the note's exit is 1 and names the inboxes it missed, and a
+  retry within the repeat check's 24 hours (§4.10) writes only the missing copies, since that check counts an inbox
+  that has the note and fills one that hasn't. A retry after that writes a new note. A workspace registered later
+  doesn't get the earlier ones. Each workspace's ingest files its copy, so each wiki has its own `wiki/machine.md`,
+  once `machine` is on that workspace's allow list. The skill says a machine note names no project, client or repo:
+  those belong in a project's note.
+- **Opting out of shared machine notes.** A workspace with `share_machine_notes = false` (in its `[[workspace]]`
+  entry; the default workspace's goes under `[publish]`) is left out both ways: its own `--machine` notes stay in its
+  inbox, and the other workspaces' don't reach it. A machine note's text can still carry what the skill forbids, so
+  a client's workspace opts out to keep its notes from ever reaching another. Sharing is on by default, since most
+  workspaces want what an agent learned about the machine elsewhere. Turning it off later moves nothing: copies
+  already in other inboxes stay there until they're resolved or ingested.
+- **Resolving a machine note** writes the resolution into every inbox that shares machine notes and still holds the
+  note open. A copy that ingest has filed is left as it is, as for any filed note (§4.10), and the output names the
+  workspaces where it was filed, so I can check their claim at review. An opted-out workspace's inbox holds no other
+  workspace's machine notes, so it can't resolve them.
+- **Nothing crosses a workspace but a shared machine note.** `kb note` writes only into the current folder's
+  workspace. `--project <folder>` (§4.10) takes a folder in the same workspace, and one in another exits 2 and says to
+  write the note from a session there: filed here, it would sit under a project this workspace's sessions never see,
+  and filed there, a session here would write into another workspace's memory. `kb note --resolve <id>` finds the
+  note in the current workspace's inbox, whatever its project, and in no other. `kb inbox`, the start hook's count
+  and `kb ingest --project P` stay within one workspace too, so the same repo cloned into two is never confused.
+- **The root isn't a git repo, nor inside one.** Its projects are repos of their own, and a repo above them would list
+  each as an untracked embedded repo, and could commit `.fabric/inbox/`'s raw notes past §4.5's gate. `kb setup`
+  refuses a root that is in a git work tree. The wiki is the repo, inside `.fabric/`.
+- **Sandboxes.** An agent writes notes only through `kb note`, into its workspace's inbox, so every inbox goes on
+  Claude Code's and Codex's write lists (§4.10). A session started in a root rather than in a project can also write
+  `.fabric/` directly, as an unsandboxed agent can write the default inbox and `~/wiki`: the inbox is append-only by
+  `kb`'s rule, not the filesystem's, and a commit made straight on the wiki's `main` skips review. The skill says to
+  start agents in a project, not in a root. The agents' write lists are per agent, not per project, so a sandboxed
+  agent anywhere can write a file into any workspace's inbox: workspaces keep honest agents' notes apart, and the
+  sandbox doesn't keep a misbehaving one out. A note is untrusted wherever it lands (§7), and ingest's evidence step
+  reads refs only from the note's own project (§4.7).
+- **Moving a project** into or out of a root moves where its new notes go. Its open notes stay in the old inbox, where
+  they're resolved from a folder in the old workspace (for the default workspace, any folder under no root, such as
+  `~`), and a lasting one is written again from the new place.
+- **Nested roots** are allowed: the inner root owns its projects, and the outer one sees none of them.
+
+**`kb setup`.** Setup is a set of choices, and `install.sh --hooks` covered only one of them: the allow list took a
+hand edit of the config. `kb setup` asks them in my own terminal, as vertical lists picked with the arrow keys and
+space, and applies them:
+
+1. **Workspaces.** The registered roots, to keep or remove, and a folder to add as a new root, which gets `.fabric/`.
+2. **For each workspace, its allow list:** the git projects the workspace owns below its root, leaving out those under
+   a nested root (the default workspace: those with notes in its inbox), any project folder I name, and `machine`.
+3. **For each workspace, its backend:** the backends installed on the machine (§4.7), `codex` first; and whether it
+   shares machine notes with the other workspaces (on by default).
+4. **Hooks:** start and stop, start, stop, or none (§4.10).
+5. **Apply:** write the config, run `kb doctor --fix`, and show the report with the steps left for me.
+
+Every list opens on what's recorded, so a rerun after a pull that only presses Enter changes nothing; with nothing
+recorded, it opens on the defaults: no project allowed, `codex`, both hooks. It writes nothing until the last step,
+and quitting earlier leaves everything as it was. It edits the config as
+`config.py` does now: it changes or adds only its own lines, and writes only what reads back as intended. `kb doctor
+--fix` stays as it is, non-interactive, for scripts and reruns; `kb setup` is the way in for a person, and refuses to
+run without a terminal. The lists use `questionary` (MIT, over `prompt_toolkit`), a small and widely used library for
+exactly these prompts; a full-screen TUI framework would be more than five questions need. It is `kb`'s first runtime
+dependency, so it passes the vet gate like any other (§4.1), and the rest of `kb` imports nothing from it, so hooks
+and notes don't load it.
+
 ## 5. Processes, ports, locations
 
 | Unit (systemd --user) | Command | Bind |
@@ -1017,13 +1146,14 @@ changes no other, so the user's hooks survive every run. Copilot CLI's `kb.json`
 | `agentsview.service` (sandboxed; user or system unit, §4.1) | `agentsview serve --no-browser --no-update-check --port <port> --replace` | `127.0.0.1:<port>` (8080 by default) |
 | `fabricd.service` | tracker, observer, digester, panel | 127.0.0.1:8090 |
 | `llama-panel.service` | `llama-server` with E4B | 127.0.0.1:8091 |
-| `fabric-ingest.timer` | `kb ingest` daily at 03:00, on `codex` and later on `local` (which starts a llama-server on 8092), §4.7. The run's gate decides whether there's work and a run adds to the branch waiting for review, so a daily run costs no more than a weekly one and review stays weekly. `Persistent=true`, so a machine asleep at 03:00 runs it on waking. `kb doctor --fix` writes it once a project is allowed, with a `PATH` of the folders of the tools ingest runs and of node, since a unit gets none of a shell's (codex lives under nvm), and the shell's `XDG_*_HOME` and `CODEX_HOME`. That `PATH` depends on the shell, so a unit counts as current while its own still finds the tools. A run that finds another holding ingest's lock exits 75, which the unit counts as a success, and a timer the user disabled or masked stays off, even when `--fix` rewrites its units. `kb doctor` asks systemd whether it's on and running and how its last run went, which needs no marker: a reboot forgets a failure, and the next failed run shows it again | — |
-| `fabric-prune.timer` | `kb prune` weekly, which writes only when a page meets its trigger (§4.7; `kb lint` runs in `kb ingest`, before its gate) | — |
-| `fabric-backup.timer` | daily SQLite backup of agentsview archive and `state.db`, and a `git bundle` of the wiki, which has no remote | — |
+| `fabric-ingest@<workspace>.timer` | `kb ingest --workspace <workspace>` daily at 03:00, one instance per workspace (`default`, or the root's escaped path, which the unit passes back as the root), each on its own backend: `codex` by default, another agent's CLI, or later `local` (which starts a llama-server on 8092), §4.7. One unit per workspace keeps their locks, failures and last runs apart, so a locked or failing workspace hides nothing about the others, and `kb doctor` reads each from systemd. The run's gate decides whether there's work and a run adds to the branch waiting for review, so a daily run costs no more than a weekly one and review stays weekly. `Persistent=true`, so a machine asleep at 03:00 runs it on waking. `kb doctor --fix` writes a workspace's instance once a project is allowed there, with a `PATH` of the folders of the tools ingest runs, its backend's CLI and node, since a unit gets none of a shell's (codex lives under nvm), and the shell's `XDG_*_HOME` and its backend's home variable (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`), and removes the instance of a workspace that's gone. It replaces the `fabric-ingest.timer` and `.service` of v0.6 with the `default` instance, which starts disabled or masked if the old timer was. That `PATH` depends on the shell, so a unit counts as current while its own still finds the tools. A run that finds another holding ingest's lock exits 75, which the unit counts as a success, and a timer the user disabled or masked stays off, even when `--fix` rewrites its units. `kb doctor` asks systemd whether it's on and running and how its last run went, which needs no marker: a reboot forgets a failure, and the next failed run shows it again | — |
+| `fabric-prune@<workspace>.timer` | `kb prune` weekly, per workspace, which writes only when a page meets its trigger (§4.7; `kb lint` runs in `kb ingest`, before its gate) | — |
+| `fabric-backup.timer` | daily SQLite backup of agentsview archive and `state.db`, and of every workspace's inbox and a `git bundle` of its wiki, which has no remote | — |
 
 | Path | Contents | In git |
 |---|---|---|
-| `~/.config/agent-fabric/config.toml` | settings (allow lists, idle timeout, ports, backends, project aliases) | no |
+| `~/.config/agent-fabric/config.toml` | machine settings (hooks, idle timeout, ports, project aliases) and every workspace's: the default's allow list and backend, and a `[[workspace]]` entry per root | no |
+| `<root>/.fabric/` | a workspace root's `inbox/`, `wiki/` and `ingest-wt/`; its settings are in the machine config (§4.11) | the wiki only, as its own repo |
 | `~/.local/share/agent-fabric/state.db` | cursors, loops, flags | no (backed up) |
 | `~/.local/share/agent-fabric/index.db` | search index | no (rebuildable) |
 | `~/.local/share/agent-fabric/quarantine/` | digests blocked by gitleaks | no |
@@ -1031,21 +1161,29 @@ changes no other, so the user's hooks survive every run. Copilot CLI's `kb.json`
 | `~/.local/share/agent-fabric/inbox/` | notes from `kb note`; `done/` once ingested (§4.10) | no (backed up) |
 | `~/.local/share/agent-fabric/hooks/` | one marker per agent session, for the hooks, `kb note` and `kb doctor`; removed after 7 days without a hook (§4.10) | no |
 | `~/.agentsview/` | agentsview config + archive | no (backed up) |
-| `~/wiki/` | wiki repo | yes |
+| `~/wiki/` | the default workspace's wiki repo | yes |
+
+The `~/.local/share/agent-fabric/` paths above, `~/wiki/` and the ingest worktree are the default workspace's. The
+hooks' markers stay machine-wide, since a session belongs to an agent, not a workspace.
 
 ## 6. Stack
 
 Python 3.13+ with uv; `httpx` + `httpx-sse` (adapter), `starlette` + `uvicorn` (panel), `mcp` official SDK (MCP
 server), `pydantic` (schemas), stdlib `sqlite3` (FTS5). External binaries: agentsview (CI-built, pinned),
-llama.cpp `llama-server` (SYCL or Vulkan build), `gitleaks`, `git`, `codex`. Dev: ruff, mypy, pytest, pinned per
-project. CI: GitHub Actions with the `vet` gate (§4.1) and `lint` (shellcheck, shfmt, actionlint, zizmor; ruff,
-mypy and pytest on Python 3.13 and 3.14).
+llama.cpp `llama-server` (SYCL or Vulkan build), `gitleaks`, `git`, `codex`, and the other agents' CLIs where a
+workspace chooses one as its backend (§4.7). `kb setup` uses `questionary` (§4.11), `kb`'s first runtime dependency.
+Dev: ruff, mypy, pytest, pinned per project. CI: GitHub Actions with the `vet` gate (§4.1) and `lint` (shellcheck,
+shfmt, actionlint, zizmor; ruff, mypy and pytest on Python 3.13 and 3.14).
 
 ## 7. Security and privacy
 
 - Everything binds to 127.0.0.1. No auth needed while loopback-only; agentsview's `--require-auth` if that changes.
 - Redaction before write, gitleaks gate, pre-commit backstop (§4.5). The wiki repo is not treated as secret-safe.
 - Allow list: only listed projects are published (§4.5).
+- Workspaces keep work apart (§4.11): a note reaches only its workspace's inbox, `kb inbox`, ingest and wiki, except a
+  `--machine` note, which goes to every workspace that hasn't opted out of sharing them. Only roots I register count,
+  so a repo can't make itself one. Each workspace chooses its backend, so a client's notes can stay on the machine
+  (`local`, with machine notes not shared) or out of the wiki. The agents' sandboxes don't enforce the split (§4.11).
 - The code repo is public: no session data, config, digests or wiki content ever goes into it, and its CI has no
   access to the wiki repo. Fixtures for tests are synthetic or scrubbed recordings.
 - Untrusted content: the ingest model has no tools, and can only pick from the options of typed questions, so no model
@@ -1237,6 +1375,17 @@ runs get a local digest only unless the project is on `[publish] headless` (§4.
 script can leave either out (§4.10). Decided 2026-11-04: each machine keeps its own local wiki, with no remote and no
 sync (§2); ingest starts with notes on the `codex` backend, its model only answers typed questions, and it moves to a
 local model after §10's comparison; `kb prune` adds cited summaries on a trigger and never removes a claim (§4.7).
+Decided 2026-11-13: a machine holds workspaces, each with its own inbox, wiki, allow list and backend, and a folder
+under no registered root belongs to the default workspace, which is the setup before; a `--machine` note goes to every
+workspace, and a workspace can opt out of sharing them both ways; `codex` stays the default backend, and the other
+agents' CLIs can be chosen per workspace once each passes §4.7's check; `kb setup`, with `questionary`'s lists, is the
+way to set up, and `install.sh` only installs `kb` and starts it; every workspace's settings stay in `~/.config`, out of
+reach of an agent working in a root (§4.11).
+
+Open (2026-11-13):
+
+- Which of Claude Code, Copilot CLI and Cursor CLI can run as an ingest backend with no tools and an answer held to the
+  questions' options, and on which versions (§4.7).
 
 Open (2026-11-01):
 
