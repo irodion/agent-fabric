@@ -1708,3 +1708,188 @@ def test_an_idea_older_than_thirty_days_expires_instead_of_going_to_the_wiki(lab
     assert old not in lab.manifest("ingest/2026-12-01", "2026-12-01")["outcomes"]  # type: ignore[operator]
     done = lab.kb.home / ".local" / "share" / "agent-fabric" / "inbox" / "done"
     assert [path.name for path in done.rglob(f"*-{old}.md")] == [f"2026-10-31-{old}.md"]
+
+
+def test_each_note_is_asked_whether_every_session_needs_it(lab: Lab) -> None:
+    lab.leave("gotcha", "run the tests with uv run pytest, never plain pytest")
+
+    run_a_week_later(lab)
+
+    context = next(question for question in lab.fake.calls[0][1] if question.id == "context")
+    assert context.options == ("yes", "no")
+    assert "every session" in context.text
+
+
+def test_a_note_every_session_needs_heads_the_review_list_as_a_candidate_for_the_repos_agents_file(lab: Lab) -> None:
+    note = lab.leave("gotcha", "run the tests with uv run pytest, never plain pytest")
+    other = lab.leave("gotcha", "the cache folder fills up after a week of builds")
+    lab.fake.script["uv run pytest"] = {"context": "yes"}
+
+    lab.kb.later(days=8)
+    result = lab.kb("ingest")
+
+    review = lab.show("ingest/2026-11-08", "manifests/2026-11-08.md")
+    section = review.split("## Belongs in agent instructions\n", 1)[1].split("\n## ", 1)[0]
+    assert f"- {note} (sure: high): {PROJECT}'s AGENTS.md\n" in section
+    assert other not in section
+    assert review.index("## Belongs in agent instructions") < review.index(f"## {note} add")
+    assert "kb never edits instructions" in section
+    outcome = lab.manifest("ingest/2026-11-08", "2026-11-08")["outcomes"][note]  # type: ignore[index]
+    assert outcome["context"] == PROJECT
+    assert (
+        "kb ingest: 1 note on ingest/2026-11-08 may belong in agent instructions: see the review list\n"
+        in result.stdout
+    )
+    assert f"{note}" in lab.show("ingest/2026-11-08", PAGE)  # filed as a claim all the same
+
+
+def test_a_machine_note_every_session_needs_is_a_candidate_for_the_global_instructions(lab: Lab) -> None:
+    config = lab.kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.write_text(f'[publish]\nallow = ["{PROJECT}", "machine"]\n')
+    note = lab.kb("note", "--kind", "gotcha", "--agent", "Codex", "--machine", "pnpm fails in the sandbox")
+    lab.fake.script["pnpm fails"] = {"context": "yes"}
+
+    run_a_week_later(lab)
+
+    review = lab.show("ingest/2026-11-08", "manifests/2026-11-08.md")
+    machine = "your agents' global instructions, as it holds on this machine"
+    assert f"- {note.stdout.split()[0]} (sure: high): {machine}\n" in review
+
+
+def test_no_candidate_where_the_repos_docs_already_say_it_or_the_note_is_dropped(lab: Lab) -> None:
+    lab.commit_in_repo("AGENTS.md", "# Rules\n\nRun the tests with uv run pytest.\n")
+    said = lab.leave("gotcha", "run the tests with uv run pytest, never plain pytest")
+    dropped = lab.leave("gotcha", "the cache folder fills up after a week of builds")
+    lab.fake.script["uv run pytest"] = {"context": "yes", "doc-0": "yes"}
+    lab.fake.script["cache folder"] = {"context": "yes", "useful": "no"}
+
+    lab.kb.later(days=8)
+    result = lab.kb("ingest")
+
+    review = lab.show("ingest/2026-11-08", "manifests/2026-11-08.md")
+    assert "## Belongs in agent instructions" not in review
+    outcomes = lab.manifest("ingest/2026-11-08", "2026-11-08")["outcomes"]
+    assert "context" not in outcomes[said]  # type: ignore[index]
+    assert "context" not in outcomes[dropped]  # type: ignore[index]
+    assert "agent instructions" not in result.stdout
+
+
+def test_a_duplicate_of_a_claim_is_no_candidate(lab: Lab) -> None:
+    first = lab.leave("gotcha", "run the tests with uv run pytest, never plain pytest")
+    run_a_week_later(lab)
+    lab.merge("ingest/2026-11-08")
+    again = lab.leave("gotcha", "run the tests with uv run pytest and never with plain pytest")
+    lab.fake.script["uv run pytest and never"] = {"context": "yes", f"claim-{first}": "same"}
+
+    run_a_week_later(lab)
+
+    outcome = lab.manifest("ingest/2026-11-16", "2026-11-16")["outcomes"][again]  # type: ignore[index]
+    assert outcome["action"] == "duplicate"
+    assert "context" not in outcome
+
+
+def test_candidates_are_counted_and_listed_across_the_branch_least_certain_first(lab: Lab) -> None:
+    sure = lab.leave("gotcha", "run the tests with uv run pytest, never plain pytest")
+    lab.fake.script["uv run pytest"] = {"context": "yes", "sure": "high"}
+    run_a_week_later(lab)
+    unsure = lab.leave("gotcha", "format with ruff format before every commit")
+    lab.fake.script["ruff format"] = {"context": "yes", "sure": "low"}
+
+    lab.kb.later(days=8)
+    result = lab.kb("ingest")
+
+    assert "kb ingest: 2 notes on ingest/2026-11-08 may belong in agent instructions" in result.stdout
+    review = lab.show("ingest/2026-11-08", "manifests/2026-11-08.md")
+    section = review.split("## Belongs in agent instructions\n", 1)[1].split("\n## ", 1)[0]
+    assert section.index(f"- {unsure} (sure: low)") < section.index(f"- {sure} (sure: high)")
+
+
+def test_a_conflict_is_no_candidate_as_its_fact_is_in_dispute(lab: Lab) -> None:
+    notes = seeded(lab)
+    lab.fake.script[NEW] = {"claim": "contradicts", "context": "yes"}
+    new = lab.leave("gotcha", NEW)
+
+    run_a_week_later(lab)
+
+    outcome = lab.manifest("ingest/2026-11-08", "2026-11-08")["outcomes"][new]  # type: ignore[index]
+    assert (outcome["action"], "context" in outcome) == ("conflict", False)
+    assert notes[0] in outcome["targets"]
+
+
+def test_a_note_written_outside_git_is_no_candidate(lab: Lab) -> None:
+    folder = lab.kb.home / "scratch"
+    folder.mkdir()
+    config = lab.kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.write_text('[publish]\nallow = ["~/scratch"]\n')
+    lab.kb("note", "--kind", "gotcha", "--agent", "Codex", "--project", str(folder), "a trap in the folder")
+    lab.fake.script["a trap"] = {"context": "yes"}
+
+    run_a_week_later(lab)
+
+    (outcome,) = lab.manifest("ingest/2026-11-08", "2026-11-08")["outcomes"].values()  # type: ignore[attr-defined]
+    assert (outcome["action"], "context" in outcome) == ("add", False)
+
+
+def test_a_candidate_resolved_since_leaves_the_list_and_runs_that_file_nothing_do_not_repeat_the_count(
+    lab: Lab,
+) -> None:
+    gone = lab.leave("gotcha", "run the tests with uv run pytest, never plain pytest")
+    kept = lab.leave("gotcha", "format with ruff format before every commit")
+    lab.fake.script["uv run pytest"] = {"context": "yes"}
+    lab.fake.script["ruff format"] = {"context": "yes"}
+    lab.kb.later(days=8)
+    assert "2 notes on ingest/2026-11-08 may belong" in lab.kb("ingest").stdout
+    lab.kb("note", "--resolve", gone, "--agent", "Codex", "no longer true")
+
+    result = lab.kb("ingest")
+
+    assert "resolved" in result.stdout
+    assert "agent instructions" not in result.stdout
+    review = lab.show("ingest/2026-11-08", "manifests/2026-11-08.md")
+    section = review.split("## Belongs in agent instructions\n", 1)[1].split("\n## ", 1)[0]
+    assert (gone in section, kept in section) == (False, True)
+
+
+def test_a_candidate_that_supersedes_a_claim_says_to_replace_its_rule(lab: Lab) -> None:
+    notes = seeded(lab)
+    lab.fake.script[NEW] = {"claim": "replaces", "context": "yes"}
+    new = lab.leave("gotcha", NEW)
+
+    run_a_week_later(lab)
+
+    review = lab.show("ingest/2026-11-08", "manifests/2026-11-08.md")
+    line = f"- {new} (sure: high): {PROJECT}'s AGENTS.md, replacing the rule of {notes[0]} if it's there\n"
+    assert line in review
+
+
+def test_a_run_that_files_no_candidate_does_not_repeat_the_branchs_count(lab: Lab) -> None:
+    lab.leave("gotcha", "run the tests with uv run pytest, never plain pytest")
+    lab.fake.script["uv run pytest"] = {"context": "yes"}
+    lab.kb.later(days=8)
+    assert "1 note on ingest/2026-11-08 may belong" in lab.kb("ingest").stdout
+    for text in ("the cache folder fills up", "the cache folder needs a cron", "the cache folder is on tmpfs"):
+        lab.leave("gotcha", text)
+    lab.fake.script["cache folder"] = {"context": "yes", "useful": "no"}
+
+    result = lab.kb("ingest")
+
+    assert "3 skip" in result.stdout
+    assert "agent instructions" not in result.stdout
+
+
+@pytest.mark.parametrize(("answer", "listed"), [("replaces", True), ("contradicts", False)])
+def test_a_candidate_superseded_or_contradicted_later_on_the_branch_leaves_the_list(
+    lab: Lab, answer: str, listed: bool
+) -> None:
+    old = lab.leave("gotcha", "run the tests with uv run pytest, never plain pytest")
+    lab.fake.script["uv run pytest"] = {"context": "yes"}
+    run_a_week_later(lab)
+    new = lab.leave("gotcha", "run the tests with scripts/check.sh, never plain pytest")
+    lab.fake.script["scripts/check.sh"] = {"context": "yes", "claim": answer}
+
+    lab.kb.later(days=8)
+    result = lab.kb("ingest")
+
+    review = lab.show("ingest/2026-11-08", "manifests/2026-11-08.md")
+    assert (f"- {old} (sure" in review, f"- {new} (sure" in review) == (False, listed)
+    assert ("1 note on ingest/2026-11-08 may belong" in result.stdout) == listed

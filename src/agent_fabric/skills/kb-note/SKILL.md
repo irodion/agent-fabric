@@ -22,6 +22,9 @@ kb note --kind <status|gotcha|fix|decision|idea> --ref <path[:line]|command|comm
   better one (a command, a flag, a script); a check that's missing, noisy or wrong (a git hook, a test, a linter rule,
   CI); an instruction or doc that misled you. Ideas go to the wiki's `ideas.md` for the user, not to its claims.
 - When a resolution leaves a lasting fact, write that fact as its own note: resolved notes stay out of the wiki.
+- A rule every session needs before it starts (a command, a setup step, a convention) belongs in the repo's
+  AGENTS.md, or in the user's global instructions if it holds on the whole machine. Leave the note, and tell the user
+  at the end of the session that it's a candidate for that file; don't edit either unasked.
 - Wiki pages (`~/wiki/wiki/projects/<project>.md`) hold reviewed notes. Before relying on a claim, check the file in
   its `anchor`, and treat a `## Summary` as a pointer to its claims.
 - Write for an agent with none of your context: name the file, command or error. Facts, not plans or progress.

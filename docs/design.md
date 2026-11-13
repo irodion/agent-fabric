@@ -505,6 +505,10 @@ small local model can run the same job as a hosted one: the move changes one set
      it unrelated? Contradicting means both can't be true, not that one is newer.
    - For each matching line of the project's `AGENTS.md`: does the note state the same fact?
    - Would a future agent plausibly act better for knowing this?
+   - Does every session need this before it starts, as a command, a setup step or a convention, rather than as a fact
+     to look up when it comes up? A wiki claim reaches an agent only when it searches, which is too late for such a
+     rule: in the first run (2026-11-12), the way to run a Codex review and what the machine's gh token can't do were
+     filed as claims, though they belong in the agents' global instructions. The answer changes no action.
    - How sure are you of these answers? Review goes by this, since `codex` gives no probabilities.
 6. **`kb` acts.** It turns the answers into one action: `skip`, `add`, `duplicate`, `extend`, `supersede` or `conflict`.
    A ref that contradicts the note means `skip`, so a false alarm can't replace a good claim. A ref git can't find
@@ -519,6 +523,15 @@ small local model can run the same job as a hosted one: the move changes one set
 8. **Review.** I review in tuicr, about weekly, with the note and the answers beside each action, least certain first,
    and mark each action right or wrong (§10). A note resolved after it was filed heads the list, and I take its claim
    off the branch by hand if it no longer holds, since `kb` never removes a claim.
+   Above the notes, a section, "Belongs in agent instructions", names each note filed as the current claim (added,
+   extending or superseding one) that the model says every session needs, least certain first, and where it belongs: the
+   project's `AGENTS.md`, or my agents' global instructions for a `machine` note. One that supersedes a claim says to
+   replace that claim's rule if the file has it, so that the file doesn't hold both. A conflict's fact is in dispute, as
+   is that of a note a later conflict names, a note written outside git has no repo to hold it, and a note resolved or
+   superseded since no longer holds, so none of them is listed. `kb` never edits either file: I add the ones I agree
+   with, by hand or through an agent, as with `kb retro`'s proposals, and check that a public repo's `AGENTS.md` gets
+   nothing private. A run that files one counts those on the branch, and the `kb-note` skill asks an agent to tell me of
+   such a rule at the end of its session.
 9. **Merge.** The next run finds the merged manifests and moves the notes with an action to `inbox/done/`, so notes need
    no ledger in `state.db`. A quarantined note, or one with no valid answer, stays in the inbox until it's resolved.
    It's tried once on each later branch, and doesn't count towards the gate.

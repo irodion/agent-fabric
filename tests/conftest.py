@@ -19,7 +19,14 @@ from agent_fabric.context import Context
 PROJECT = "github.com/me/proj"
 PAGE = f"wiki/projects/{PROJECT}.md"
 BRANCH = "ingest/2026-10-31"
-DEFAULTS = {"ref": "says_nothing", "claim": "unrelated", "doc": "no", "useful": "yes", "sure": "high"}
+DEFAULTS = {
+    "ref": "says_nothing",
+    "claim": "unrelated",
+    "doc": "no",
+    "useful": "yes",
+    "context": "no",
+    "sure": "high",
+}
 # Stands in for gitleaks in the end-to-end tests: reports a rule for any text holding the marker, in gitleaks' own
 # report shape, which tests/test_secret_gate.py checks against the real binary.
 LEAK = "FAKELEAK"
