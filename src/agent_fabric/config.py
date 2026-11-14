@@ -9,10 +9,10 @@ import tomllib
 from collections.abc import Mapping
 from typing import Any
 
-from agent_fabric.hooks import HOOKS
-from agent_fabric.paths import config_file
+from agent_fabric.paths import config_file, expand
 from agent_fabric.sandboxes import replace_file
 
+HOOKS = ("start", "stop")
 NOTES_TABLE = re.compile(r"^[ \t]*\[[ \t]*notes[ \t]*\][^\r\n]*(?:\r?\n|\Z)", re.MULTILINE)
 NEXT_TABLE = re.compile(r"^[ \t]*\[", re.MULTILINE)
 HOOKS_LINE = re.compile(r"^[ \t]*hooks[ \t]*=[^\n]*\n?", re.MULTILINE)
@@ -50,6 +50,20 @@ def allowed_projects(env: Mapping[str, str]) -> tuple[str, ...]:
     if not isinstance(allow, list) or not all(isinstance(project, str) for project in allow):
         raise ValueError("publish.allow must be a list of project ids")
     return tuple(allow)
+
+
+def workspace_roots(env: Mapping[str, str]) -> tuple[str, ...]:
+    """The roots of the `[[workspace]]` entries, as written (docs/design.md §4.11). ValueError where the file can't be
+    read."""
+    entries: Any = tomllib.loads(_text(env)).get("workspace", [])
+    if not isinstance(entries, list) or not all(
+        isinstance(e, dict) and isinstance(e.get("root"), str) for e in entries
+    ):
+        raise ValueError("each [[workspace]] needs a root, a folder")
+    roots = tuple(entry["root"] for entry in entries)
+    if relative := [root for root in roots if not expand(root, env).is_absolute()]:
+        raise ValueError(f"a [[workspace]] root is a full path or starts with ~/, not {relative[0]!r}")
+    return roots
 
 
 def record_hooks(env: Mapping[str, str], chosen: tuple[str, ...]) -> None:
