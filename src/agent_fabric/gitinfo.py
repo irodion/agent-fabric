@@ -56,6 +56,19 @@ def _project(cwd: Path) -> str | None:
     return str(Path(common).parent) if common else None
 
 
+def main_checkout(folder: Path) -> Path | None:
+    """The repo's main checkout, for a linked worktree as for the checkout itself; None outside git. In the main
+    checkout that is its top level, wherever its git dir is (`--separate-git-dir`); a linked worktree's main checkout
+    holds the shared git dir. One git call: a hook runs this. A linked worktree of a repo whose git dir is kept
+    elsewhere is placed by that git dir's folder, since git records no path back to the main checkout."""
+    out = _git(folder, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", "--show-toplevel")
+    lines = out.splitlines() if out else []
+    if len(lines) != 3:
+        return None
+    git_dir, common, top = lines
+    return Path(top) if git_dir == common else Path(common).parent
+
+
 def git_project(cwd: Path) -> str | None:
     """Only the project id, in two or three git calls to `git_facts`'s five."""
     return _project(cwd) if _in_work_tree(cwd) else None

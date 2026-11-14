@@ -9,7 +9,8 @@ from collections.abc import Mapping
 from pathlib import Path, PurePath
 from typing import Any
 
-from agent_fabric.hooks import EVENTS, HOOKS, last_ran
+from agent_fabric.config import HOOKS
+from agent_fabric.hooks import EVENTS, last_ran
 from agent_fabric.paths import tilde
 from agent_fabric.report import Row
 from agent_fabric.sandboxes import cant_read, cant_write, replace_file

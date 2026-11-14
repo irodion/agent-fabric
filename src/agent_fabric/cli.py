@@ -15,19 +15,21 @@ from typing import TextIO
 
 from agent_fabric.agents import AgentUnknown, detect_agent
 from agent_fabric.backends import BackendError
+from agent_fabric.config import HOOKS
 from agent_fabric.context import Context
 from agent_fabric.doctor import doctor
 from agent_fabric.gitinfo import git_facts, project_id
-from agent_fabric.hooks import AGENTS, HOOKS, at_work
+from agent_fabric.hooks import AGENTS, at_work
 from agent_fabric.hooks import run as run_hook
 from agent_fabric.inbox import Inbox, Snapshot
 from agent_fabric.ingest import BUSY, Busy, Stopped, ingest
 from agent_fabric.lint import lint
 from agent_fabric.notes import KINDS, MACHINE, MAX_TEXT, STALE_AFTER, Note, expired, missing_ref, new_id
-from agent_fabric.paths import expand, inbox_dir, tilde
+from agent_fabric.paths import config_file, expand, tilde
 from agent_fabric.secretgate import GateUnavailable
 from agent_fabric.shown import shown
 from agent_fabric.wikirepo import WIKI_ERRORS
+from agent_fabric.workspaces import workspace_of
 
 
 @dataclass(frozen=True)
@@ -115,12 +117,22 @@ def run_in(argv: list[str], ctx: Context) -> Result:
                 raise UsageError("--hooks goes with --fix, which records the choice")
             exit_code, report = doctor(env, now, fix=args.fix, hooks=args.hooks)
             return Result(exit_code, report, "")
-        inbox = Inbox(inbox_dir(env))
-        return _note(args, inbox, ctx) if args.command == "note" else _inbox(args, inbox, ctx)
+        return _notes_command(args, ctx)
     except UsageError as e:
         if argv[:1] == ["hook"]:
             return Result(0, "", "")  # an agent's hook never fails (docs/design.md §4.10)
         return Result(2, "", f"kb: {e}\n")
+
+
+def _notes_command(args: argparse.Namespace, ctx: Context) -> Result:
+    """`kb note` and `kb inbox`, on the inbox of the current folder's workspace (docs/design.md §4.11)."""
+    try:
+        inbox = Inbox(workspace_of(ctx.cwd, ctx.env).inbox(ctx.env))
+    except (OSError, ValueError) as e:  # TOMLDecodeError too
+        return Result(
+            1, "", f"kb: can't read {tilde(config_file(ctx.env), ctx.env)}: {getattr(e, 'strerror', None) or e}\n"
+        )
+    return _note(args, inbox, ctx) if args.command == "note" else _inbox(args, inbox, ctx)
 
 
 def _wiki_command(args: argparse.Namespace, ctx: Context) -> Result:

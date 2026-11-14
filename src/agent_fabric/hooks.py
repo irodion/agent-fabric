@@ -17,10 +17,10 @@ from agent_fabric.context import Context
 from agent_fabric.gitinfo import project_id
 from agent_fabric.inbox import Inbox
 from agent_fabric.notes import MACHINE, Note
-from agent_fabric.paths import hooks_dir, inbox_dir
+from agent_fabric.paths import hooks_dir
 from agent_fabric.sandboxes import replace_file
+from agent_fabric.workspaces import any_inbox, hook_workspace
 
-HOOKS = ("start", "stop")
 EVENTS = {  # each agent's events for kb's hooks
     "claude-code": {"start": "SessionStart", "stop": "Stop"},
     "codex": {"start": "SessionStart", "stop": "Stop"},
@@ -68,8 +68,7 @@ def run(event: str, agent: str, ctx: Context) -> str:
 
 def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any] | None:
     """The session-start reminder, in the agent's hook output format; None where the hook should say nothing."""
-    inbox = Inbox(inbox_dir(ctx.env))
-    if _not_for_us(agent, payload, inbox.path):
+    if _not_for_us(agent, payload, ctx.env):
         return None
     marker = _marker(agent, payload, ctx.env)
     if marker:
@@ -81,6 +80,7 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
     if marker:
         with contextlib.suppress(OSError):
             _name_project(marker, project, ctx.now)
+    inbox = Inbox(hook_workspace(_folder(payload, ctx.cwd), ctx.env).inbox(ctx.env))
     found = _reminder(project, [note for _, note in inbox.read().open()])
     advice = (
         "Most sessions need no note. Leave one with `kb note` (skill kb-note) only when you find something the next "
@@ -131,7 +131,7 @@ def stop(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any]
     """At the first end of a turn that `_due` allows, make the agent continue with the question. Every other end of a
     turn keeps the marker's project current, as nothing else tells it of `git init` or a move."""
     marker = _marker(agent, payload, ctx.env)
-    if marker is None or _not_for_us(agent, payload, inbox_dir(ctx.env)):
+    if marker is None or _not_for_us(agent, payload, ctx.env):
         return None
     session = _seen(marker, ctx.now)
     finished = _turn_completed(payload) and not payload.get("stop_hook_active")
@@ -182,10 +182,11 @@ def _turn_completed(payload: Mapping[str, Any]) -> bool:
     )
 
 
-def _not_for_us(agent: str, payload: Mapping[str, Any], inbox: Path) -> bool:
+def _not_for_us(agent: str, payload: Mapping[str, Any], env: Mapping[str, str]) -> bool:
     """Cursor CLI runs Claude Code's user hooks too, and its own entry already reminds it; and without an inbox
-    kb isn't set up (`kb doctor` says so)."""
-    return (agent == "claude-code" and "cursor_version" in payload) or not inbox.is_dir()
+    kb isn't set up (`kb doctor` says so). Any workspace's inbox will do: the session's would take git, which can
+    hang, before the stop hook asks."""
+    return (agent == "claude-code" and "cursor_version" in payload) or not any_inbox(env)
 
 
 def _marker(agent: str, payload: Mapping[str, Any], env: Mapping[str, str]) -> Path | None:
