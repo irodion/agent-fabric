@@ -5,13 +5,11 @@ import subprocess
 from collections.abc import Mapping
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
 
 import pytest
 from conftest import Kb
 
-from agent_fabric import hooks, sandboxes
-from agent_fabric.context import Context
+from agent_fabric import gitinfo, sandboxes
 
 ADVICE = (
     "Most sessions need no note. Leave one with `kb note` (skill kb-note) only when you find something the next "
@@ -575,14 +573,14 @@ def test_a_start_hook_overlapping_a_stop_hook_cant_undo_asked(kb: Kb, monkeypatc
     kb.cwd = kb.home / "code" / "other"
     kb.cwd.mkdir()
     asked: list[str] = []
-    project = hooks._project
+    project = gitinfo.project_id
 
-    def stop_hook_overlaps(payload: Mapping[str, Any], ctx: Context) -> str:
+    def stop_hook_overlaps(folder: Path, env: Mapping[str, str]) -> str:
         if not asked:
             asked.append(kb("hook", "stop", "--agent", "codex", stdin=stop_input(kb)).stdout)
-        return project(payload, ctx)
+        return project(folder, env)
 
-    monkeypatch.setattr("agent_fabric.hooks._project", stop_hook_overlaps)
+    monkeypatch.setattr("agent_fabric.hooks.project_id", stop_hook_overlaps)
     kb("hook", "start", "--agent", "codex", stdin=start_input(kb))
     monkeypatch.undo()
 

@@ -19,7 +19,7 @@ from agent_fabric.inbox import Inbox
 from agent_fabric.notes import MACHINE, Note
 from agent_fabric.paths import hooks_dir
 from agent_fabric.sandboxes import replace_file
-from agent_fabric.workspaces import any_inbox, hook_workspace
+from agent_fabric.workspaces import Workspace, any_inbox, hook_workspace
 
 EVENTS = {  # each agent's events for kb's hooks
     "claude-code": {"start": "SessionStart", "stop": "Stop"},
@@ -51,6 +51,7 @@ class _Session(NamedTuple):
     asked_at: datetime | None  # the last question; None until the first
     compacted: bool  # since the last question (Claude Code's start hook says so; the other agents don't)
     project: str | None  # None until a hook has named it
+    workspace: str | None = None  # its root; None: the default workspace, and a marker from before v0.7 (§4.11)
     from_before: bool = False  # asked, by a kb that didn't record when: `_seen` takes it as asked now
 
 
@@ -76,11 +77,12 @@ def start(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any
             _seen(marker, ctx.now)  # the stop hook counts its 10 minutes from here; before git can hang
             if payload.get("source") == "compact":
                 _compacted(marker, ctx.now)
-    project = _project(payload, ctx)
+    folder = _folder(payload, ctx.cwd)
+    project, workspace = project_id(folder, ctx.env), hook_workspace(folder, ctx.env)
     if marker:
         with contextlib.suppress(OSError):
-            _name_project(marker, project, ctx.now)
-    inbox = Inbox(hook_workspace(_folder(payload, ctx.cwd), ctx.env).inbox(ctx.env))
+            _name_place(marker, workspace, project, ctx.now)
+    inbox = Inbox(workspace.inbox(ctx.env))
     found = _reminder(project, [note for _, note in inbox.read().open()])
     advice = (
         "Most sessions need no note. Leave one with `kb note` (skill kb-note) only when you find something the next "
@@ -139,18 +141,23 @@ def stop(agent: str, payload: Mapping[str, Any], ctx: Context) -> dict[str, Any]
         # first: a marker it can't update means no question
         _record(marker, session._replace(asked_at=ctx.now, compacted=False), ctx.now)
         return _continue(agent, QUESTION)  # no git before this: it can outlast the hook's 10 seconds
-    _name_project(marker, _project(payload, ctx), ctx.now)
+    folder = _folder(payload, ctx.cwd)
+    _name_place(marker, hook_workspace(folder, ctx.env), project_id(folder, ctx.env), ctx.now)
     return None
 
 
-def at_work(project: str, env: Mapping[str, str], now: datetime) -> set[str]:
-    """The agents whose hooks ran for this project lately, by their markers: how `kb note` knows an agent that sets
-    no variable of its own (docs/design.md §4.10). A marker it can't read says nothing."""
+def at_work(workspace: Workspace, project: str, env: Mapping[str, str], now: datetime) -> set[str]:
+    """The agents whose hooks ran for this project in this workspace lately, by their markers: how `kb note` knows an
+    agent that sets no variable of its own (docs/design.md §4.10). A marker it can't read says nothing."""
     agents = set()
     for marker in hooks_dir(env).glob("*.json"):
         with contextlib.suppress(OSError):
             session = _state(marker)
-            if session and session.project == project and _since_a_hook_ran(marker, now) < AT_WORK.total_seconds():
+            if (
+                session
+                and (session.workspace, session.project) == (_root(workspace), project)
+                and _since_a_hook_ran(marker, now) < AT_WORK.total_seconds()
+            ):
                 agents.add(marker.stem.rpartition("-")[0])  # {agent}-{digest}.json
     return agents
 
@@ -232,26 +239,39 @@ def _seen(marker: Path, now: datetime) -> _Session:
     return session
 
 
-def _name_project(marker: Path, project: str, now: datetime) -> None:
-    """The session is in this project: the first hook names it, and later ones follow a session that moves. From the
-    marker as it is now, not as it was before git ran: another hook may have asked since."""
+def _name_place(marker: Path, workspace: Workspace, project: str, now: datetime) -> None:
+    """The session is in this project, in this workspace: the first hook names them, and later ones follow a session
+    that moves. From the marker as it is now, not as it was before git ran: another hook may have asked since."""
     session = _state(marker)
-    if session and session.project != project:
-        _record(marker, session._replace(project=project), now)
+    if session and (session.workspace, session.project) != (root := _root(workspace), project):
+        _record(marker, session._replace(workspace=root, project=project), now)
+
+
+def _root(workspace: Workspace) -> str | None:
+    return None if workspace.root is None else str(workspace.root)
 
 
 def _state(marker: Path) -> _Session | None:
     """What the marker holds; None for no marker, or one kb can't read."""
     try:
         state = json.loads(marker.read_text(encoding="utf-8"))
-        project = state.get("project") if isinstance(state, dict) else None
+        if not isinstance(state, dict):
+            return None
+        project, workspace = state.get("project"), state.get("workspace")
         started = _time(state["started"])
         if started is None:
             return None
         asked_at = _time(state["asked_at"]) if "asked_at" in state else None
         from_before = asked_at is None and state.get("asked") is True
         compacted = state.get("compacted") is True
-        return _Session(started, asked_at, compacted, project if isinstance(project, str) else None, from_before)
+        return _Session(
+            started,
+            asked_at,
+            compacted,
+            project if isinstance(project, str) else None,
+            workspace if isinstance(workspace, str) else None,
+            from_before,
+        )
     except (FileNotFoundError, ValueError, TypeError, KeyError, OverflowError, RecursionError):
         return None
 
@@ -267,6 +287,7 @@ def _record(marker: Path, session: _Session, now: datetime) -> None:
         "asked_at": session.asked_at and session.asked_at.isoformat(),
         "compacted": session.compacted,
         "project": session.project,
+        "workspace": session.workspace,
     }
     replace_file(marker, json.dumps(fields))  # whole, or not at all
     os.utime(marker, (now.timestamp(), now.timestamp()))
@@ -288,10 +309,6 @@ def _continue(agent: str, text: str) -> dict[str, Any]:
     if agent == "cursor":
         return {"followup_message": text}
     return {"decision": "block", "reason": text}
-
-
-def _project(payload: Mapping[str, Any], ctx: Context) -> str:
-    return project_id(_folder(payload, ctx.cwd), ctx.env)
 
 
 def _folder(payload: Mapping[str, Any], cwd: Path) -> Path:
