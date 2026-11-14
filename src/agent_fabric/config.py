@@ -66,6 +66,22 @@ def workspace_roots(env: Mapping[str, str]) -> tuple[str, ...]:
     return roots
 
 
+def machine_opt_outs(env: Mapping[str, str]) -> tuple[str | None, ...]:
+    """The workspaces with `share_machine_notes = false` (docs/design.md §4.11): roots as written, and None for the
+    default workspace, whose setting is under `[publish]`. Sharing is on by default. ValueError where the file can't
+    be read."""
+    data: Any = tomllib.loads(_text(env))
+    publish = data.get("publish", {})
+    if not isinstance(publish, dict):
+        raise ValueError("publish is not a table")
+    entries = [publish, *data.get("workspace", [])]
+    roots = (None, *workspace_roots(env))
+    shares = [entry.get("share_machine_notes", True) for entry in entries]
+    if not all(isinstance(share, bool) for share in shares):
+        raise ValueError("share_machine_notes is true or false")
+    return tuple(root for root, share in zip(roots, shares, strict=True) if not share)
+
+
 def record_hooks(env: Mapping[str, str], chosen: tuple[str, ...]) -> None:
     """Record the choice: change the `hooks` line under [notes], or add it; ValueError where that can't do it."""
     text = _text(env)

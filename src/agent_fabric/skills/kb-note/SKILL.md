@@ -32,8 +32,9 @@ kb note --kind <status|gotcha|fix|decision|idea> --ref <path[:line]|command|comm
   Notes are listed by repo, so without it the note never reaches that repo's sessions; refs are then read from
   that folder.
 - A fact about this machine that holds in every repo (a token's missing permission, a tool that fails in the
-  sandbox, a service's address): add `--machine`, and every project's sessions see it. Never for a fact about
-  one repo. It takes no `--ref`: give the evidence (the command, the error) in the text.
+  sandbox, a service's address): add `--machine`, and every project's sessions see it, in other workspaces too.
+  Never for a fact about one repo, and name no project, client or repo in it. It takes no `--ref`: give the
+  evidence (the command, the error) in the text.
 - Give the evidence with `--ref` (repeat it for several). For text with quotes, backticks or `$`, use stdin:
   `kb note --kind fix --ref <ref> - <<'EOF'` … `EOF`.
 - If `kb` asks for `--agent`, give your tool's name (Claude Code, Codex, Copilot CLI, Cursor CLI), not your
