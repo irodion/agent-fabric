@@ -1063,10 +1063,14 @@ backend = "local"                                    # as [ingest] backend (§4.
 share_machine_notes = false                          # keep this workspace's machine notes in, and others' out
 ```
 
-- **Which workspace.** A folder belongs to the deepest registered root that contains it, and to the default workspace
-  under none. A registered root is one with a `[[workspace]]` entry in `~/.config/agent-fabric/config.toml`, which
-  `kb setup` adds and removes. A `.fabric/` folder that isn't registered means nothing, so a cloned repo that ships one
-  can't move where its notes go. A git checkout is placed by its main checkout (`git rev-parse --git-common-dir`),
+- **Registering a root.** I add a folder as a root in `kb setup`'s first step (below), which writes its `[[workspace]]`
+  entry in `~/.config/agent-fabric/config.toml` and creates its `.fabric/`; removing it there drops the entry and
+  leaves the folder's data alone. The entry can also be written by hand, and `kb doctor --fix` then creates `.fabric/`
+  and the rest of the setup, as it does for the default inbox. A `.fabric/` folder with no entry means nothing, so a
+  cloned repo that ships one can't move where its notes go.
+- **Which workspace.** A folder belongs to the registered root that contains it, and to the default workspace under
+  none. Only when roots nest, such as `~/work` and `~/work/acme`, does a folder sit under two, and then the inner one
+  (`~/work/acme`) wins. A git checkout is placed by its main checkout (`git rev-parse --git-common-dir`),
   since some agents put worktrees outside the project (Codex's `~/.codex/worktrees/…`).
 - **Settings stay out of the root.** The allow list and the backend decide what leaves the machine, so they live in
   `~/.config`, which no agent's sandbox can write, as the default workspace's do. Kept in `.fabric/`, an agent working
