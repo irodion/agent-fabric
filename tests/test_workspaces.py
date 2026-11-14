@@ -149,3 +149,63 @@ def test_the_home_folder_itself_can_be_a_root(kb: Kb) -> None:
     config.write_text('[[workspace]]\nroot = "~"\n')
 
     assert note(kb, "the staging DB resets nightly").parent == kb.home / ".fabric" / "inbox"
+
+
+def test_a_note_about_a_folder_in_another_workspace_is_refused(kb: Kb) -> None:
+    root = a_folder(kb, "work", "acme")
+    register(kb, root)
+    kb.cwd = a_folder(kb, "code", "dotfiles")
+    elsewhere = a_folder(kb, "work", "acme", "billing-api")
+
+    result = kb("note", "--kind", "gotcha", "--agent", "Codex", "--project", str(elsewhere), "the DB resets nightly")
+
+    assert (result.exit_code, list(kb.home.rglob("*.md"))) == (2, [])
+
+
+def test_listing_a_folder_in_another_workspace_says_to_list_it_from_there(kb: Kb) -> None:
+    root = a_folder(kb, "work", "acme")
+    register(kb, root)
+    kb.cwd = a_folder(kb, "work", "acme", "billing-api")
+    note(kb, "the staging DB resets nightly")
+    kb.cwd = a_folder(kb, "code", "dotfiles")
+
+    result = kb("inbox", "--project", str(root / "billing-api"))
+
+    assert (result.exit_code, "another workspace" in result.stderr) == (2, True)
+
+
+def test_a_note_in_another_workspace_cant_be_resolved_from_here(kb: Kb) -> None:
+    root = a_folder(kb, "work", "acme")
+    register(kb, root)
+    kb.cwd = a_folder(kb, "work", "acme", "billing-api")
+    theirs = note(kb, "the staging DB resets nightly").stem.rpartition("-")[2]
+    kb.cwd = a_folder(kb, "code", "dotfiles")
+
+    result = kb("note", "--resolve", theirs, "--agent", "Codex")
+
+    assert (result.exit_code, len(list((root / ".fabric" / "inbox").glob("*.md")))) == (2, 1)
+
+
+def test_an_agent_at_work_in_one_workspace_doesnt_sign_a_note_in_another(kb: Kb) -> None:
+    root = a_folder(kb, "work", "acme")
+    register(kb, root)
+    clones = [a_folder(kb, "work", "acme", "billing-api"), a_folder(kb, "code", "billing-api")]
+    for clone in clones:
+        git(clone, "init", "-q", "-b", "main")
+        git(clone, "remote", "add", "origin", "git@github.com:acme/billing-api.git")
+    (root / ".fabric" / "inbox").mkdir(parents=True)
+    copilot = {"session_id": "s1", "cwd": str(clones[0])}
+    kb("hook", "start", "--agent", "copilot", stdin=json.dumps(copilot))
+    kb.cwd = clones[1]
+
+    path = note(kb, "the staging DB resets nightly")
+
+    assert 'agent: {"name": "Codex"' in path.read_text()
+
+
+def test_listing_the_machines_notes_isnt_taken_for_a_folder_named_machine(kb: Kb) -> None:
+    work = a_folder(kb, "work")
+    register(kb, work, a_folder(kb, "work", "machine"))
+    kb.cwd = work
+
+    assert kb("inbox", "--project", "machine").exit_code == 0

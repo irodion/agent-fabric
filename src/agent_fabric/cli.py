@@ -29,7 +29,7 @@ from agent_fabric.paths import config_file, expand, tilde
 from agent_fabric.secretgate import GateUnavailable
 from agent_fabric.shown import shown
 from agent_fabric.wikirepo import WIKI_ERRORS
-from agent_fabric.workspaces import workspace_of
+from agent_fabric.workspaces import Workspace, workspace_of
 
 
 @dataclass(frozen=True)
@@ -127,12 +127,13 @@ def run_in(argv: list[str], ctx: Context) -> Result:
 def _notes_command(args: argparse.Namespace, ctx: Context) -> Result:
     """`kb note` and `kb inbox`, on the inbox of the current folder's workspace (docs/design.md §4.11)."""
     try:
-        inbox = Inbox(workspace_of(ctx.cwd, ctx.env).inbox(ctx.env))
+        workspace = workspace_of(ctx.cwd, ctx.env)
     except (OSError, ValueError) as e:  # TOMLDecodeError too
         return Result(
             1, "", f"kb: can't read {tilde(config_file(ctx.env), ctx.env)}: {getattr(e, 'strerror', None) or e}\n"
         )
-    return _note(args, inbox, ctx) if args.command == "note" else _inbox(args, inbox, ctx)
+    inbox = Inbox(workspace.inbox(ctx.env))
+    return _note(args, workspace, inbox, ctx) if args.command == "note" else _inbox(args, workspace, inbox, ctx)
 
 
 def _wiki_command(args: argparse.Namespace, ctx: Context) -> Result:
@@ -172,7 +173,7 @@ def _kind(args: argparse.Namespace, snapshot: Snapshot, inbox: Inbox) -> str | R
     return target.kind
 
 
-def _note(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
+def _note(args: argparse.Namespace, workspace: Workspace, inbox: Inbox, ctx: Context) -> Result:
     env, cwd = ctx.env, ctx.cwd
     snapshot = inbox.read()
     kind = _kind(args, snapshot, inbox)
@@ -194,6 +195,10 @@ def _note(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
         )
     own = cwd.resolve()  # physical, as `project_id` names a folder for the hooks' markers
     where = own if args.project is None else _folder(args.project, ctx)
+    if where != own and workspace_of(where, env) != workspace:
+        raise UsageError(  # filed here, no session there would see it; filed there, it would cross workspaces (§4.11)
+            f"--project {args.project}: that folder is in another workspace; write the note from a session there"
+        )
     facts = git_facts(where)
 
     def here() -> str:
@@ -201,7 +206,7 @@ def _note(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
         return (facts.project or tilde(own, env)) if where == own else project_id(own, env)
 
     try:
-        agent = detect_agent(env, args.agent, lambda: at_work(here(), env, ctx.now))
+        agent = detect_agent(env, args.agent, lambda: at_work(workspace, here(), env, ctx.now))
     except AgentUnknown as e:
         raise UsageError(str(e)) from None
     bases = [where, *([facts.root] if facts.root else [])]
@@ -267,12 +272,18 @@ def _age(value: str) -> timedelta:
         raise argparse.ArgumentTypeError(f"{value!r} is too long ago") from None
 
 
-def _inbox(args: argparse.Namespace, inbox: Inbox, ctx: Context) -> Result:
+def _inbox(args: argparse.Namespace, workspace: Workspace, inbox: Inbox, ctx: Context) -> Result:
     snapshot = inbox.read(with_done=args.all)
     resolved_by = {note_id: resolution.id for note_id, (_, resolution) in snapshot.resolved_by.items()}
     if args.all_projects:
         scope = None
     elif args.project:
+        folder = ctx.cwd / expand(args.project, ctx.env)
+        elsewhere = args.project != MACHINE and folder.is_dir() and workspace_of(folder, ctx.env) != workspace
+        if elsewhere:  # its notes aren't in this inbox (§4.11)
+            raise UsageError(
+                f"--project {args.project}: that folder is in another workspace; list its notes from there"
+            )
         scope = _project(args.project, ctx)
     else:
         scope = project_id(ctx.cwd, ctx.env)

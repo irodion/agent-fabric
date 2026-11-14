@@ -67,9 +67,11 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   same thing separately, from `git_facts` and `Note.scope`, so a change to one has to match the other.
 - **Workspaces.** `workspaces.workspace_of` names a folder's workspace (§4.11): the innermost `[[workspace]]` root
   that holds its main checkout, else the default. `kb note`, `kb inbox` and the start hook's count use that
-  workspace's inbox. The hooks' "is kb set up" check looks for any workspace's inbox without running git, since the
-  stop hook must ask before git can hang, and a config they can't read leaves them on the default workspace, while
-  `kb note` stops and names it. Ingest, lint, doctor and the markers don't know workspaces yet.
+  workspace's inbox, and a `--project` folder in another workspace exits 2. The markers record the workspace with the
+  project, since one repo cloned into two has one project id. The hooks' "is kb set up" check looks for any
+  workspace's inbox without running git, since the stop hook must ask before git can hang, and a config they can't
+  read leaves them on the default workspace, while `kb note` stops and names it. Ingest, lint and doctor don't know
+  workspaces yet.
 - **Who signs a note.** `agents.detect_agent` depends on whether an agent's variable is set. With one, an `--agent`
   naming a tool wins, because an agent started by another inherits its variables, and otherwise the variable does. With
   none, an `--agent` naming Copilot CLI or Cursor CLI wins, then the hooks' markers, then any other `--agent`. `kb`
