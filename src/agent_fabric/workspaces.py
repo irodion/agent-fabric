@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_fabric.config import workspace_roots
+from agent_fabric.config import machine_opt_outs, workspace_roots
 from agent_fabric.gitinfo import main_checkout
 from agent_fabric.paths import expand, inbox_dir
 
@@ -23,6 +23,23 @@ def workspace_of(folder: Path, env: Mapping[str, str]) -> Workspace:
     physical = main_checkout(folder) or folder.resolve()
     holding = [path for root in workspace_roots(env) if physical.is_relative_to(path := expand(root, env).resolve())]
     return Workspace(max(holding, key=lambda path: len(path.parts), default=None))
+
+
+def every_workspace(env: Mapping[str, str]) -> list[Workspace]:
+    """The default workspace and each registered root, once."""
+    roots = dict.fromkeys(expand(root, env).resolve() for root in workspace_roots(env))
+    return [Workspace(None), *(Workspace(root) for root in roots)]
+
+
+def machine_workspaces(workspace: Workspace, env: Mapping[str, str]) -> list[Workspace]:
+    """Where a machine note written in this workspace goes, this one first: every workspace that shares machine
+    notes, or this one alone where it opts out (docs/design.md §4.11). A root that isn't there, such as one on a disk
+    that isn't mounted, gets no copy: kb would make the folder, and no session can run in it."""
+    out = {None if root is None else expand(root, env).resolve() for root in machine_opt_outs(env)}
+    if workspace.root in out:
+        return [workspace]
+    others = [other for other in every_workspace(env) if other != workspace and other.root not in out]
+    return [workspace, *(other for other in others if other.root is None or other.root.is_dir())]
 
 
 def any_inbox(env: Mapping[str, str]) -> bool:

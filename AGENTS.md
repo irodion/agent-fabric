@@ -70,8 +70,9 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   workspace's inbox, and a `--project` folder in another workspace exits 2. The markers record the workspace with the
   project, since one repo cloned into two has one project id. The hooks' "is kb set up" check looks for any
   workspace's inbox without running git, since the stop hook must ask before git can hang, and a config they can't
-  read leaves them on the default workspace, while `kb note` stops and names it. Ingest, lint and doctor don't know
-  workspaces yet.
+  read leaves them on the default workspace, while `kb note` stops and names it. A `--machine` note goes into every
+  workspace that shares machine notes, one copy per inbox with one id, and its resolution into each copy still open.
+  Ingest, lint and doctor don't know workspaces yet.
 - **Who signs a note.** `agents.detect_agent` depends on whether an agent's variable is set. With one, an `--agent`
   naming a tool wins, because an agent started by another inherits its variables, and otherwise the variable does. With
   none, an `--agent` naming Copilot CLI or Cursor CLI wins, then the hooks' markers, then any other `--agent`. `kb`

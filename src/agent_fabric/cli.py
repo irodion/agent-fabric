@@ -15,7 +15,7 @@ from typing import TextIO
 
 from agent_fabric.agents import AgentUnknown, detect_agent
 from agent_fabric.backends import BackendError
-from agent_fabric.config import HOOKS
+from agent_fabric.config import HOOKS, machine_opt_outs
 from agent_fabric.context import Context
 from agent_fabric.doctor import doctor
 from agent_fabric.gitinfo import git_facts, project_id
@@ -29,7 +29,7 @@ from agent_fabric.paths import config_file, expand, tilde
 from agent_fabric.secretgate import GateUnavailable
 from agent_fabric.shown import shown
 from agent_fabric.wikirepo import WIKI_ERRORS
-from agent_fabric.workspaces import Workspace, workspace_of
+from agent_fabric.workspaces import Workspace, machine_workspaces, workspace_of
 
 
 @dataclass(frozen=True)
@@ -128,6 +128,8 @@ def _notes_command(args: argparse.Namespace, ctx: Context) -> Result:
     """`kb note` and `kb inbox`, on the inbox of the current folder's workspace (docs/design.md §4.11)."""
     try:
         workspace = workspace_of(ctx.cwd, ctx.env)
+        if args.command == "note" and (args.machine or args.resolve):  # a machine note, or maybe its resolution
+            machine_opt_outs(ctx.env)  # read now, so a bad setting stops here and is named
     except (OSError, ValueError) as e:  # TOMLDecodeError too
         return Result(
             1, "", f"kb: can't read {tilde(config_file(ctx.env), ctx.env)}: {getattr(e, 'strerror', None) or e}\n"
@@ -165,10 +167,10 @@ def _kind(args: argparse.Namespace, snapshot: Snapshot, inbox: Inbox) -> str | R
     target = everything.find(args.resolve)
     if target is None or target.resolves:
         raise UsageError(f"no note {args.resolve} in {inbox.path}; `kb inbox` lists the open ones")
-    if done := everything.resolved_by.get(args.resolve):
+    if (done := everything.resolved_by.get(args.resolve)) and target.project != MACHINE:  # copies: _resolve_machine
         path, resolution = done
         return Result(0, f"{resolution.id} {path}\n", f"kb: {args.resolve} was already resolved\n")
-    if snapshot.find(args.resolve) is None:
+    if snapshot.find(args.resolve) is None and target.project != MACHINE:  # its other copies: _resolve_machine
         raise UsageError(f"{args.resolve} is already filed on the wiki; write what's true now as a new note")
     return target.kind
 
@@ -188,7 +190,9 @@ def _note(args: argparse.Namespace, workspace: Workspace, inbox: Inbox, ctx: Con
         raise UsageError(
             f"the note is {len(text)} characters; keep it to {MAX_TEXT} characters and link longer detail with --ref"
         )
-    if args.machine and args.ref:
+    resolving = inbox.read(with_done=True).find(args.resolve) if args.resolve else None  # `_kind` found it
+    machine = args.machine or (resolving is not None and resolving.project == MACHINE)
+    if machine and args.ref:
         raise UsageError(
             "drop --ref: a machine note is read in every project, where a path means something else;"
             " give the evidence in the text"
@@ -226,32 +230,108 @@ def _note(args: argparse.Namespace, workspace: Workspace, inbox: Inbox, ctx: Con
         id=new_id(),
         kind=kind,
         agent=agent,
-        project=MACHINE if args.machine else facts.project,
-        cwd="~" if args.machine else tilde(where, env),  # the folder would name a project that may not be published
-        branch=None if args.machine else facts.branch,
-        commit=None if args.machine else facts.commit,
+        project=MACHINE if machine else facts.project,  # a machine note's resolution goes where it went (§4.11)
+        cwd="~" if machine else tilde(where, env),  # the folder would name a project that may not be published
+        branch=None if machine else facts.branch,
+        commit=None if machine else facts.commit,
         time=time,
         refs=args.ref,
         resolves=args.resolve,
         text=text,
     )
-    if repeat := snapshot.repeat_of(note):
-        path, old = repeat
-        return Result(0, f"{old.id} {path}\n", "".join(warnings))
-    try:
-        path, note = inbox.add(note)
-    except UnicodeEncodeError as e:
-        raise UsageError(
-            "the note has bytes that aren't valid UTF-8 (in its text, a --ref, --agent, or the folder or branch name)"
-        ) from e
-    except OSError as e:
-        message = f"kb: can't write the note to {inbox.path}: {e.strerror or e}."
-        if e.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
-            message += (
-                " Inside an agent's sandbox, add that folder to the sandbox's write list (docs/design.md §4.10)."
-            )
-        return Result(1, "", message + "\n")
-    return Result(0, f"{note.id} {path}\n", "".join(warnings) + advice)
+    if not machine:
+        return _write(note, [inbox], "".join(warnings), advice)
+    if resolving is None:
+        sharing = [Inbox(each.inbox(env)) for each in machine_workspaces(workspace, env)]
+        return _write(note, sharing, "".join(warnings), advice)
+    return _resolve_machine(note, resolving, workspace, env, "".join(warnings))
+
+
+def _resolve_machine(
+    note: Note, resolving: Note, workspace: Workspace, env: Mapping[str, str], warnings: str
+) -> Result:
+    """Write a machine note's resolution into every workspace that shares machine notes and still holds it open, and
+    name those whose ingest has filed it (docs/design.md §4.11). A retry writes the earlier resolution into the
+    copies the first one missed."""
+    still_open, filed, earlier = [], [], None
+    for each in machine_workspaces(workspace, env):
+        inbox = Inbox(each.inbox(env))
+        everything = inbox.read(with_done=True)
+        if everything.find(resolving.id) is None:
+            continue
+        if resolved := everything.resolved_by.get(resolving.id):
+            earlier = earlier or resolved
+        elif inbox.read().find(resolving.id) is None:
+            filed.append("the default workspace" if each.root is None else tilde(each.root, env))
+        else:
+            still_open.append(inbox)
+    if not still_open:
+        if earlier:
+            path, resolution = earlier
+            return Result(0, f"{resolution.id} {path}\n", f"kb: {resolving.id} was already resolved\n")
+        raise UsageError(f"{resolving.id} is already filed on the wiki; write what's true now as a new note")
+    if earlier:
+        warnings += f"kb: {resolving.id} was already resolved; that resolution is copied to where it's still open\n"
+    if filed:
+        warnings += (
+            f"kb: {resolving.id} is already filed on the wiki of {', '.join(filed)}, and stays there as it is:"
+            " check its claim when you review that wiki's next ingest.\n"
+        )
+    return _write(earlier[1] if earlier else note, still_open, warnings, "", keep_id=earlier is not None)
+
+
+def _write(note: Note, inboxes: list[Inbox], warnings: str, advice: str, *, keep_id: bool = False) -> Result:
+    """Write the note into each inbox, the current workspace's first, with one id: a machine note goes into every
+    workspace's (docs/design.md §4.11). One that can't be written doesn't stop the others, and a retry within 24 h
+    writes the earlier note into only the inboxes that miss it, not those whose ingest has filed it."""
+    everything = [inbox.read(with_done=True) for inbox in inboxes]
+    resolved = {note_id for snapshot in everything for note_id in snapshot.resolved_by}  # resolved and back: new
+    repeats = [  # filed copies count too: a retry after ingest took one fills only the missing copies
+        {old.id: (file, old) for file, old in snapshot.repeats(note) if old.id not in resolved}
+        for snapshot in everything
+    ]
+    held = [  # open copies, not filed ones
+        {note_id for note_id, (file, _) in found.items() if file.parent == inbox.path}
+        for inbox, found in zip(inboxes, repeats, strict=True)
+    ]
+    candidates = [  # a note filed everywhere and noted again is a new note
+        old
+        for found in repeats
+        for _, old in found.values()
+        if any(old.id in open_ids or old.id not in each for open_ids, each in zip(held, repeats, strict=True))
+    ]
+    earlier = max(candidates, key=lambda old: (old.time, old.id), default=None)  # one id everywhere
+    note = earlier or note
+    written: list[tuple[str, Path]] = []
+    new = False  # advice is about where a new note went
+    missed = ""
+    for index, (inbox, repeat) in enumerate(zip(inboxes, repeats, strict=True)):
+        if earlier and earlier.id in repeat:
+            file = repeat[earlier.id][0]
+            if file.parent == inbox.path:  # else filed already
+                written.append((earlier.id, file))
+            continue
+        if held[index]:  # its own open copy, under another id
+            continue
+        try:
+            path, note = inbox.add(note, keep_id=keep_id or bool(earlier or written))
+        except UnicodeEncodeError as e:
+            raise UsageError(
+                "the note has bytes that aren't valid UTF-8"
+                " (in its text, a --ref, --agent, or the folder or branch name)"
+            ) from e
+        except OSError as e:
+            missed += f"kb: can't write the note to {inbox.path}: {e.strerror or e}."
+            if e.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
+                missed += (
+                    " Inside an agent's sandbox, add that folder to the sandbox's write list (docs/design.md §4.10)."
+                )
+            missed += "\n"
+            continue
+        written.append((note.id, path))
+        new = True
+    stdout = "".join(f"{note_id} {path}\n" for note_id, path in written)
+    return Result(1 if missed else 0, stdout, missed + warnings + (advice if new else ""))
 
 
 def _hooks(value: str) -> tuple[str, ...]:
