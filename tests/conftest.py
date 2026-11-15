@@ -53,7 +53,7 @@ if [ -e "$state/no-bus" ]; then
   exit 1
 fi
 case "$*" in
-  "--user show --property=UnitFileState,ActiveState,Result fabric-ingest.timer fabric-ingest.service")
+  "--user show --property=UnitFileState,ActiveState,Result "*)
     enabled=$(cat "$state/enabled" 2>/dev/null)
     active=inactive
     [ "$enabled" = enabled ] && [ ! -e "$state/stopped" ] && active=active
@@ -62,8 +62,9 @@ case "$*" in
     result=$(cat "$state/result" 2>/dev/null || echo success)
     printf 'ActiveState=inactive\nUnitFileState=static\nResult=%s\n' "$result" ;;
   "--user daemon-reload") ;;
-  "--user enable --now fabric-ingest.timer") [ -e "$state/cannot-enable" ] && { echo 'Access denied' >&2; exit 1; }
+  "--user enable --now "*) [ -e "$state/cannot-enable" ] && { echo 'Access denied' >&2; exit 1; }
     printf enabled > "$state/enabled"; rm -f "$state/stopped" ;;
+  "--user disable --now "*) if [ -e "$state/cannot-disable" ]; then echo 'Access denied' >&2; exit 1; fi ;;
   *) echo "unexpected: $*" >&2; exit 2 ;;
 esac
 """
