@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TextIO
 
 from agent_fabric.agents import AgentUnknown, detect_agent
-from agent_fabric.backends import BackendError
+from agent_fabric.backends import BACKENDS, BackendError
 from agent_fabric.config import HOOKS, machine_opt_outs
 from agent_fabric.context import Context
 from agent_fabric.doctor import doctor
@@ -29,7 +29,7 @@ from agent_fabric.paths import config_file, expand, tilde
 from agent_fabric.secretgate import GateUnavailable
 from agent_fabric.shown import shown
 from agent_fabric.wikirepo import WIKI_ERRORS
-from agent_fabric.workspaces import Workspace, machine_workspaces, workspace_of
+from agent_fabric.workspaces import Workspace, every_workspace, machine_workspaces, workspace_of
 
 
 @dataclass(frozen=True)
@@ -51,6 +51,9 @@ class UsageError(Exception):
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> typing.NoReturn:
         raise UsageError(message)
+
+
+WORKSPACE_HELP = "default, or a [[workspace]] root; the current folder's workspace by default"
 
 
 def run(argv: list[str], *, env: Mapping[str, str], cwd: Path, stdin: TextIO, now: datetime) -> Result:
@@ -99,12 +102,16 @@ def run_in(argv: list[str], ctx: Context) -> Result:
     ingest_cmd = commands.add_parser(
         "ingest", help="file open notes on a review branch of the wiki (docs/design.md §4.7)"
     )
+    ingest_cmd.add_argument("--workspace", help=WORKSPACE_HELP)
     ingest_cmd.add_argument("--project", help="only this project: an id, or a folder")
-    ingest_cmd.add_argument("--backend", choices=("codex",), default="codex", help="what answers the questions")
+    ingest_cmd.add_argument(
+        "--backend", choices=BACKENDS, help="what answers the questions; the workspace's backend by default"
+    )
     ingest_cmd.add_argument(
         "--dry-run", action="store_true", help="say which notes it would take, and change nothing"
     )
-    commands.add_parser("lint", help="what's stale or broken in the wiki (docs/design.md §4.7)")
+    lint_cmd = commands.add_parser("lint", help="what's stale or broken in the wiki (docs/design.md §4.7)")
+    lint_cmd.add_argument("--workspace", help=WORKSPACE_HELP)
     env, now = ctx.env, ctx.now
     try:
         args = parser.parse_args(argv)
@@ -138,12 +145,32 @@ def _unreadable_config(e: OSError | ValueError, env: Mapping[str, str]) -> Resul
     return Result(1, "", f"kb: can't read {tilde(config_file(env), env)}: {getattr(e, 'strerror', None) or e}\n")
 
 
+def _named_workspace(value: str | None, ctx: Context) -> Workspace:
+    """`--workspace`: `default`, a registered root, or with none the current folder's workspace (docs/design.md
+    §4.11). A folder that isn't a root is refused, since a `.fabric/` there means nothing."""
+    if value is None:
+        return workspace_of(ctx.cwd, ctx.env)
+    if value == "default":
+        return Workspace(None)
+    named = (ctx.cwd / expand(value, ctx.env)).resolve()
+    if named not in {workspace.root for workspace in every_workspace(ctx.env)}:
+        raise UsageError(f"{value} isn't a registered workspace root: give default or a [[workspace]] root")
+    if not named.is_dir():  # such as a disk that isn't mounted: kb would make the folder
+        raise UsageError(f"{value} isn't there: mount it, or remove its [[workspace]] entry")
+    return Workspace(named)
+
+
 def _wiki_command(args: argparse.Namespace, ctx: Context) -> Result:
     try:
+        workspace = _named_workspace(args.workspace, ctx)
+        wanted = getattr(args, "project", None)
+        project = _project_here(wanted, workspace, ctx, "ingest that workspace") if wanted else None
+    except (OSError, ValueError) as e:  # TOMLDecodeError too
+        return _unreadable_config(e, ctx.env)
+    try:
         if args.command == "lint":
-            return Result(*lint(ctx.env, ctx.now), "")
-        project = _project(args.project, ctx) if args.project else None
-        return Result(*ingest(ctx, project=project, dry_run=args.dry_run), "")
+            return Result(*lint(ctx.env, ctx.now, workspace), "")
+        return Result(*ingest(ctx, workspace, project=project, backend=args.backend, dry_run=args.dry_run), "")
     except Busy as e:
         return Result(BUSY, "", f"kb: {e}\n")
     except (BackendError, GateUnavailable, Stopped, *WIKI_ERRORS) as e:
@@ -363,13 +390,7 @@ def _inbox(args: argparse.Namespace, workspace: Workspace, inbox: Inbox, ctx: Co
     if args.all_projects:
         scope = None
     elif args.project:
-        folder = ctx.cwd / expand(args.project, ctx.env)
-        elsewhere = args.project != MACHINE and folder.is_dir() and workspace_of(folder, ctx.env) != workspace
-        if elsewhere:  # its notes aren't in this inbox (§4.11)
-            raise UsageError(
-                f"--project {args.project}: that folder is in another workspace; list its notes from there"
-            )
-        scope = _project(args.project, ctx)
+        scope = _project_here(args.project, workspace, ctx, "list its notes from there")
     else:
         scope = project_id(ctx.cwd, ctx.env)
     notes = [
@@ -396,6 +417,15 @@ def _folder(value: str, ctx: Context) -> Path:
     if not folder.is_dir():
         raise UsageError(f"--project {value}: no such folder; give the folder of the repo the note is about")
     return folder
+
+
+def _project_here(value: str, workspace: Workspace, ctx: Context, instead: str) -> str:
+    """`_project` for a command on one workspace's inbox: a folder in another workspace is refused, since its notes
+    aren't in this inbox (docs/design.md §4.11)."""
+    folder = ctx.cwd / expand(value, ctx.env)
+    if value != MACHINE and folder.is_dir() and workspace_of(folder, ctx.env) != workspace:
+        raise UsageError(f"--project {value}: that folder is in another workspace; {instead}")
+    return _project(value, ctx)
 
 
 def _project(value: str, ctx: Context) -> str:

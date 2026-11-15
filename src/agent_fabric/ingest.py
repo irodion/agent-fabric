@@ -8,10 +8,10 @@ from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from agent_fabric import manifests
-from agent_fabric.backends import Backend, CodexBackend, InvalidAnswer, Question
-from agent_fabric.config import allowed_projects
+from agent_fabric.backends import BACKENDS, Backend, CodexBackend, InvalidAnswer, Question
 from agent_fabric.context import Context
 from agent_fabric.decisions import (
     Decision,
@@ -39,9 +39,10 @@ from agent_fabric.pages import (
     page_path,
     raw_path,
 )
-from agent_fabric.paths import config_file, inbox_dir, ingest_worktree, tilde, wiki_dir
+from agent_fabric.paths import config_file, tilde
 from agent_fabric.secretgate import redact, scan
 from agent_fabric.wikirepo import MAIN, Git, ensure_wiki, open_worktree, publish, ready
+from agent_fabric.workspaces import Workspace
 
 KINDS = ("gotcha", "fix", "decision", "idea")  # what a run takes; an idea skips the model
 MIN_NOTES = 3
@@ -299,22 +300,23 @@ def _commit(wiki: Git, tree: Git, manifest: Manifest, found: list[Finding], what
     publish(wiki, tree, manifest.branch, what)
 
 
-def _flag_only(ctx: Context, wiki: Git, current: Manifest, found: list[Finding]) -> str:
+def _flag_only(ctx: Context, workspace: Workspace, wiki: Git, current: Manifest, found: list[Finding]) -> str:
     """Nothing to file, but the review list has news."""
-    tree = open_worktree(wiki, ingest_worktree(ctx.env), current.branch)
+    tree = open_worktree(wiki, workspace.worktree(ctx.env), current.branch)
     _commit(wiki, tree, current, found, "ingest: flag resolved notes")
     return _told(wiki, ctx.env, current, [])
 
 
-def _run(ctx: Context, wiki: Git, current: Manifest | None, take: list[Note], found: list[Finding]) -> str:
+def _run(ctx: Context, workspace: Workspace, current: Manifest | None, take: list[Note], found: list[Finding]) -> str:
     env = ctx.env
-    backend = ctx.backend or CodexBackend(env)
+    backend = ctx.backend or CodexBackend(env)  # `ingest` sets the one chosen
+    wiki = ensure_wiki(workspace.wiki(env), env, agents_file())
     if current is None:
         current = Manifest(manifests.next_name(wiki, f"{ctx.now:%Y-%m-%d}"), wiki("rev-parse", MAIN).strip())
         start = MAIN
     else:
         start = current.branch
-    tree = open_worktree(wiki, ingest_worktree(env), start)
+    tree = open_worktree(wiki, workspace.worktree(env), start)
     current.notes += [note.id for note in take if note.id not in current.notes]
     _write(tree, current.path, current.render())
     publish(wiki, tree, current.branch, f"ingest: take {len(take)} notes")
@@ -331,9 +333,8 @@ def _run(ctx: Context, wiki: Git, current: Manifest | None, take: list[Note], fo
 
 
 @contextmanager
-def _lock(env: Mapping[str, str]) -> Iterator[None]:
+def _lock(path: Path) -> Iterator[None]:
     """One run at a time: a timer can fire during a manual run, and both would use the one worktree."""
-    path = inbox_dir(env).parent / "ingest.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as held:
         try:
@@ -343,38 +344,63 @@ def _lock(env: Mapping[str, str]) -> Iterator[None]:
         yield
 
 
-def _allowed(env: Mapping[str, str]) -> tuple[str, ...]:
+def _allowed(env: Mapping[str, str], workspace: Workspace) -> tuple[str, ...]:
     try:
-        return allowed_projects(env)
+        return workspace.allowed(env)
     except ValueError as e:
         raise Stopped(f"can't read {config_file(env)}: {e}") from e
 
 
-def ingest(ctx: Context, *, project: str | None = None, dry_run: bool = False) -> tuple[int, str]:
+def _backend(ctx: Context, workspace: Workspace, name: str | None) -> Backend:
+    """What answers the questions: the backend named, or the workspace's. A setting kb can't use stops the run before
+    any model is asked."""
+    try:
+        name = name or workspace.backend(ctx.env)
+    except ValueError as e:
+        raise Stopped(f"can't read {config_file(ctx.env)}: {e}") from e
+    if name not in BACKENDS:
+        config = tilde(config_file(ctx.env), ctx.env)
+        raise Stopped(f"the backend {name!r} in {config} isn't one this kb has: {', '.join(BACKENDS)}")
+    return ctx.backend or CodexBackend(ctx.env)  # a test's fake stands in for any
+
+
+def ingest(
+    ctx: Context,
+    workspace: Workspace,
+    *,
+    project: str | None = None,
+    backend: str | None = None,
+    dry_run: bool = False,
+) -> tuple[int, str]:
+    """`kb ingest` on one workspace's inbox and wiki, under its lock and on its backend, or the one named
+    (docs/design.md §4.7, §4.11). A dry run asks no model, so it needs none."""
     if dry_run:
-        return _pass(ctx, project, dry_run=True)
-    with _lock(ctx.env):
-        return _pass(ctx, project, dry_run=False)
+        return _pass(ctx, workspace, project, dry_run=True)
+    ctx = replace(ctx, backend=_backend(ctx, workspace, backend))
+    with _lock(workspace.lock(ctx.env)):
+        return _pass(ctx, workspace, project, dry_run=False)
 
 
-def _nothing_to_take(env: Mapping[str, str], allowed: tuple[str, ...], project: str | None) -> str:
+def _nothing_to_take(
+    env: Mapping[str, str], workspace: Workspace, allowed: tuple[str, ...], project: str | None
+) -> str:
     """Why there's nothing to take."""
-    config = tilde(config_file(env), env)
+    where = f"{workspace.allow_list(env)} in {tilde(config_file(env), env)}"
     if not allowed:
-        return f"kb ingest: no project is allowed yet: add its id under [publish] allow in {config}\n"
+        return f"kb ingest: no project is allowed yet: add its id under {where}\n"
     if project is not None and project not in allowed:
-        return f"kb ingest: {project} isn't on [publish] allow in {config}\n"
+        return f"kb ingest: {project} isn't on {where}\n"
     kinds = f"{', '.join(KINDS[:-1])} or {KINDS[-1]}"
     return f"kb ingest: no new {kinds} note in {project or 'an allowed project'}\n"
 
 
-def _pass(ctx: Context, project: str | None, *, dry_run: bool) -> tuple[int, str]:
+def _pass(ctx: Context, workspace: Workspace, project: str | None, *, dry_run: bool) -> tuple[int, str]:
     env = ctx.env
-    allowed = _allowed(env)
-    found = findings(env, ctx.now)  # step 1: claims go stale while the inbox is quiet
+    allowed = _allowed(env, workspace)
+    found = findings(env, ctx.now, workspace)  # step 1: claims go stale while the inbox is quiet
     report = render_findings(found) if found else ""
-    inbox = Inbox(inbox_dir(env))
-    folder = wiki_dir(env)
+    inbox = Inbox(workspace.inbox(env))
+    folder = workspace.wiki(env)
     known = ready(folder, env)
     wiki = Git(folder, env)
     merged = manifests.merged(wiki) if known else []
@@ -403,13 +429,15 @@ def _pass(ctx: Context, project: str | None, *, dry_run: bool) -> tuple[int, str
     if len(counted) < MIN_NOTES and oldest < MAX_WAIT:
         wait = f"kb ingest: {len(counted)} open, the oldest {oldest.days} days old: waiting for {MIN_NOTES}\n"
         if flagged and current:
-            return 0, report + (wait if counted else "") + _flag_only(ctx, wiki, current, found)
+            return 0, report + (wait if counted else "") + _flag_only(ctx, workspace, wiki, current, found)
         if counted:
             return 0, report + wait
-        return 0, report + _nothing_to_take(env, allowed, project) + (_review(wiki, env, current) if current else "")
+        return 0, report + _nothing_to_take(env, workspace, allowed, project) + (
+            _review(wiki, env, current) if current else ""
+        )
     own = current.outcomes if current else {}
     take = [note for note in eligible if note.id not in own]  # step 2: with a note that failed on a merged branch
     if dry_run:
         listed = "".join(f"{note.id} {note.kind} {note.scope}\n" for note in take)
         return 0, f"{report}kb ingest: would take {len(take)} notes:\n{listed}"
-    return 0, report + _run(ctx, ensure_wiki(folder, env, agents_file()), current, take, found)
+    return 0, report + _run(ctx, workspace, current, take, found)

@@ -77,7 +77,7 @@ def test_the_service_runs_the_installed_kb_with_the_folders_of_its_tools(lab: La
 
     service = unit(lab.kb, "fabric-ingest.service")
     kb = lab.kb.home / ".local" / "share" / "uv" / "tools" / "agent-fabric" / "bin" / "kb"
-    assert f'ExecStart="{kb}" ingest\n' in service
+    assert f'ExecStart="{kb}" ingest --workspace default\n' in service
     # codex and gitleaks are the stubs here; git is the system's. A unit's PATH has none of a shell's additions.
     path = next(line for line in service.splitlines() if line.startswith("Environment="))
     assert path.startswith(f'Environment="PATH={tmp_path / "stubs"}:')
@@ -221,7 +221,9 @@ def test_a_dollar_in_kbs_path_is_not_expanded_by_systemd(lab: Lab, tmp_path: Pat
 
     lab.kb("doctor", "--fix")
 
-    assert f'ExecStart="{tmp_path}/tools$$HOME/agent-fabric/bin/kb" ingest\n' in unit(lab.kb, "fabric-ingest.service")
+    assert f'ExecStart="{tmp_path}/tools$$HOME/agent-fabric/bin/kb" ingest --workspace default\n' in unit(
+        lab.kb, "fabric-ingest.service"
+    )
 
 
 def test_an_installed_timer_is_still_checked_once_no_project_is_allowed(lab: Lab) -> None:

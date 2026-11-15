@@ -85,9 +85,13 @@ def ensure_wiki(folder: Path, env: Mapping[str, str], agents: str) -> Git:
 
 def open_worktree(wiki: Git, folder: Path, start: str) -> Git:
     """The worktree at `start`, with anything a run that died left behind dropped. It holds nothing of its own, so one
-    that no longer works, such as after the wiki was restored from its bundle, is made again."""
+    that no longer works, such as after the wiki was restored from its bundle, is made again, and so is anything that
+    isn't this wiki's worktree: a root's is in its `.fabric/`, which an agent there can write, and a link to another
+    repo would get its checkout forced and its files cleaned (docs/design.md §4.11)."""
     tree = Git(folder, wiki.env)
-    if folder.exists() and not ((folder / ".git").exists() and tree.ok("rev-parse", "--git-dir")):
+    if folder.is_symlink():
+        folder.unlink()
+    elif folder.exists() and not _worktree_of(wiki, tree):
         shutil.rmtree(folder)
     wiki("worktree", "prune")
     if not folder.exists():
@@ -95,6 +99,17 @@ def open_worktree(wiki: Git, folder: Path, start: str) -> Git:
     tree("checkout", "-q", "--force", "--detach", start)
     tree("clean", "-qfdx")
     return tree
+
+
+def _worktree_of(wiki: Git, tree: Git) -> bool:
+    """Whether `tree` is a worktree of `wiki`'s repo, at its own top."""
+    if not (tree.folder / ".git").is_file():  # a worktree's .git is a file naming the repo
+        return False
+    try:
+        common, top = tree("rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel").splitlines()
+    except (GitError, ValueError):
+        return False
+    return Path(common) == (wiki.folder / ".git").resolve() and Path(top) == tree.folder.resolve()
 
 
 def publish(wiki: Git, tree: Git, branch: str, message: str) -> None:

@@ -60,7 +60,8 @@ def units(env: Mapping[str, str]) -> dict[str, str]:
     )
     service = (
         f"{HEADER}[Unit]\nDescription=kb ingest: file agent notes in the wiki\n\n"
-        f"[Service]\nType=oneshot\n{environment}ExecStart={_quoted(str(kb), command=True)} ingest\n"
+        f"[Service]\nType=oneshot\n{environment}"
+        f"ExecStart={_quoted(str(kb), command=True)} ingest --workspace default\n"  # not the folder it starts in
         f"SuccessExitStatus={BUSY}\n"
     )
     timer = (

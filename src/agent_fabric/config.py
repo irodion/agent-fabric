@@ -7,9 +7,10 @@ import json
 import re
 import tomllib
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from agent_fabric.paths import config_file, expand
+from agent_fabric.paths import config_file, expand, tilde
 from agent_fabric.sandboxes import replace_file
 
 HOOKS = ("start", "stop")
@@ -42,14 +43,44 @@ def hooks_choice(env: Mapping[str, str]) -> tuple[str, ...]:
     return HOOKS if recorded is None else recorded
 
 
-def allowed_projects(env: Mapping[str, str]) -> tuple[str, ...]:
-    """The project ids under `[publish] allow` (docs/design.md §4.5). The list starts empty: nothing is published
-    until a project is added. ValueError where the file can't be read."""
-    publish: Any = tomllib.loads(_text(env)).get("publish", {})
-    allow = publish.get("allow", []) if isinstance(publish, dict) else None
+def setting(env: Mapping[str, str], root: Path | None, table: str, key: str) -> str:
+    """Where a workspace's setting is, for a message: `[publish] allow`, or `allow in the [[workspace]] for ~/x`."""
+    return f"[{table}] {key}" if root is None else f"{key} in the [[workspace]] for {tilde(root, env)}"
+
+
+def _settings(env: Mapping[str, str], root: Path | None, table: str) -> dict[str, Any]:
+    """A workspace's settings: the default's under `[table]`, a root's in the `[[workspace]]` entry whose root is
+    `root` (resolved), the first where two name it (docs/design.md §4.11). ValueError where the file can't be read, or
+    has no entry for `root`: defaults in its place could send a client's notes to another backend."""
+    data: Any = tomllib.loads(_text(env))
+    if root is None:
+        found = data.get(table, {})
+    else:
+        entries = zip(workspace_roots(env), data.get("workspace", []), strict=True)
+        found = next((entry for written, entry in entries if expand(written, env).resolve() == root), None)
+        if found is None:
+            raise ValueError(f"no [[workspace]] has the root {tilde(root, env)}")
+    if not isinstance(found, dict):
+        raise ValueError(f"{table} is not a table")
+    return found
+
+
+def allowed_projects(env: Mapping[str, str], root: Path | None = None) -> tuple[str, ...]:
+    """The workspace's allow list of project ids (docs/design.md §4.5). It starts empty: nothing is published until a
+    project is added. ValueError where the file can't be read."""
+    allow = _settings(env, root, "publish").get("allow", [])
     if not isinstance(allow, list) or not all(isinstance(project, str) for project in allow):
-        raise ValueError("publish.allow must be a list of project ids")
+        raise ValueError(f"{setting(env, root, 'publish', 'allow')} must be a list of project ids")
     return tuple(allow)
+
+
+def ingest_backend(env: Mapping[str, str], root: Path | None = None) -> str:
+    """The workspace's backend (docs/design.md §4.7): the default's under `[ingest]`; `codex` where none is set.
+    ValueError where the file can't be read."""
+    backend = _settings(env, root, "ingest").get("backend", "codex")
+    if not isinstance(backend, str):
+        raise ValueError(f"{setting(env, root, 'ingest', 'backend')} must be a name, such as codex")
+    return backend
 
 
 def workspace_roots(env: Mapping[str, str]) -> tuple[str, ...]:
