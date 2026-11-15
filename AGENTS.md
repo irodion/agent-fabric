@@ -38,9 +38,9 @@ itself.
   skill copies and the hooks, and has to run in the user's own terminal, because a sandbox can't write the agents'
   settings: ask the user to run it.
 - `kb note` and `kb hook` write to the real inbox and markers, and the inbox is append-only. `kb doctor --fix` edits
-  the real agents' settings, and writes and starts `fabric-ingest.timer` once a project is allowed. Tests that run
-  `kb doctor` with an allow list use the `lab` fixture, whose stand-in `systemctl` keeps them off the real user
-  manager. To try a command that writes, with `XDG_DATA_HOME` unset, give it a throwaway home:
+  the real agents' settings, and writes and starts a workspace's `fabric-ingest@<workspace>.timer` once a project is
+  allowed there. Tests that run `kb doctor` with an allow list use the `lab` fixture, whose stand-in `systemctl` keeps
+  them off the real user manager. To try a command that writes, with `XDG_DATA_HOME` unset, give it a throwaway home:
   `HOME="$(mktemp -d)" .venv/bin/kb <args>`.
 - `kb ingest` moves notes out of the inbox, writes `~/wiki` and spends model requests through `codex`, so ask first. To
   try it, use a throwaway home with a stub `codex` on PATH (`tests/test_codex.py` has one).
@@ -73,8 +73,8 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   read leaves them on the default workspace, while `kb note` stops and names it. A `--machine` note goes into every
   workspace that shares machine notes, one copy per inbox with one id, and its resolution into each copy still open.
   `kb ingest` and `kb lint` work on one workspace (`--workspace default|ROOT`, else the current folder's): its inbox,
-  wiki, worktree, lock, allow list and backend all come from the `Workspace`. `kb doctor` and the timer still know only
-  the default workspace.
+  wiki, worktree, lock, allow list and backend all come from the `Workspace`. `kb doctor` sets up every workspace: its
+  inbox, the sandboxes' write lists, a timer pair per workspace with a project allowed, and its wiki's rows.
 - **Who signs a note.** `agents.detect_agent` depends on whether an agent's variable is set. With one, an `--agent`
   naming a tool wins, because an agent started by another inherits its variables, and otherwise the variable does. With
   none, an `--agent` naming Copilot CLI or Cursor CLI wins, then the hooks' markers, then any other `--agent`. `kb`

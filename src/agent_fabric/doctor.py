@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -12,11 +13,11 @@ from pathlib import Path
 from agent_fabric import config, hookfiles, timer
 from agent_fabric.lint import findings, summary
 from agent_fabric.manifests import Manifest, unmerged
-from agent_fabric.paths import config_file, expand, inbox_dir, tilde, uv_tool_dir, wiki_dir
+from agent_fabric.paths import config_file, expand, tilde, uv_tool_dir
 from agent_fabric.report import Row, render
 from agent_fabric.sandboxes import cant_read, claude_code, codex
 from agent_fabric.wikirepo import WIKI_ERRORS, Git, GitError
-from agent_fabric.workspaces import Workspace
+from agent_fabric.workspaces import Workspace, every_workspace
 
 BRANCH_WAIT = 7  # days an ingest branch can wait for review before kb doctor says so (docs/design.md §8)
 
@@ -125,6 +126,36 @@ def _inbox(inbox: Path, env: Mapping[str, str], *, fix: bool) -> Row:
     return Row("fixed", "inbox", shown, "created")
 
 
+@dataclass(frozen=True)
+class Workspaces:
+    registered: list[Workspace]  # the default and each registered root
+    present: list[Workspace]  # those that are there: a root on a disk that isn't mounted isn't
+    rows: list[Row]
+    known: bool  # whether the config could be read; if not, only the default workspace is known
+
+
+def _workspaces(env: Mapping[str, str]) -> Workspaces:
+    """The workspaces (docs/design.md §4.11), and a row for each root that isn't there, in which nothing is made."""
+    try:
+        every = every_workspace(env)
+    except (OSError, ValueError) as e:  # TOMLDecodeError too
+        default = [Workspace(None)]
+        return Workspaces(default, default, [cant_read("workspace", tilde(config_file(env), env), e)], known=False)
+    present = [workspace for workspace in every if workspace.root is None or workspace.root.is_dir()]
+    rows = [
+        Row(
+            "problem",
+            "workspace",
+            tilde(workspace.root, env),
+            "a registered root that isn't there",
+            step="Mount it, or remove its [[workspace]] entry",
+        )
+        for workspace in every
+        if workspace not in present and workspace.root is not None
+    ]
+    return Workspaces(every, present, rows, known=True)
+
+
 def _skills(folders: list[tuple[Path, str]], env: Mapping[str, str], *, fix: bool) -> list[Row]:
     rows: list[Row] = []
     source = skill_source()
@@ -213,34 +244,39 @@ def _copilot_sync(settings: Path, env: Mapping[str, str]) -> Row:
     return Row("ok", "sync", shown, "Copilot CLI's session sync is off")
 
 
-def _ingest_tools(env: Mapping[str, str]) -> list[Row]:
-    """What `kb ingest` needs, once there's a project for it to publish (docs/design.md §4.5, §4.7)."""
+def _ingest_tools(env: Mapping[str, str], workspaces: list[Workspace]) -> list[Row]:
+    """What `kb ingest` needs, once some workspace has a project for it to publish (docs/design.md §4.5, §4.7)."""
     shown = tilde(config_file(env), env)
-    try:
-        if not config.allowed_projects(env):
-            return []
-    except ValueError as e:
-        return [Row("problem", "ingest", shown, f"can't read [publish] allow ({e})")]
-    return [
+    allowing = False
+    rows = []
+    for workspace in workspaces:  # each read, so that a bad list anywhere gets its row
+        try:
+            allowing = bool(workspace.allowed(env)) or allowing
+        except (OSError, ValueError) as e:
+            rows.append(Row("problem", "ingest", shown, f"can't read it ({e})"))
+    if not allowing:
+        return rows
+    return rows + [
         Row("problem", "ingest", tool, f"{tool} isn't on PATH, and kb ingest needs it")
         for tool in timer.NEEDED
         if shutil.which(tool, path=env.get("PATH", "")) is None
     ]
 
 
-def _wiki(env: Mapping[str, str], now: datetime) -> list[Row]:
+def _wiki(env: Mapping[str, str], now: datetime, workspace: Workspace) -> list[Row]:
     """`kb lint`'s findings, and a branch left waiting (docs/design.md §4.7, §8). Quiet where there's no wiki yet."""
-    folder = wiki_dir(env)
+    folder = workspace.wiki(env)
     if not (folder / ".git").exists():
         return []
     shown = tilde(folder, env)
     try:
-        found = findings(env, now, Workspace(None))  # the default workspace only, so far
+        found = findings(env, now, workspace)
     except WIKI_ERRORS as e:
         return [Row("problem", "wiki", shown, f"kb lint can't check it: {e}")]
     said = summary(found)
     if any(finding.level == "error" for finding in found):
-        rows = [Row("problem", "wiki", shown, said, step="Run kb lint to see what's broken, and fix it by hand")]
+        step = f"Run kb lint --workspace {_named(workspace, env)} to see what's broken, and fix it by hand"
+        rows = [Row("problem", "wiki", shown, said, step=step)]
     else:
         rows = [Row("ok", "wiki", shown, f"{said}: kb lint lists them" if found else "no findings")]
     try:
@@ -248,9 +284,14 @@ def _wiki(env: Mapping[str, str], now: datetime) -> list[Row]:
     except GitError as e:
         return [*rows, Row("problem", "ingest", shown, str(e))]
     if waiting and (days := _days_waiting(waiting, now)) > BRANCH_WAIT:
-        step = f"Review {waiting.branch} and merge it, or delete it to return its notes to pending"
+        step = f"Review {waiting.branch} in {shown} and merge it, or delete it to return its notes to pending"
         rows.append(Row("problem", "ingest", waiting.branch, f"unmerged for {days} days", step=step))
     return rows
+
+
+def _named(workspace: Workspace, env: Mapping[str, str]) -> str:
+    """The workspace as `--workspace` takes it, as a shell word."""
+    return "default" if workspace.root is None else shlex.quote(tilde(workspace.root, env))
 
 
 def _days_waiting(manifest: Manifest, now: datetime) -> int:
@@ -268,10 +309,12 @@ def doctor(
     and the wiki.
     `hooks` (with `fix`) records which hooks to install."""
     found = agents(env)
-    inbox = inbox_dir(env)
+    spaces = _workspaces(env)
+    workspaces, rows = spaces.present, spaces.rows
     rows = [
         _on_path(env),
-        _inbox(inbox, env, fix=fix),
+        *rows,
+        *(_inbox(workspace.inbox(env), env, fix=fix) for workspace in workspaces),
         *_skills(skill_folders(found), env, fix=fix),
         *_old_copy(found, env, fix=fix),
     ]
@@ -283,7 +326,7 @@ def doctor(
     broken = set()
     for installed, check, settings in sandboxes:
         if installed:
-            rows.append(row := check(settings, inbox, env, fix=fix))
+            rows.append(row := check(settings, [workspace.inbox(env) for workspace in workspaces], env, fix=fix))
             if row.status == "problem":
                 broken.add(settings)
     hooks_files = (
@@ -305,5 +348,9 @@ def doctor(
             rows.append(hooks_row)
     if found.has_copilot:
         rows.append(_copilot_sync(found.copilot / "settings.json", env))
-    rows += [*_ingest_tools(env), *timer.check(env, fix=fix), *_wiki(env, now)]
+    rows += [
+        *(_ingest_tools(env, workspaces) if spaces.known else []),
+        *timer.check(env, spaces.registered, workspaces, fix=fix, known=spaces.known),
+    ]
+    rows += [row for workspace in workspaces for row in _wiki(env, now, workspace)]
     return (0 if all(row.status in ("ok", "fixed") for row in rows) else 1), render(rows, fix=fix)

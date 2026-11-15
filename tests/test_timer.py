@@ -1,4 +1,4 @@
-"""fabric-ingest.timer, which `kb doctor --fix` installs and `kb doctor` checks (docs/design.md §5)."""
+"""fabric-ingest@default.timer, which `kb doctor --fix` installs and `kb doctor` checks (docs/design.md §5)."""
 
 from pathlib import Path
 from typing import Any
@@ -65,9 +65,9 @@ def test_doctor_reports_a_missing_timer_and_fix_installs_it(lab: Lab) -> None:
     assert calls(lab.kb) == []
 
     assert timer_rows(lab.kb, "--fix") == [("fixed", DAILY)]
-    assert calls(lab.kb) == ["--user daemon-reload", "--user enable --now fabric-ingest.timer"]
-    assert "OnCalendar=*-*-* 03:00:00\nPersistent=true\n" in unit(lab.kb, "fabric-ingest.timer")
-    assert "WantedBy=timers.target" in unit(lab.kb, "fabric-ingest.timer")
+    assert calls(lab.kb) == ["--user daemon-reload", "--user enable --now fabric-ingest@default.timer"]
+    assert "OnCalendar=*-*-* 03:00:00\nPersistent=true\n" in unit(lab.kb, "fabric-ingest@default.timer")
+    assert "WantedBy=timers.target" in unit(lab.kb, "fabric-ingest@default.timer")
 
     assert timer_rows(lab.kb) == [("ok", DAILY)]
 
@@ -75,9 +75,9 @@ def test_doctor_reports_a_missing_timer_and_fix_installs_it(lab: Lab) -> None:
 def test_the_service_runs_the_installed_kb_with_the_folders_of_its_tools(lab: Lab, tmp_path: Path) -> None:
     lab.kb("doctor", "--fix")
 
-    service = unit(lab.kb, "fabric-ingest.service")
+    service = unit(lab.kb, "fabric-ingest@default.service")
     kb = lab.kb.home / ".local" / "share" / "uv" / "tools" / "agent-fabric" / "bin" / "kb"
-    assert f'ExecStart="{kb}" ingest --workspace default\n' in service
+    assert f'ExecStart="{kb}" ingest --workspace "default"\n' in service
     # codex and gitleaks are the stubs here; git is the system's. A unit's PATH has none of a shell's additions.
     path = next(line for line in service.splitlines() if line.startswith("Environment="))
     assert path.startswith(f'Environment="PATH={tmp_path / "stubs"}:')
@@ -90,12 +90,12 @@ def test_the_service_keeps_a_moved_data_folder(lab: Lab, tmp_path: Path) -> None
 
     lab.kb("doctor", "--fix")
 
-    assert f'Environment="XDG_DATA_HOME={tmp_path}/data 100%%"\n' in unit(lab.kb, "fabric-ingest.service")
+    assert f'Environment="XDG_DATA_HOME={tmp_path}/data 100%%"\n' in unit(lab.kb, "fabric-ingest@default.service")
 
 
 def test_a_unit_kb_did_not_write_this_way_is_outdated_and_fix_rewrites_it(lab: Lab) -> None:
     lab.kb("doctor", "--fix")
-    timer = lab.kb.home / UNITS / "fabric-ingest.timer"
+    timer = lab.kb.home / UNITS / "fabric-ingest@default.timer"
     written = timer.read_text()
     timer.write_text(written.replace("03:00:00", "Mon 03:00:00"))
 
@@ -109,7 +109,7 @@ def test_doctor_reports_a_failed_run_and_where_to_read_why(lab: Lab) -> None:
     systemd_state(lab.kb, "result", "exit-code")
 
     assert timer_rows(lab.kb) == [("problem", "the last run failed (exit-code)")]
-    assert any("journalctl --user -u fabric-ingest" in step for step in steps(lab.kb))
+    assert any("journalctl --user -u fabric-ingest@default" in step for step in steps(lab.kb))
     assert lab.kb("doctor").exit_code == 1
 
 
@@ -131,7 +131,7 @@ def test_fix_reports_a_timer_systemd_would_not_turn_on(lab: Lab) -> None:
 
     assert status == "problem"
     assert "Access denied" in detail
-    assert any("systemctl --user enable --now fabric-ingest.timer" in step for step in steps(lab.kb, "--fix"))
+    assert any("systemctl --user enable --now fabric-ingest@default.timer" in step for step in steps(lab.kb, "--fix"))
 
 
 def only_on_path(lab: Lab, tmp_path: Path, *tools: str) -> None:
@@ -152,7 +152,7 @@ def test_without_systemd_doctor_says_to_run_ingest_by_hand(lab: Lab, tmp_path: P
 
 def test_fix_leaves_the_timer_alone_while_codex_is_not_on_path(lab: Lab, tmp_path: Path) -> None:
     lab.kb("doctor", "--fix")
-    written = unit(lab.kb, "fabric-ingest.service")
+    written = unit(lab.kb, "fabric-ingest@default.service")
     only_on_path(lab, tmp_path, "gitleaks")
     a_stub(tmp_path / "only", "systemctl", (tmp_path / "stubs" / "systemctl").read_text())
 
@@ -160,7 +160,7 @@ def test_fix_leaves_the_timer_alone_while_codex_is_not_on_path(lab: Lab, tmp_pat
 
     assert timer_rows(lab.kb, "--fix") == [("ok", DAILY)]  # checked, not rewritten: the ingest row names codex
     assert "codex isn't on PATH" in result.stdout
-    assert unit(lab.kb, "fabric-ingest.service") == written
+    assert unit(lab.kb, "fabric-ingest@default.service") == written
 
 
 def test_a_timer_that_was_stopped_is_not_running_and_fix_starts_it(lab: Lab) -> None:
@@ -182,13 +182,13 @@ def test_doctor_asks_systemd_once(lab: Lab) -> None:
 
 
 def test_a_unit_kb_cannot_read_is_a_problem_not_a_crash(lab: Lab) -> None:
-    (lab.kb.home / UNITS / "fabric-ingest.service").mkdir(parents=True)
+    (lab.kb.home / UNITS / "fabric-ingest@default.service").mkdir(parents=True)
 
     [(status, detail)] = timer_rows(lab.kb, "--fix")
 
     assert status == "problem"
     assert detail.startswith("can't read the units")
-    assert any(step.startswith("Look at ~/.config/systemd/user/fabric-ingest.*") for step in steps(lab.kb))
+    assert any(step.startswith("Look at ~/.config/systemd/user/fabric-ingest@default.*") for step in steps(lab.kb))
 
 
 def test_the_units_go_where_systemd_looks_whatever_kbs_config_folder(lab: Lab, tmp_path: Path) -> None:
@@ -198,7 +198,7 @@ def test_the_units_go_where_systemd_looks_whatever_kbs_config_folder(lab: Lab, t
     lab.kb.env["XDG_CONFIG_HOME"] = str(moved)
 
     assert timer_rows(lab.kb, "--fix") == [("fixed", DAILY)]
-    assert f'Environment="XDG_CONFIG_HOME={moved}"\n' in unit(lab.kb, "fabric-ingest.service")
+    assert f'Environment="XDG_CONFIG_HOME={moved}"\n' in unit(lab.kb, "fabric-ingest@default.service")
     assert not (moved / "systemd").exists()
 
 
@@ -209,7 +209,7 @@ def test_the_service_gets_nodes_folder_and_codexs_home(lab: Lab, tmp_path: Path)
 
     lab.kb("doctor", "--fix")
 
-    service = unit(lab.kb, "fabric-ingest.service")
+    service = unit(lab.kb, "fabric-ingest@default.service")
     path = next(line for line in service.splitlines() if line.startswith('Environment="PATH='))
     assert f":{node.parent}:" in path  # wherever git is found, which differs between machines
     assert f'Environment="CODEX_HOME={tmp_path}/codex-home"\n' in service
@@ -221,29 +221,29 @@ def test_a_dollar_in_kbs_path_is_not_expanded_by_systemd(lab: Lab, tmp_path: Pat
 
     lab.kb("doctor", "--fix")
 
-    assert f'ExecStart="{tmp_path}/tools$$HOME/agent-fabric/bin/kb" ingest --workspace default\n' in unit(
-        lab.kb, "fabric-ingest.service"
+    assert f'ExecStart="{tmp_path}/tools$$HOME/agent-fabric/bin/kb" ingest --workspace "default"\n' in unit(
+        lab.kb, "fabric-ingest@default.service"
     )
 
 
 def test_an_installed_timer_is_still_checked_once_no_project_is_allowed(lab: Lab) -> None:
     lab.kb("doctor", "--fix")
-    written = unit(lab.kb, "fabric-ingest.timer")
+    written = unit(lab.kb, "fabric-ingest@default.timer")
     (lab.kb.home / ".config" / "agent-fabric" / "config.toml").write_text("")
     systemd_state(lab.kb, "result", "exit-code")
 
     assert timer_rows(lab.kb, "--fix") == [("problem", "the last run failed (exit-code)")]
-    assert unit(lab.kb, "fabric-ingest.timer") == written
+    assert unit(lab.kb, "fabric-ingest@default.timer") == written
 
 
 def test_a_unit_saved_from_another_shells_path_is_current_while_it_finds_the_tools(lab: Lab, tmp_path: Path) -> None:
     lab.kb("doctor", "--fix")
-    written = unit(lab.kb, "fabric-ingest.service")
+    written = unit(lab.kb, "fabric-ingest@default.service")
     node = a_stub(tmp_path / "other-node", "node", "#!/bin/sh\n")  # as after an `nvm use`
     lab.kb.env["PATH"] = f"{node.parent}:{lab.kb.env['PATH']}"
 
     assert timer_rows(lab.kb, "--fix") == [("ok", DAILY)]
-    assert unit(lab.kb, "fabric-ingest.service") == written
+    assert unit(lab.kb, "fabric-ingest@default.service") == written
 
 
 def test_a_unit_whose_saved_path_lost_codex_is_outdated(lab: Lab, tmp_path: Path) -> None:
@@ -255,13 +255,13 @@ def test_a_unit_whose_saved_path_lost_codex_is_outdated(lab: Lab, tmp_path: Path
 
     assert timer_rows(lab.kb) == [("outdated", "its PATH no longer finds codex, so each run fails")]
     assert timer_rows(lab.kb, "--fix") == [("fixed", DAILY)]
-    assert str(moved.parent) in unit(lab.kb, "fabric-ingest.service")
+    assert str(moved.parent) in unit(lab.kb, "fabric-ingest@default.service")
 
 
 def test_a_timer_the_user_turned_off_stays_off(lab: Lab) -> None:
     lab.kb("doctor", "--fix")
     systemd_state(lab.kb, "enabled", "disabled")
-    turned_off = "turned off (disabled); systemctl --user enable --now fabric-ingest.timer turns it back on"
+    turned_off = "turned off (disabled); systemctl --user enable --now fabric-ingest@default.timer turns it back on"
 
     assert timer_rows(lab.kb, "--fix") == [("ok", turned_off)]
     assert calls(lab.kb)[-1].startswith("--user show")
@@ -289,7 +289,7 @@ def test_a_relative_folder_on_path_goes_into_the_unit_absolute(
 
     lab.kb("doctor", "--fix")
 
-    service = unit(lab.kb, "fabric-ingest.service")
+    service = unit(lab.kb, "fabric-ingest@default.service")
     assert f":{tmp_path / 'rel' / 'bin'}:" in service
     assert ":bin:" not in service
 
@@ -297,12 +297,12 @@ def test_a_relative_folder_on_path_goes_into_the_unit_absolute(
 def test_a_run_that_finds_another_running_is_not_a_failure(lab: Lab) -> None:
     lab.kb("doctor", "--fix")
 
-    assert "SuccessExitStatus=75\n" in unit(lab.kb, "fabric-ingest.service")
+    assert "SuccessExitStatus=75\n" in unit(lab.kb, "fabric-ingest@default.service")
 
 
 def test_fix_rewrites_the_units_of_a_timer_the_user_turned_off_and_leaves_it_off(lab: Lab) -> None:
     lab.kb("doctor", "--fix")
-    timer = lab.kb.home / UNITS / "fabric-ingest.timer"
+    timer = lab.kb.home / UNITS / "fabric-ingest@default.timer"
     written = timer.read_text()
     timer.write_text(written.replace("03:00:00", "Mon 03:00:00"))
     systemd_state(lab.kb, "enabled", "disabled")
@@ -321,8 +321,7 @@ def test_a_masked_timer_stays_masked(lab: Lab) -> None:
     systemd_state(lab.kb, "enabled", "masked")
     before = len(calls(lab.kb))
     masked = (
-        "turned off (masked); systemctl --user unmask fabric-ingest.timer && systemctl --user enable --now"
-        " fabric-ingest.timer turns it back on"
+        "turned off (masked); systemctl --user unmask fabric-ingest@default.timer && kb doctor --fix turns it back on"
     )
 
     assert timer_rows(lab.kb, "--fix") == [("ok", masked)]
@@ -338,7 +337,7 @@ def test_a_timer_disabled_without_now_still_fires_and_doctor_says_how_to_stop_it
 
     assert status == "ok"
     assert detail.endswith("but it still waits for its next run")
-    assert "Run systemctl --user stop fabric-ingest.timer, or tonight's run still happens" in steps(lab.kb)
+    assert "Run systemctl --user stop fabric-ingest@default.timer, or tonight's run still happens" in steps(lab.kb)
 
 
 def test_a_unit_whose_saved_path_lost_node_is_outdated(
@@ -358,7 +357,7 @@ def test_a_unit_whose_saved_path_lost_node_is_outdated(
 def test_a_unit_kb_cannot_write_is_left_as_it_was(lab: Lab) -> None:
     lab.kb("doctor", "--fix")
     folder = lab.kb.home / UNITS
-    timer = folder / "fabric-ingest.timer"
+    timer = folder / "fabric-ingest@default.timer"
     timer.write_text(timer.read_text().replace("03:00:00", "Mon 03:00:00"))
     before = {path.name: path.read_text() for path in folder.iterdir()}
     folder.chmod(0o500)
@@ -378,13 +377,13 @@ def test_a_unit_kb_cannot_write_is_left_as_it_was(lab: Lab) -> None:
 def test_a_unit_masked_by_a_link_to_dev_null_is_left_alone(lab: Lab) -> None:
     folder = lab.kb.home / UNITS
     folder.mkdir(parents=True)
-    (folder / "fabric-ingest.timer").symlink_to("/dev/null")  # what systemctl mask makes
+    (folder / "fabric-ingest@default.timer").symlink_to("/dev/null")  # what systemctl mask makes
 
     [(status, detail)] = timer_rows(lab.kb, "--fix")
 
     assert (status, detail.split(";")[0]) == ("ok", "turned off (masked)")
-    assert (folder / "fabric-ingest.timer").is_symlink()
-    assert not (folder / "fabric-ingest.service").exists()
+    assert (folder / "fabric-ingest@default.timer").is_symlink()
+    assert not (folder / "fabric-ingest@default.service").exists()
     assert calls(lab.kb) == []
 
 
@@ -395,7 +394,7 @@ def test_a_first_install_systemd_would_not_turn_on_is_removed_so_fix_tries_again
 
     assert status == "problem"
     assert detail.endswith("removed the units, so --fix tries again")
-    assert not (lab.kb.home / UNITS / "fabric-ingest.timer").exists()
+    assert not (lab.kb.home / UNITS / "fabric-ingest@default.timer").exists()
 
     (lab.kb.home / "systemctl" / "cannot-enable").unlink()
 
@@ -404,7 +403,7 @@ def test_a_first_install_systemd_would_not_turn_on_is_removed_so_fix_tries_again
 
 def test_a_masked_service_whose_timer_still_fires_is_a_problem(lab: Lab) -> None:
     lab.kb("doctor", "--fix")
-    service = lab.kb.home / UNITS / "fabric-ingest.service"
+    service = lab.kb.home / UNITS / "fabric-ingest@default.service"
     service.unlink()
     service.symlink_to("/dev/null")
 
