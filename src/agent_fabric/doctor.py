@@ -349,7 +349,7 @@ def doctor(
     if found.has_copilot:
         rows.append(_copilot_sync(found.copilot / "settings.json", env))
     rows += [
-        *(_ingest_tools(env, workspaces) if spaces.known else []),
+        *(_ingest_tools(env, spaces.registered) if spaces.known else []),  # allow lists are in the config
         *timer.check(env, spaces.registered, workspaces, fix=fix, known=spaces.known),
     ]
     rows += [row for workspace in workspaces for row in _wiki(env, now, workspace)]

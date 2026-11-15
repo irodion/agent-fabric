@@ -390,3 +390,12 @@ def test_a_disabled_v06_timer_with_a_masked_service_stays_off_after_the_unmask(l
     lab.kb("doctor", "--fix")
 
     assert not any(call.startswith("--user enable") for call in calls(lab.kb))
+
+
+def test_a_bad_allow_list_of_a_root_that_isnt_mounted_still_gets_its_row(kb: Kb) -> None:
+    root = a_root(kb, "mnt", "clientdisk", extra='allow = "github.com/acme/billing-api"\n')
+    root.rmdir()
+
+    ingest = rows(doctor(kb), "ingest")
+
+    assert any("allow in the [[workspace]] for ~/mnt/clientdisk" in detail for _, _, detail in ingest)
