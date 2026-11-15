@@ -128,14 +128,14 @@ def _notes_command(args: argparse.Namespace, ctx: Context) -> Result:
     """`kb note` and `kb inbox`, on the inbox of the current folder's workspace (docs/design.md §4.11)."""
     try:
         workspace = workspace_of(ctx.cwd, ctx.env)
-        if args.command == "note" and (args.machine or args.resolve):  # a machine note, or maybe its resolution
-            machine_opt_outs(ctx.env)  # read now, so a bad setting stops here and is named
     except (OSError, ValueError) as e:  # TOMLDecodeError too
-        return Result(
-            1, "", f"kb: can't read {tilde(config_file(ctx.env), ctx.env)}: {getattr(e, 'strerror', None) or e}\n"
-        )
+        return _unreadable_config(e, ctx.env)
     inbox = Inbox(workspace.inbox(ctx.env))
     return _note(args, workspace, inbox, ctx) if args.command == "note" else _inbox(args, workspace, inbox, ctx)
+
+
+def _unreadable_config(e: OSError | ValueError, env: Mapping[str, str]) -> Result:
+    return Result(1, "", f"kb: can't read {tilde(config_file(env), env)}: {getattr(e, 'strerror', None) or e}\n")
 
 
 def _wiki_command(args: argparse.Namespace, ctx: Context) -> Result:
@@ -197,6 +197,11 @@ def _note(args: argparse.Namespace, workspace: Workspace, inbox: Inbox, ctx: Con
             "drop --ref: a machine note is read in every project, where a path means something else;"
             " give the evidence in the text"
         )
+    if machine:
+        try:
+            machine_opt_outs(env)  # read now, so a bad setting stops here and is named
+        except (OSError, ValueError) as e:
+            return _unreadable_config(e, env)
     own = cwd.resolve()  # physical, as `project_id` names a folder for the hooks' markers
     where = own if args.project is None else _folder(args.project, ctx)
     if where != own and workspace_of(where, env) != workspace:

@@ -542,3 +542,14 @@ def test_an_inbox_with_its_own_open_copy_gets_no_second_one(kb: Kb) -> None:
     machine_note(kb)
 
     assert inbox_ids(root / ".fabric" / "inbox") == [theirs]
+
+
+def test_a_bad_share_setting_doesnt_stop_resolving_a_note_about_a_project(kb: Kb) -> None:
+    note_id = kb("note", "--kind", "gotcha", "--agent", "Codex", "the staging DB resets nightly").stdout.split()[0]
+    config = kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text('[publish]\nshare_machine_notes = "no"\n')
+
+    resolved = kb("note", "--resolve", note_id, "--agent", "Codex", "fixed: it resets weekly now")
+
+    assert (resolved.exit_code, resolved.stderr) == (0, "")
