@@ -89,8 +89,8 @@ def open_worktree(wiki: Git, folder: Path, start: str) -> Git:
     isn't this wiki's worktree: a root's is in its `.fabric/`, which an agent there can write, and a link to another
     repo would get its checkout forced and its files cleaned (docs/design.md §4.11)."""
     tree = Git(folder, wiki.env)
-    if folder.is_symlink():
-        folder.unlink()
+    if folder.is_symlink() or folder.is_file():
+        folder.unlink()  # never followed
     elif folder.exists() and not _worktree_of(wiki, tree):
         shutil.rmtree(folder)
     wiki("worktree", "prune")

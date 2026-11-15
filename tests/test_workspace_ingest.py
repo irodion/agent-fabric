@@ -196,3 +196,15 @@ def test_a_backend_that_isnt_a_name_names_the_workspace_its_in(lab: Lab) -> None
     result = lab.kb("ingest")
 
     assert (result.exit_code, "backend in the [[workspace]] for ~/code" in result.stderr) == (1, True)
+
+
+def test_a_file_in_the_worktrees_place_is_replaced_by_the_worktree(lab: Lab) -> None:
+    root = in_a_root(lab)
+    worktree = root / ".fabric" / "ingest-wt"
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    worktree.write_text("not a worktree\n")
+    three_notes(lab)
+
+    result = lab.kb("ingest")
+
+    assert (result.exit_code, worktree.is_dir()) == (0, True), result.stderr
