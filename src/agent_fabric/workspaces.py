@@ -4,9 +4,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_fabric.config import machine_opt_outs, workspace_roots
+from agent_fabric.config import allowed_projects, ingest_backend, machine_opt_outs, setting, workspace_roots
 from agent_fabric.gitinfo import main_checkout
-from agent_fabric.paths import expand, inbox_dir
+from agent_fabric.paths import expand, inbox_dir, ingest_worktree, wiki_dir
 
 
 @dataclass(frozen=True)
@@ -15,6 +15,31 @@ class Workspace:
 
     def inbox(self, env: Mapping[str, str]) -> Path:
         return inbox_dir(env) if self.root is None else self.root / ".fabric" / "inbox"
+
+    def wiki(self, env: Mapping[str, str]) -> Path:
+        return wiki_dir(env) if self.root is None else self.root / ".fabric" / "wiki"
+
+    def worktree(self, env: Mapping[str, str]) -> Path:
+        """Where `kb ingest` works, so it never touches the wiki's own checkout (docs/design.md §4.7)."""
+        return ingest_worktree(env) if self.root is None else self.root / ".fabric" / "ingest-wt"
+
+    def lock(self, env: Mapping[str, str]) -> Path:
+        """One ingest at a time in a workspace: a timer can fire during a manual run, and both use one worktree."""
+        return self.inbox(env).parent / "ingest.lock"
+
+    def allowed(self, env: Mapping[str, str]) -> tuple[str, ...]:
+        """The workspace's allow list (docs/design.md §4.5): the default's under `[publish]`, a root's in its
+        `[[workspace]]` entry. ValueError where the file can't be read."""
+        return allowed_projects(env, self.root)
+
+    def backend(self, env: Mapping[str, str]) -> str:
+        """The backend that answers its ingest's questions (docs/design.md §4.7). ValueError where the file can't be
+        read."""
+        return ingest_backend(env, self.root)
+
+    def allow_list(self, env: Mapping[str, str]) -> str:
+        """Where the allow list is, for a message."""
+        return setting(env, self.root, "publish", "allow")
 
 
 def workspace_of(folder: Path, env: Mapping[str, str]) -> Workspace:

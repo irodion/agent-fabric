@@ -11,6 +11,7 @@ from typing import Protocol
 
 from agent_fabric.secretgate import redact
 
+BACKENDS = ("codex",)  # what kb has so far; the others in docs/design.md §4.7 come later
 TIMEOUT = 600.0
 MAX_ERROR = 500
 FIXED_ARGS = (

@@ -14,8 +14,9 @@ from agent_fabric.evidence import checkout
 from agent_fabric.inbox import Inbox
 from agent_fabric.notes import STALE_AFTER, Note, parse
 from agent_fabric.pages import MACHINE_PAGE, PROJECTS, Claim, Page
-from agent_fabric.paths import inbox_dir, tilde, wiki_dir
+from agent_fabric.paths import tilde
 from agent_fabric.report import value
+from agent_fabric.workspaces import Workspace
 
 FIELDS = ("level", "check", "path", "detail")
 MAX_PAGE_LINES = 400
@@ -131,18 +132,19 @@ def lint_tree(folder: Path, env: Mapping[str, str]) -> list[Finding]:
     return found
 
 
-def _stale_status(env: Mapping[str, str], now: datetime) -> list[Finding]:
+def _stale_status(env: Mapping[str, str], now: datetime, workspace: Workspace) -> list[Finding]:
     return [
         Finding("warning", "stale-status", tilde(file, env), f"{note.id} is {(now - note.time).days} days old")
-        for file, note in Inbox(inbox_dir(env)).read().open()
+        for file, note in Inbox(workspace.inbox(env)).read().open()
         if note.kind == "status" and now - note.time > STALE_AFTER
     ]
 
 
-def findings(env: Mapping[str, str], now: datetime) -> list[Finding]:
-    folder = wiki_dir(env)
+def findings(env: Mapping[str, str], now: datetime, workspace: Workspace) -> list[Finding]:
+    """What's stale or broken in the workspace's wiki and inbox."""
+    folder = workspace.wiki(env)
     found = lint_tree(folder, env) if folder.is_dir() else []
-    return found + _stale_status(env, now)
+    return found + _stale_status(env, now, workspace)
 
 
 def _count(number: int, what: str) -> str:
@@ -162,6 +164,6 @@ def render(found: list[Finding]) -> str:
     return "".join(f"{line}\n" for line in lines)
 
 
-def lint(env: Mapping[str, str], now: datetime) -> tuple[int, str]:
-    found = findings(env, now)
+def lint(env: Mapping[str, str], now: datetime, workspace: Workspace) -> tuple[int, str]:
+    found = findings(env, now, workspace)
     return (1 if any(finding.level == "error" for finding in found) else 0), render(found)

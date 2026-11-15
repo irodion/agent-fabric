@@ -16,6 +16,7 @@ from agent_fabric.paths import config_file, expand, inbox_dir, tilde, uv_tool_di
 from agent_fabric.report import Row, render
 from agent_fabric.sandboxes import cant_read, claude_code, codex
 from agent_fabric.wikirepo import WIKI_ERRORS, Git, GitError
+from agent_fabric.workspaces import Workspace
 
 BRANCH_WAIT = 7  # days an ingest branch can wait for review before kb doctor says so (docs/design.md §8)
 
@@ -234,7 +235,7 @@ def _wiki(env: Mapping[str, str], now: datetime) -> list[Row]:
         return []
     shown = tilde(folder, env)
     try:
-        found = findings(env, now)
+        found = findings(env, now, Workspace(None))  # the default workspace only, so far
     except WIKI_ERRORS as e:
         return [Row("problem", "wiki", shown, f"kb lint can't check it: {e}")]
     said = summary(found)
