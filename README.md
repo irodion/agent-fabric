@@ -82,8 +82,9 @@ prints.
      register the folder that holds them as a workspace root: its projects' notes then go to `<root>/.fabric/`, and
      never meet the others'. A root isn't a git repo itself. Agents should be started in a project, not in a root.
    - **Per workspace** (for the wiki, [below](#turn-it-on)): the projects whose notes may be filed (none at first),
-     the backend that answers ingest's questions (`codex`), and whether it shares notes about the machine with the
-     other workspaces (yes; a client's workspace may say no).
+     the backend that answers ingest's questions (`codex`, the only one so far: setup names it without asking, and
+     says so if it isn't installed), and whether it shares notes about the machine with the other workspaces (yes; a
+     client's workspace may say no).
    - **Hooks.** The `kb-note` skill tells agents when and how to leave a note, and two hooks remind them of it:
      - `start`: at the start of a session, the number of open `status` notes for the project and the machine, which
        are a reason to check before relying on the repo, then the number of other open notes, and a reminder of

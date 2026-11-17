@@ -49,6 +49,10 @@ class Asker(Protocol):
         """Free text; `validate` returns why an answer won't do, or None."""
         ...
 
+    def tell(self, message: str) -> None:
+        """A choice made without asking, where there's none to make."""
+        ...
+
 
 def _not_a_folder(typed: str, env: Mapping[str, str]) -> str | None:
     """Why a typed folder won't do, or None: it's a full path, or one in the home folder, not one relative to wherever
@@ -154,11 +158,19 @@ def _allow(
 
 
 def _backend(asker: Asker, root: str | None, recorded: Settings, env: Mapping[str, str]) -> str:
-    """Step 3: a workspace's backend, among those installed, `codex` first; not asked where there's no choice."""
+    """Step 3: a workspace's backend, among those installed, `codex` first, and the one recorded; named, not asked,
+    where there's no choice, and named as missing where none is installed."""
     installed = [backend for backend in BACKENDS if shutil.which(backend, path=env.get("PATH"))]
+    if not installed:
+        asker.tell(
+            f"{_name(root)}: kb ingest uses {recorded.backend}, but no backend kb has is installed"
+            f" ({', '.join(BACKENDS)})"
+        )
+        return recorded.backend
+    if installed == [recorded.backend]:
+        asker.tell(f"{_name(root)}: kb ingest uses {recorded.backend}, the one backend kb has that's installed")
+        return recorded.backend
     offered = list(dict.fromkeys([*installed, recorded.backend]))
-    if len(offered) == 1:
-        return offered[0]
     return asker.select(f"{_name(root)}: backend for kb ingest", offered, recorded.backend)
 
 
