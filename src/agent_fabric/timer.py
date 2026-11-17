@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent_fabric.backends import not_ours
 from agent_fabric.ingest import BUSY  # another run held the lock: not a failure for the timer
 from agent_fabric.paths import tilde, units_dir, uv_tool_dir
 from agent_fabric.report import Row
@@ -20,10 +21,11 @@ from agent_fabric.workspaces import Workspace
 
 OLD = ("fabric-ingest.service", "fabric-ingest.timer")  # v0.6's, before workspaces
 KBS = re.compile(r"fabric-ingest@(.+)\.(?:service|timer)")  # a unit kb writes, by its whole name
-NEEDED = ("gitleaks", "codex")  # what `kb ingest` runs; doctor's ingest row reports one that's missing
 ALSO_ON_PATH = ("git", "node")  # git for the projects, node for a codex installed as a script outside node's folder
 BASE_PATH = ("/usr/local/bin", "/usr/bin", "/bin")
-CARRIED = ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "CODEX_HOME")  # moved folders, which a unit doesn't get from a shell
+# Moved folders, which a unit doesn't get from a shell: kb's, and its workspace's backend's home.
+CARRIED = ("XDG_DATA_HOME", "XDG_CONFIG_HOME")
+HOMES = {"codex": "CODEX_HOME", "claude": "CLAUDE_CONFIG_DIR"}
 DAILY = "runs kb ingest daily at 03:00"
 HEADER = (
     "# Written by kb doctor --fix (agent-fabric, docs/design.md §5), which rewrites it: change kb, not this file.\n"
@@ -98,10 +100,22 @@ def _quoted(text: str, *, command: bool = False) -> str:
     return f'"{escaped.replace("$", "$$") if command else escaped}"'
 
 
-def _path(env: Mapping[str, str]) -> str:
+def needed(env: Mapping[str, str], workspace: Workspace) -> tuple[str, ...] | None:
+    """What the workspace's `kb ingest` runs: gitleaks and its backend's CLI. None where the backend can't be read or
+    isn't one kb has, so that every run would stop; doctor's ingest row says why."""
+    try:
+        backend = workspace.backend(env)
+    except (OSError, ValueError):
+        return None
+    return None if not_ours(backend) else ("gitleaks", backend)
+
+
+def _path(env: Mapping[str, str], workspace: Workspace) -> str:
     """The folders of the tools ingest runs, from the PATH kb runs with: a unit gets none of a shell's PATH, and codex
     lives where its node does, such as under nvm."""
-    found = (shutil.which(tool, path=env.get("PATH", "")) for tool in (*NEEDED, *ALSO_ON_PATH))
+    found = (
+        shutil.which(tool, path=env.get("PATH", "")) for tool in (*(needed(env, workspace) or ()), *ALSO_ON_PATH)
+    )
     # Absolute, as a unit has no working folder to resolve against; not resolved, as codex's link would lead into
     # node's package folder, which holds no node.
     folders = [os.path.dirname(os.path.abspath(tool)) for tool in found if tool]
@@ -116,9 +130,12 @@ def installed_kb(env: Mapping[str, str]) -> Path:
 def units(env: Mapping[str, str], unit: Unit) -> dict[str, str]:
     """The workspace's two files, as kb would write them now."""
     kb = installed_kb(env)
-    carried = [(name, env[name]) for name in CARRIED if Path(env.get(name) or "").is_absolute()]
+    tools = needed(env, unit.workspace)
+    homes = (HOMES[tools[1]],) if tools else ()
+    carried = [(name, env[name]) for name in (*CARRIED, *homes) if Path(env.get(name) or "").is_absolute()]
     environment = "".join(
-        f"Environment={_quoted(f'{name}={value}')}\n" for name, value in [("PATH", _path(env)), *carried]
+        f"Environment={_quoted(f'{name}={value}')}\n"
+        for name, value in [("PATH", _path(env, unit.workspace)), *carried]
     )
     run = f"{_quoted(str(kb), command=True)} ingest --workspace {_quoted(unit.argument, command=True)}"
     service = (
@@ -170,7 +187,8 @@ def _wanted(env: Mapping[str, str], workspace: Workspace) -> bool:
         allowed = workspace.allowed(env)
     except (OSError, ValueError):  # the ingest or workspace row reports it
         return False
-    return bool(allowed) and all(shutil.which(tool, path=env.get("PATH", "")) for tool in NEEDED)
+    tools = needed(env, workspace)
+    return bool(allowed) and tools is not None and all(shutil.which(tool, path=env.get("PATH", "")) for tool in tools)
 
 
 def _read(path: Path) -> str | None:
@@ -458,7 +476,7 @@ def _stale(
     saved = SAVED_PATH.search(current[unit.service] or "")
     path = saved[1].replace("%%", "%").replace('\\"', '"').replace("\\\\", "\\") if saved else ""
     node = ("node",) if shutil.which("node", path=env.get("PATH", "")) else ()
-    lost = [tool for tool in (*NEEDED, *node) if not shutil.which(tool, path=path)]
+    lost = [tool for tool in (*(needed(env, unit.workspace) or ()), *node) if not shutil.which(tool, path=path)]
     return f"its PATH no longer finds {' or '.join(lost)}, so each run fails" if lost else None
 
 

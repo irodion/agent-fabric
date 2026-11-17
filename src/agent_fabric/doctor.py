@@ -11,6 +11,7 @@ from importlib.resources import files
 from pathlib import Path
 
 from agent_fabric import config, hookfiles, timer
+from agent_fabric.backends import not_ours
 from agent_fabric.lint import findings, summary
 from agent_fabric.manifests import Manifest, unmerged
 from agent_fabric.paths import config_file, expand, tilde, uv_tool_dir
@@ -247,18 +248,22 @@ def _copilot_sync(settings: Path, env: Mapping[str, str]) -> Row:
 def _ingest_tools(env: Mapping[str, str], workspaces: list[Workspace]) -> list[Row]:
     """What `kb ingest` needs, once some workspace has a project for it to publish (docs/design.md §4.5, §4.7)."""
     shown = tilde(config_file(env), env)
-    allowing = False
     rows = []
+    tools: dict[str, None] = {}  # what the workspaces with a project allowed run, each once
     for workspace in workspaces:  # each read, so that a bad list anywhere gets its row
         try:
-            allowing = bool(workspace.allowed(env)) or allowing
+            if not workspace.allowed(env):
+                continue
+            backend = workspace.backend(env)
         except (OSError, ValueError) as e:
             rows.append(Row("problem", "ingest", shown, f"can't read it ({e})"))
-    if not allowing:
-        return rows
+            continue
+        if problem := not_ours(backend):
+            rows.append(Row("problem", "ingest", config.setting(env, workspace.root, "ingest", "backend"), problem))
+        tools.update(dict.fromkeys(("gitleaks",) if problem else ("gitleaks", backend)))
     return rows + [
         Row("problem", "ingest", tool, f"{tool} isn't on PATH, and kb ingest needs it")
-        for tool in timer.NEEDED
+        for tool in tools
         if shutil.which(tool, path=env.get("PATH", "")) is None
     ]
 

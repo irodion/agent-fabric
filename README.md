@@ -15,7 +15,7 @@ To set it up, follow [Install](#install), on your own or with an agent guiding y
 | Part | State |
 |---|---|
 | Agent notes: `kb note`, `kb inbox`, the `kb-note` skill, start and stop hooks, `kb doctor`, `kb setup`, workspaces | Built and in use |
-| Notes into the wiki: `kb ingest` on the `codex` backend and its daily timer, `kb lint` | Built; first run on Codex on 2026-11-12 |
+| Notes into the wiki: `kb ingest` on the `codex` or `claude` backend and its daily timer, `kb lint` | Built; first run on Codex on 2026-11-12 |
 | CI that builds and vets a pinned [agentsview](https://github.com/kenn-io/agentsview) release | Built |
 | `--backend local`, `kb prune`, `kb retro` | Planned (§4.7) |
 | Session digests, the `fabricd` daemon, live panel, `kb search`, `kb catchup`, `kb mcp` | Planned (§3, §4.1–4.9) |
@@ -81,10 +81,10 @@ prints.
      workspace registered, every project shares one, the default. To keep a set of repos apart, such as a client's,
      register the folder that holds them as a workspace root: its projects' notes then go to `<root>/.fabric/`, and
      never meet the others'. A root isn't a git repo itself. Agents should be started in a project, not in a root.
-   - **Per workspace** (for the wiki, [below](#turn-it-on)): the projects whose notes may be filed (none at first),
-     the backend that answers ingest's questions (`codex`, the only one so far: setup names it without asking, and
-     says so if it isn't installed), and whether it shares notes about the machine with the other workspaces (yes; a
-     client's workspace may say no).
+   - **Per workspace** (for the wiki, [below](#turn-it-on)): the projects whose notes may be filed (none at first), the
+     backend that answers ingest's questions (`codex` or `claude`, among those installed: setup names the one installed
+     without asking, and says so if neither is), and whether it shares notes about the machine with the other workspaces
+     (yes; a client's workspace may say no).
    - **Hooks.** The `kb-note` skill tells agents when and how to leave a note, and two hooks remind them of it:
      - `start`: at the start of a session, the number of open `status` notes for the project and the machine, which
        are a reason to check before relying on the repo, then the number of other open notes, and a reminder of
@@ -253,9 +253,9 @@ help: "These steps are for the user: an agent's sandbox can't change the agents'
 - **Statuses:** `ok`, `fixed`, `missing` and `outdated` (which `--fix` fixes), and `problem` (by hand; the row says
   how). It exits 0 when every row is `ok` or `fixed`, and 1 otherwise.
 - **What it checks:** that the first `kb` on `PATH` is the installed one, the inbox, each skill copy byte for byte
-  against the package, the sandbox write lists, the hooks (in the file, approved in Codex, and when each last ran),
-  and that Copilot CLI's session sync is off. Once a project is allowed it also checks for `gitleaks` and `codex`,
-  and once there's a wiki, it shows `kb lint`'s findings and a review branch left unmerged for over 7 days.
+  against the package, the sandbox write lists, the hooks (in the file, approved in Codex, and when each last ran), and
+  that Copilot CLI's session sync is off. Once a project is allowed it also checks for `gitleaks` and each workspace's
+  backend, and once there's a wiki, it shows `kb lint`'s findings and a review branch left unmerged for over 7 days.
 - Without `--fix` it only reads, so an agent can run it in its sandbox. `--fix` edits only the lines it owns, and
   reports a file it can't edit safely instead of touching it.
 
@@ -269,14 +269,16 @@ That's expected.
 The wiki is optional, and these steps can be agent-guided too. Nothing goes to the wiki, or to a model, until step 2.
 
 1. **Install what ingest needs** (you). [gitleaks](https://github.com/gitleaks/gitleaks) on `PATH`, and the
-   [Codex CLI](https://github.com/openai/codex), logged in. Done when `gitleaks version` and `codex login status`
-   both succeed. Ingest stops before any model is asked if gitleaks is missing.
+   [Codex CLI](https://github.com/openai/codex) or [Claude Code](https://claude.com/claude-code), logged in. Done when
+   `gitleaks version` succeeds, and `codex login status` or `claude auth status` does. Cursor CLI can't be a backend:
+   it has no way to run with its tools off (design §4.7). Ingest stops before any model is asked if gitleaks is
+   missing.
 
 2. **Choose the projects** (you decide; an agent asks). Only notes of allowed projects are filed. A run sends those
-   notes, with excerpts of the files they cite, to the model's vendor (OpenAI, for Codex), after redaction and
-   gitleaks. Each workspace has its own list: pick them in `kb setup` (it offers a root's git projects, and the
-   default workspace's projects with notes), or list them by project id, as `kb inbox` shows them, in
-   `~/.config/agent-fabric/config.toml`. `machine` allows the notes about the machine.
+   notes, with excerpts of the files they cite, to the model's vendor (OpenAI for Codex, Anthropic for Claude Code),
+   after redaction and gitleaks. Each workspace has its own list: pick them in `kb setup` (it offers a root's git
+   projects, and the default workspace's projects with notes), or list them by project id, as `kb inbox` shows them,
+   in `~/.config/agent-fabric/config.toml`. `machine` allows the notes about the machine.
 
    ```toml
    [publish]                           # the default workspace
@@ -310,16 +312,16 @@ The wiki is optional, and these steps can be agent-guided too. Nothing goes to t
    Done when `git -C ~/wiki branch --no-merged main` lists no `ingest/` branch. The next run moves the merged notes
    to `inbox/done/`.
 
-6. **Let it run daily** (you): `kb doctor --fix`, or `scripts/install.sh` again, installs a timer per workspace with
-   a project allowed, `fabric-ingest@default.timer` or `fabric-ingest@<root, escaped>.timer`, in
-   `~/.config/systemd/user/`. It runs `kb ingest --workspace` at 03:00, or on waking if the machine was asleep then; a run with
-   too few notes stops at its gate and costs nothing, and new notes go onto the branch waiting for review. The
-   service gets a `PATH` of the folders where `codex`, `gitleaks`, `git` and `node` were found, and your
-   `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `CODEX_HOME` if you set them; `kb doctor` says `outdated` once that `PATH`
-   no longer finds `codex` or `gitleaks` (an nvm upgrade, say), and `--fix` rewrites it. Done when `kb doctor`'s
-   `timer` row is `ok`; it says `problem` when the last run failed, and `journalctl --user -u <its service>` shows
-   why. To stop a workspace's daily runs, `systemctl --user disable --now <its timer>`: `--fix` leaves a timer you
-   disabled or masked off. Without systemd, as on macOS, run `kb ingest` yourself every few days.
+6. **Let it run daily** (you): `kb doctor --fix`, or `scripts/install.sh` again, installs a timer per workspace with a
+   project allowed, `fabric-ingest@default.timer` or `fabric-ingest@<root, escaped>.timer`, in
+   `~/.config/systemd/user/`. It runs `kb ingest --workspace` at 03:00, or on waking if the machine was asleep then; a
+   run with too few notes stops at its gate and costs nothing, and new notes go onto the branch waiting for review. The
+   service gets a `PATH` of the folders where the workspace's backend, `gitleaks`, `git` and `node` were found, and your
+   `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `CODEX_HOME` and `CLAUDE_CONFIG_DIR` if you set them; `kb doctor` says `outdated`
+   once that `PATH` no longer finds the backend or `gitleaks` (an nvm upgrade, say), and `--fix` rewrites it. Done when
+   `kb doctor`'s `timer` row is `ok`; it says `problem` when the last run failed, and `journalctl --user -u <its
+   service>` shows why. To stop a workspace's daily runs, `systemctl --user disable --now <its timer>`: `--fix` leaves a
+   timer you disabled or masked off. Without systemd, as on macOS, run `kb ingest` yourself every few days.
 
 ### `kb ingest`
 
@@ -335,11 +337,11 @@ kb ingest: 3 notes on ingest/2026-11-06: 2 add, 1 duplicate
 Review manifests/2026-11-06.md on ingest/2026-11-06, then: git -C ~/wiki merge ingest/2026-11-06
 ```
 
-`kb ingest [--project P] [--backend codex] [--dry-run]` takes the open `gotcha`, `fix`, `decision` and `idea` notes of
-allowed projects. `status` notes describe a moment and never reach the wiki. An idea isn't a claim: it skips the model
-and goes under its project in `ideas.md` at the wiki's root, for you to act on. One open for over 30 days expires:
-`kb inbox` stops listing it (`--all` still does), and ingest moves it to `inbox/done/` unfiled. The first run creates
-`~/wiki` as a local git repo, with no remote. A run:
+`kb ingest [--project P] [--backend codex|claude] [--dry-run]` takes the open `gotcha`, `fix`, `decision` and `idea`
+notes of allowed projects. `status` notes describe a moment and never reach the wiki. An idea isn't a claim: it skips
+the model and goes under its project in `ideas.md` at the wiki's root, for you to act on. One open for over 30 days
+expires: `kb inbox` stops listing it (`--all` still does), and ingest moves it to `inbox/done/` unfiled. The first run
+creates `~/wiki` as a local git repo, with no remote. A run:
 
 1. **Gates, with no model.** It runs `kb lint`, and moves resolved notes, and notes filed on a merged branch, to
    `inbox/done/<yyyy>/<mm>/`. With fewer than 3 notes to take and the oldest under 7 days old, it stops there and
@@ -354,11 +356,11 @@ and goes under its project in `ideas.md` at the wiki's root, for you to act on. 
    private keys, emails, home paths) and scanned with gitleaks. A file is scanned whole before it's cut to an
    excerpt, so a cut can't hide a secret's markers. A note that still trips gitleaks is quarantined and the others go
    on. If gitleaks can't run, nothing is sent.
-5. **Asks typed questions.** Codex runs with its tools, user config and rules off, and an output schema that allows
-   only each question's options: does each excerpt support the note, contradict it, or say nothing; is the note the
-   same as each candidate claim, does it add to it, replace it or contradict it, or is it unrelated; does `AGENTS.md`
-   already say it; would a future agent act better for knowing it; does every session need it before it starts;
-   how sure are you.
+5. **Asks typed questions.** The backend runs with its tools, user config, rules, hooks and session off, and a schema
+   that allows only each question's options: does each excerpt support the note, contradict it, or say nothing; is the
+   note the same as each candidate claim, does it add to it, replace it or contradict it, or is it unrelated; does
+   `AGENTS.md` already say it; would a future agent act better for knowing it; does every session need it before it
+   starts; how sure are you.
 6. **Acts.** `kb` turns the answers into one action. A ref that contradicts the note means `skip`, so a false alarm
    can't replace a good claim. The same fact already recorded is a `duplicate`. Otherwise it files a `conflict`
    (both claims kept side by side), a `supersede` (the old claim moves under `## Superseded` with a pointer), an
@@ -434,7 +436,7 @@ exists (§5).
 ## Security and privacy
 
 - **What leaves the machine:** only `kb ingest`, which sends allowed projects' notes and excerpts of the files they
-  cite to the Codex backend's vendor, after redaction and gitleaks. No other `kb` command uses the network.
+  cite to the backend's vendor, after redaction and gitleaks. No other `kb` command uses the network.
 - **Notes are untrusted.** An agent can be steered by what it read, so a note can carry a prompt injection. Hooks
   never put a note's text in a prompt, `kb inbox` labels notes as unchecked and ends them with a marker a note can't
   forge, and they reach the wiki only through ingest's evidence and your review.
@@ -455,10 +457,10 @@ scripts/check.sh --red <rev>     # names new tests that pass on <rev>'s code: th
 
 - `scripts/check.sh` runs one Python version (`.python-version`) and skips, by name, any tool that isn't installed,
   such as actionlint or zizmor. CI runs every check, on Python 3.13 and 3.14.
-- Tests drive commands in-process through `cli.run(argv, env=, cwd=, stdin=, now=)`, with a fake home and a fixed
-  clock (`tests/conftest.py`). Ingest's tests use a fake model and a stand-in gitleaks; `tests/test_codex.py` runs the
-  Codex adapter against a stub `codex`; the timer's tests use a stand-in `systemctl`, so no test reaches the real
-  user manager.
+- Tests drive commands in-process through `cli.run(argv, env=, cwd=, stdin=, now=)`, with a fake home and a fixed clock
+  (`tests/conftest.py`). Ingest's tests use a fake model and a stand-in gitleaks; `tests/test_codex.py` and
+  `tests/test_claude.py` run the backends against a stub `codex` and `claude`; the timer's tests use a stand-in
+  `systemctl`, so no test reaches the real user manager.
 - `kb note`, `kb hook` and `kb ingest` write real data, and `kb doctor --fix` edits real agent settings. To try one
   by hand, give it a throwaway home: `HOME="$(mktemp -d)" .venv/bin/kb <args>`, with `XDG_DATA_HOME` and
   `XDG_CONFIG_HOME` unset, and for ingest a stub `codex` on `PATH`.

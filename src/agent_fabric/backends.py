@@ -11,8 +11,11 @@ from typing import Protocol
 
 from agent_fabric.secretgate import redact
 
-BACKENDS = ("codex",)  # what kb has so far; the others in docs/design.md §4.7 come later
+BACKENDS = ("codex", "claude")  # what kb has, the default first; Copilot CLI and Cursor CLI fail §4.7's bar
 TIMEOUT = 600.0
+# Claude Code's ends of a run that are about one answer; any other error, such as `error_during_execution`, which
+# also covers a run that couldn't start, stops ingest.
+ANSWER_ERRORS = ("error_max_structured_output_retries", "error_max_turns")
 MAX_ERROR = 500
 FIXED_ARGS = (
     "--ephemeral",
@@ -127,22 +130,102 @@ class CodexBackend:
             "-o",
             str(reply),
         ]
-        try:
-            done = subprocess.run(
-                [*args, "-"],
-                input=prompt,
-                cwd=empty,
-                env=dict(self.env),
-                capture_output=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self.timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as e:
-            raise BackendError(f"codex timed out after {self.timeout:g} seconds") from e
-        except OSError as e:
-            raise BackendError(f"can't run codex: {e}") from e
+        done = _run([*args, "-"], prompt, empty, self.env, self.timeout)
         if done.returncode != 0:
-            said = redact(done.stderr.strip())[-MAX_ERROR:]
-            raise BackendError(f"codex exited {done.returncode}: {said}")
+            raise _failed(done)
+
+
+class ClaudeBackend:
+    """`claude -p` with no tools, customizations or session, in an empty folder (docs/design.md §4.7). `--safe-mode`
+    leaves out CLAUDE.md, skills, plugins, hooks and MCP servers but keeps the user's login, which `--bare` doesn't.
+    Claude Code 2.1.326, told to read a file, made no tool call (2026-11-17)."""
+
+    def __init__(self, env: Mapping[str, str], *, timeout: float = TIMEOUT) -> None:
+        self.env = env
+        self.timeout = timeout
+
+    def answer(self, state: str, questions: list[Question]) -> object:
+        args = [
+            "claude",
+            "-p",
+            "--safe-mode",
+            "--tools",
+            "",
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--no-session-persistence",
+            "--permission-prompts",
+            "none",
+            "--output-format",
+            "json",
+            "--json-schema",
+            json.dumps(_schema(questions)),
+        ]
+        with tempfile.TemporaryDirectory(prefix="kb-ingest-") as empty:
+            done = _run(args, _prompt(state, questions), Path(empty), self.env, self.timeout)
+        try:
+            reply = json.loads(done.stdout)
+        except ValueError as e:
+            if done.returncode != 0:  # a failed run that couldn't say why in its reply
+                raise _failed(done) from e
+            raise InvalidAnswer(f"claude gave a reply that can't be read: {e}") from e
+        if not isinstance(reply, dict):
+            if done.returncode != 0:
+                raise _failed(done)
+            raise InvalidAnswer("claude gave a reply that isn't an object")
+        subtype = reply.get("subtype")
+        if subtype in ANSWER_ERRORS:  # the model's answer to this note went wrong, as with any invalid answer
+            raise InvalidAnswer(f"claude's run ended in {subtype}")
+        if done.returncode != 0 and not reply.get("is_error"):  # the reply is no account of what failed
+            raise _failed(done)
+        if reply.get("is_error"):  # the call itself failed, as at a login that expired
+            said = redact(str(reply.get("result") or subtype or "an error"))[-MAX_ERROR:]
+            raise BackendError(f"claude failed: {said}")
+        if "structured_output" not in reply:
+            raise InvalidAnswer("claude replied without the answer the schema asks for")
+        return reply["structured_output"]
+
+
+_MADE_BY: dict[str, type[CodexBackend] | type[ClaudeBackend]] = {"codex": CodexBackend, "claude": ClaudeBackend}
+assert tuple(_MADE_BY) == BACKENDS  # one list of what kb has, in the order setup offers them
+
+
+def not_ours(name: str) -> str | None:
+    """Why kb can't use the backend of that name, or None where it can."""
+    return None if name in BACKENDS else f"the backend {name!r} isn't one this kb has: {', '.join(BACKENDS)}"
+
+
+def backend_named(name: str, env: Mapping[str, str]) -> Backend:
+    """The backend of that name. ValueError where kb has none: never another vendor's in its place."""
+    if problem := not_ours(name):
+        raise ValueError(problem)
+    return _MADE_BY[name](env)
+
+
+def _run(
+    args: list[str], prompt: str, cwd: Path, env: Mapping[str, str], timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """The CLI's run, given the prompt on stdin. BackendError where it can't run or hangs."""
+    try:
+        return subprocess.run(
+            args,
+            input=prompt,
+            cwd=cwd,
+            env=dict(env),
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise BackendError(f"{args[0]} timed out after {timeout:g} seconds") from e
+    except OSError as e:
+        raise BackendError(f"can't run {args[0]}: {e}") from e
+
+
+def _failed(done: subprocess.CompletedProcess[str]) -> BackendError:
+    said = redact(done.stderr.strip())[-MAX_ERROR:]
+    return BackendError(f"{done.args[0]} exited {done.returncode}: {said}")
