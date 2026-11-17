@@ -14,7 +14,7 @@ To set it up, follow [Install](#install), on your own or with an agent guiding y
 
 | Part | State |
 |---|---|
-| Agent notes: `kb note`, `kb inbox`, the `kb-note` skill, start and stop hooks, `kb doctor` | Built and in use |
+| Agent notes: `kb note`, `kb inbox`, the `kb-note` skill, start and stop hooks, `kb doctor`, `kb setup`, workspaces | Built and in use |
 | Notes into the wiki: `kb ingest` on the `codex` backend and its daily timer, `kb lint` | Built; first run on Codex on 2026-11-12 |
 | CI that builds and vets a pinned [agentsview](https://github.com/kenn-io/agentsview) release | Built |
 | `--backend local`, `kb prune`, `kb retro` | Planned (§4.7) |
@@ -52,8 +52,8 @@ https://github.com/irodion/agent-fabric by following the Install steps in its RE
 agent can check, clone and explain. The step that changes your agents' settings is yours, in your own terminal,
 because an agent's sandbox can't write those files.
 
-**Agents:** take the steps in order, and finish each one, by its "done when", before the next. Ask the user the
-question in step 3. For step 4, give the user the exact command to run in their own terminal, and wait for what it
+**Agents:** take the steps in order, and finish each one, by its "done when", before the next. Explain the
+choices in step 3. For step 4, give the user the exact command to run in their own terminal, and wait for what it
 prints.
 
 1. **Check what's needed** (agent or you). Linux, `git`, [uv](https://docs.astral.sh/uv/), and at least one of
@@ -74,36 +74,50 @@ prints.
 
    Done when `~/code/agent-fabric/scripts/install.sh` exists.
 
-3. **Choose the hooks** (you decide; an agent asks). The `kb-note` skill tells agents when and how to leave a note,
-   and two hooks remind them of it:
+3. **Know the choices** (you decide; an agent explains). Step 4 asks them, and every one can be changed by running
+   it again.
 
-   - `start`: at the start of a session, the number of open `status` notes for the project and the machine, which
-     are a reason to check before relying on the repo, then the number of other open notes, and a reminder of
-     `kb inbox` and `kb note`.
-   - `stop`: at least 10 minutes in, a question at the end of a turn: did this session find something the next
-     agent must know? It comes once per session and again later in a long one, each costing one extra turn.
+   - **Workspaces.** Notes go to an inbox, and later to a wiki, shared by the projects of one workspace. With no
+     workspace registered, every project shares one, the default. To keep a set of repos apart, such as a client's,
+     register the folder that holds them as a workspace root: its projects' notes then go to `<root>/.fabric/`, and
+     never meet the others'. A root isn't a git repo itself. Agents should be started in a project, not in a root.
+   - **Per workspace** (for the wiki, [below](#turn-it-on)): the projects whose notes may be filed (none at first),
+     the backend that answers ingest's questions (`codex`), and whether it shares notes about the machine with the
+     other workspaces (yes; a client's workspace may say no).
+   - **Hooks.** The `kb-note` skill tells agents when and how to leave a note, and two hooks remind them of it:
+     - `start`: at the start of a session, the number of open `status` notes for the project and the machine, which
+       are a reason to check before relying on the repo, then the number of other open notes, and a reminder of
+       `kb inbox` and `kb note`.
+     - `stop`: at least 10 minutes in, a question at the end of a turn: did this session find something the next
+       agent must know? It comes once per session and again later in a long one, each costing one extra turn.
 
-   Done when you've picked `start,stop` (the default), `start`, `stop` or `none`.
+   Done when you know which roots, if any, to register, and which hooks you want: both (the default), `start`,
+   `stop` or none.
 
 4. **Run the install script** (you, in your own terminal, not in an agent's session):
 
    ```bash
-   ~/code/agent-fabric/scripts/install.sh                 # both hooks
-   ~/code/agent-fabric/scripts/install.sh --hooks start   # or: --hooks stop, --hooks none
+   ~/code/agent-fabric/scripts/install.sh                 # asks the choices
+   ~/code/agent-fabric/scripts/install.sh --hooks start   # or: --hooks start,stop|stop|none, and asks nothing
    ```
 
-   It installs `kb` with `uv tool install` (into `~/.local/bin`), then runs `kb doctor --fix`, which:
+   It installs `kb` with `uv tool install` (into `~/.local/bin`), then runs `kb setup`. That asks the choices above
+   as lists, picked with the arrow keys and space, each opening on what's recorded, and writes nothing until its
+   last question. It records them in `~/.config/agent-fabric/config.toml`, changing only its own lines, then runs
+   `kb doctor --fix`, which:
 
-   - creates the inbox, `~/.local/share/agent-fabric/inbox/`;
+   - creates each workspace's inbox: `~/.local/share/agent-fabric/inbox/` for the default, `<root>/.fabric/inbox/`
+     for a root;
    - copies the `kb-note` skill to `~/.claude/skills/` (read by Claude Code and Cursor CLI) and `~/.agents/skills/`
      (Codex and Copilot CLI), and to `$COPILOT_HOME/skills/` or `$CLAUDE_CONFIG_DIR/skills/` when those are set;
-   - adds the inbox to Claude Code's and Codex's sandbox write lists, so `kb note` works inside them;
+   - adds the inboxes to Claude Code's and Codex's sandbox write lists, so `kb note` works inside them;
    - installs kb's hook entries in each installed agent's hooks file, leaving every other entry as it was;
-   - records the hooks you chose in `~/.config/agent-fabric/config.toml`, for later runs to keep to;
-   - once a project is on the ingest allow list ([below](#turn-it-on)), installs `fabric-ingest.timer`, which runs
-     `kb ingest` daily at 03:00 (systemd only).
+   - once a project is allowed in a workspace ([below](#turn-it-on)), installs its `fabric-ingest@` timer, which
+     runs `kb ingest` for that workspace daily at 03:00 (systemd only).
 
-   Done when it prints a report that starts with `summary:`.
+   With `--hooks`, or without a terminal, the script skips the questions and runs `kb doctor --fix` with the choices
+   recorded, as it does when `kb setup` can't edit your config. Ctrl-C at a question stops the script and changes
+   nothing. Done when it prints a report that starts with `summary:`.
 
 5. **Finish what the report asks** (you, with an agent explaining). The report is `kb doctor`'s
    ([below](#kb-doctor)). Its `next` rows list what's left and who does it. The usual ones:
@@ -120,7 +134,8 @@ prints.
 6. **Start new sessions** (you). A session that was already running may not have the new skill or hooks. Done when
    `kb doctor`'s hooks row for each agent you use shows a "last ran" time.
 
-**Updating:** after `git pull`, run `scripts/install.sh` again in your own terminal; it keeps your hooks choice. The
+**Updating:** after `git pull`, run `scripts/install.sh` again in your own terminal; pressing Enter at each question
+keeps your choices. The
 install isn't editable, so agents keep the installed `kb` while the clone switches branches, and only the script
 updates `kb`, the skill copies and the hooks.
 
@@ -258,11 +273,17 @@ The wiki is optional, and these steps can be agent-guided too. Nothing goes to t
 
 2. **Choose the projects** (you decide; an agent asks). Only notes of allowed projects are filed. A run sends those
    notes, with excerpts of the files they cite, to the model's vendor (OpenAI, for Codex), after redaction and
-   gitleaks. List them by project id, as `kb inbox` shows them, in `~/.config/agent-fabric/config.toml`:
+   gitleaks. Each workspace has its own list: pick them in `kb setup` (it offers a root's git projects, and the
+   default workspace's projects with notes), or list them by project id, as `kb inbox` shows them, in
+   `~/.config/agent-fabric/config.toml`. `machine` allows the notes about the machine.
 
    ```toml
-   [publish]
+   [publish]                           # the default workspace
    allow = ["github.com/example/demo"]
+
+   [[workspace]]
+   root = "~/work/acme"
+   allow = ["github.com/acme/billing-api", "machine"]
    ```
 
    Notes of other projects stay in the inbox. Done when `kb ingest --dry-run` no longer says "no project is allowed
@@ -288,14 +309,15 @@ The wiki is optional, and these steps can be agent-guided too. Nothing goes to t
    Done when `git -C ~/wiki branch --no-merged main` lists no `ingest/` branch. The next run moves the merged notes
    to `inbox/done/`.
 
-6. **Let it run daily** (you): `kb doctor --fix`, or `scripts/install.sh` again, installs `fabric-ingest.timer` in
-   `~/.config/systemd/user/`. It runs `kb ingest` at 03:00, or on waking if the machine was asleep then; a run with
+6. **Let it run daily** (you): `kb doctor --fix`, or `scripts/install.sh` again, installs a timer per workspace with
+   a project allowed, `fabric-ingest@default.timer` or `fabric-ingest@<root, escaped>.timer`, in
+   `~/.config/systemd/user/`. It runs `kb ingest --workspace` at 03:00, or on waking if the machine was asleep then; a run with
    too few notes stops at its gate and costs nothing, and new notes go onto the branch waiting for review. The
    service gets a `PATH` of the folders where `codex`, `gitleaks`, `git` and `node` were found, and your
    `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `CODEX_HOME` if you set them; `kb doctor` says `outdated` once that `PATH`
    no longer finds `codex` or `gitleaks` (an nvm upgrade, say), and `--fix` rewrites it. Done when `kb doctor`'s
-   `timer` row is `ok`; it says `problem` when the last run failed, and `journalctl --user -u fabric-ingest.service`
-   shows why. To stop the daily runs, `systemctl --user disable --now fabric-ingest.timer`: `--fix` leaves a timer you
+   `timer` row is `ok`; it says `problem` when the last run failed, and `journalctl --user -u <its service>` shows
+   why. To stop a workspace's daily runs, `systemctl --user disable --now <its timer>`: `--fix` leaves a timer you
    disabled or masked off. Without systemd, as on macOS, run `kb ingest` yourself every few days.
 
 ### `kb ingest`
@@ -399,13 +421,14 @@ exists (§5).
 
 | Path | Contents |
 |---|---|
-| `~/.config/agent-fabric/config.toml` | settings: `[publish] allow`, `[notes] hooks` |
+| `~/.config/agent-fabric/config.toml` | settings: `[publish]`, `[ingest]`, `[notes] hooks`, a `[[workspace]]` per root |
 | `~/.local/share/agent-fabric/inbox/` | open notes; `done/<yyyy>/<mm>/` once resolved or ingested |
 | `~/.local/share/agent-fabric/hooks/` | one marker per agent session, removed after 7 days without a hook |
 | `~/.local/share/agent-fabric/ingest-wt/` | ingest's worktree of the wiki |
 | `~/wiki/` | the wiki repo |
+| `<root>/.fabric/` | a workspace root's `inbox/`, `wiki/` and `ingest-wt/` |
 
-`XDG_CONFIG_HOME` and `XDG_DATA_HOME` move the first four.
+`XDG_CONFIG_HOME` and `XDG_DATA_HOME` move the first four. The data paths and `~/wiki/` are the default workspace's.
 
 ## Security and privacy
 
@@ -449,7 +472,9 @@ src/agent_fabric/
 ├── agents.py       who signs a note       gitinfo.py    project ids
 ├── hooks.py        what each hook does    hookfiles.py  installs kb's hook entries
 ├── doctor.py       kb doctor's checks     sandboxes.py  the agents' sandbox write lists
-├── timer.py        fabric-ingest.timer's units, written by kb doctor --fix
+├── timer.py        each workspace's fabric-ingest@ units, written by kb doctor --fix
+├── setup.py        kb setup's questions   asker.py      their questionary lists
+├── workspaces.py   which workspace a folder is in, and where its data is
 ├── report.py       TOON output            config.py     config.toml
 ├── ingest.py       kb ingest's steps      backends.py   the model, behind one protocol
 ├── decisions.py    answers → one action   evidence.py   what a note's refs show

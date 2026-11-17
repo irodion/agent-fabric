@@ -7,7 +7,9 @@ authors = [
     { name = "irodion", email = "9167139+irodion@users.noreply.github.com" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "questionary>=2.1.1",
+]
 
 [project.scripts]
 kb = "agent_fabric.cli:main"

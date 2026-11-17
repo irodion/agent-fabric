@@ -1015,7 +1015,7 @@ def test_doctor_reports_a_kb_hook_the_recorded_choice_leaves_out(kb: Kb) -> None
             '[notes]\nhooks = ["start", "stop"]\n\n[publish]\nallow = []\n',
             '[notes]\nhooks = ["stop"]\n\n[publish]\nallow = []\n',
         ),
-        ("[notes]\nx = 1\n", '[notes]\nhooks = ["stop"]\nx = 1\n'),
+        ("[notes]\nx = 1\n", '[notes]\nx = 1\nhooks = ["stop"]\n'),
         ("[notes]\n[publish]\nhooks = 1\n", '[notes]\nhooks = ["stop"]\n[publish]\nhooks = 1\n'),
         ("[publish]\nallow = []\n[notes]", '[publish]\nallow = []\n[notes]\nhooks = ["stop"]\n'),
     ],
@@ -1090,7 +1090,7 @@ def test_a_config_kb_cannot_edit_safely_is_left_alone_and_so_are_the_hooks(kb: K
     path = claude_settings(kb, {})
     config = kb.home / ".config" / "agent-fabric" / "config.toml"
     config.parent.mkdir(parents=True)
-    config.write_text('[notes]\nhooks = [\n  "start",\n]\n')
+    config.write_text('[notes]\n"hooks" = ["start"]\n')
 
     result = kb("doctor", "--fix", "--hooks", "stop")
 
@@ -1102,7 +1102,7 @@ def test_a_config_kb_cannot_edit_safely_is_left_alone_and_so_are_the_hooks(kb: K
                 "can't record the choice of hooks",
             )
         ],
-        '[notes]\nhooks = [\n  "start",\n]\n',
+        '[notes]\n"hooks" = ["start"]\n',
         None,
     )
 
@@ -1187,7 +1187,7 @@ def test_a_hooks_choice_kb_cannot_record_gives_the_line_to_set(kb: Kb) -> None:
     make_inbox(kb)
     config = kb.home / ".config" / "agent-fabric" / "config.toml"
     config.parent.mkdir(parents=True)
-    config.write_text('[notes]\nhooks = [\n  "start",\n]\n')
+    config.write_text('[notes]\n"hooks" = ["start"]\n')
 
     result = report(kb("doctor", "--fix", "--hooks", "stop").stdout)
 
