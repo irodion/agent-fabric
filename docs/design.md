@@ -1153,15 +1153,16 @@ space, and applies them:
 4. **Hooks:** start and stop, start, stop, or none (§4.10).
 5. **Apply:** write the config, run `kb doctor --fix`, and show the report with the steps left for me.
 
-Every list opens on what's recorded, so a rerun after a pull that only presses Enter changes nothing; with nothing
-recorded, it opens on the defaults: no project allowed, `codex`, both hooks. It writes nothing until the last step,
-and quitting earlier leaves everything as it was. It edits the config as
-`config.py` does now: it changes or adds only its own lines, and writes only what reads back as intended. `kb doctor
---fix` stays as it is, non-interactive, for scripts and reruns; `kb setup` is the way in for a person, and refuses to
-run without a terminal. The lists use `questionary` (MIT, over `prompt_toolkit`), a small and widely used library for
-exactly these prompts; a full-screen TUI framework would be more than five questions need. It is `kb`'s first runtime
-dependency, so it passes the vet gate like any other (§4.1), and the rest of `kb` imports nothing from it, so hooks
-and notes don't load it.
+Steps 2 and 3 repeat for each workspace in turn, so where there's more than the default, each workspace's questions
+start under a heading that names it, and step 4 under one for the whole machine. Every list opens on what's recorded, so
+a rerun after a pull that only presses Enter changes nothing; with nothing recorded, it opens on the defaults: no
+project allowed, `codex`, both hooks. It writes nothing until the last step, and quitting earlier leaves everything as
+it was. It edits the config as `config.py` does now: it changes or adds only its own lines, and writes only what reads
+back as intended. `kb doctor --fix` stays as it is, non-interactive, for scripts and reruns; `kb setup` is the way in
+for a person, and refuses to run without a terminal. The lists use `questionary` (MIT, over `prompt_toolkit`), a small
+and widely used library for exactly these prompts; a full-screen TUI framework would be more than five questions need.
+It is `kb`'s first runtime dependency, so it passes the vet gate like any other (§4.1), and the rest of `kb` imports
+nothing from it, so hooks and notes don't load it.
 
 ## 5. Processes, ports, locations
 

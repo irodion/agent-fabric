@@ -53,6 +53,10 @@ class Asker(Protocol):
         """A choice made without asking, where there's none to make."""
         ...
 
+    def heading(self, title: str) -> None:
+        """The start of one workspace's questions, which each workspace asks again."""
+        ...
+
 
 def _not_a_folder(typed: str, env: Mapping[str, str]) -> str | None:
     """Why a typed folder won't do, or None: it's a full path, or one in the home folder, not one relative to wherever
@@ -201,7 +205,16 @@ def setup(ctx: Context, asker: Asker) -> tuple[int, str]:
         reason = getattr(e, "strerror", None) or e
         raise NothingChanged(f"can't read {tilde(config_file(env), env)}: {reason}") from e
     roots = _roots(asker, config)
-    chosen = {root: _workspace(asker, root, roots, config) for root in (None, *dict.fromkeys(firsts(roots, env)))}
+    workspaces = (None, *dict.fromkeys(firsts(roots, env)))
+    several = len(workspaces) > 1  # the questions repeat for each, so headings say whose they are
+    chosen = {}
+    for root in workspaces:
+        if several:
+            holds = "notes from folders under no root" if root is None else "notes from folders under it"
+            asker.heading(f"{_name(root)}: {holds}")
+        chosen[root] = _workspace(asker, root, roots, config)
+    if several:
+        asker.heading("this machine: every agent")  # not the last workspace's
     recorded_hooks = config.hooks()
     label = next(label for label, hooks in HOOK_CHOICES.items() if hooks == recorded_hooks)
     hooks = HOOK_CHOICES[asker.select("Hooks: which reminders should agents get?", list(HOOK_CHOICES), label)]
