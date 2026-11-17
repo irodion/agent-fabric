@@ -37,5 +37,8 @@ class QuestionaryAsker:
             self._ask(questionary.text(message, validate=lambda typed: validate(typed) or True, **self.session))
         )
 
+    def heading(self, title: str) -> None:
+        questionary.print(f"\n── {title} ──", style="bold", output=self.session.get("output"))
+
     def tell(self, message: str) -> None:
         questionary.print(f"  {message}", style="fg:ansibrightblack", output=self.session.get("output"))

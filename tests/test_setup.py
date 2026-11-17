@@ -39,6 +39,7 @@ class Scripted:
     asked: list[Asked] = field(default_factory=list)
     refused: list[str] = field(default_factory=list)  # what `validate` said of a text answer
     told: list[str] = field(default_factory=list)  # what setup said without asking
+    headings: list[tuple[int, str]] = field(default_factory=list)  # each with the number of questions asked before
 
     def _answer(self, kind: str, message: str, choices: list[str], default: object) -> object:
         self.asked.append(Asked(kind, message, choices, default))
@@ -78,6 +79,9 @@ class Scripted:
 
     def tell(self, message: str) -> None:
         self.told.append(message)
+
+    def heading(self, title: str) -> None:
+        self.headings.append((len(self.asked), title))
 
     def questions(self, kind: str) -> list[Asked]:
         return [asked for asked in self.asked if asked.kind == kind]
@@ -567,6 +571,45 @@ def test_enter_keeps_a_root_written_two_ways_as_it_is(lab: Lab, opted_out: int) 
     kb_setup(kb, Scripted())
 
     assert config(kb).read_text() == before
+
+
+def test_each_workspaces_questions_come_under_a_heading_that_names_it(kb: Kb) -> None:
+    registered(kb, "~/work/acme")
+    asker = Scripted()
+
+    kb_setup(kb, asker)
+
+    # Each heading, and the questions just after and just before it: its workspace's first, the last one's before.
+    assert [(asker.asked[at - 1].message, title, asker.asked[at].message) for at, title in asker.headings[1:]] == [
+        (
+            "default workspace: share machine notes with the other workspaces?",
+            "~/work/acme: notes from folders under it",
+            "~/work/acme: projects to allow",
+        ),
+        (
+            "~/work/acme: share machine notes with the other workspaces?",
+            "this machine: every agent",
+            "Hooks: which reminders should agents get?",
+        ),
+    ]
+    assert asker.headings[0][1] == "default workspace: notes from folders under no root"
+    assert asker.asked[asker.headings[0][0]].message == "default workspace: projects to allow"
+
+
+def test_with_one_workspace_its_questions_need_no_heading(kb: Kb) -> None:
+    asker = Scripted()
+
+    kb_setup(kb, asker)
+
+    assert asker.headings == []
+
+
+def test_the_terminal_asker_shows_a_heading_on_a_line_of_its_own() -> None:
+    shown = io.StringIO()
+
+    QuestionaryAsker(output=PlainTextOutput(shown)).heading("~/work/acme: notes from folders under it")
+
+    assert shown.getvalue().splitlines() == ["", "── ~/work/acme: notes from folders under it ──"]
 
 
 def test_the_terminal_asker_tells_a_choice_made_without_asking() -> None:
