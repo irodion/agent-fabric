@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_fabric.config import allowed_projects, ingest_backend, machine_opt_outs, setting, workspace_roots
+from agent_fabric.config import Config, allowed_projects, ingest_backend, read_config, setting, workspace_roots
 from agent_fabric.gitinfo import main_checkout
 from agent_fabric.paths import expand, inbox_dir, ingest_worktree, wiki_dir
 
@@ -45,7 +45,7 @@ class Workspace:
 def workspace_of(folder: Path, env: Mapping[str, str]) -> Workspace:
     """The registered root that holds the folder, the inner one where roots nest; the default workspace under none. A
     git checkout is placed by its main checkout, since some agents put worktrees outside the project."""
-    return Workspace(innermost(folder, [expand(root, env).resolve() for root in workspace_roots(env)]))
+    return Workspace(innermost(folder, list(read_config(env).folders)))
 
 
 def innermost(folder: Path, roots: list[Path]) -> Path | None:
@@ -56,18 +56,21 @@ def innermost(folder: Path, roots: list[Path]) -> Path | None:
 
 def every_workspace(env: Mapping[str, str]) -> list[Workspace]:
     """The default workspace and each registered root, once."""
-    roots = dict.fromkeys(expand(root, env).resolve() for root in workspace_roots(env))
-    return [Workspace(None), *(Workspace(root) for root in roots)]
+    return _every(read_config(env))
+
+
+def _every(config: Config) -> list[Workspace]:
+    return [Workspace(None), *(Workspace(root) for root in dict.fromkeys(config.folders))]
 
 
 def machine_workspaces(workspace: Workspace, env: Mapping[str, str]) -> list[Workspace]:
     """Where a machine note written in this workspace goes, this one first: every workspace that shares machine
     notes, or this one alone where it opts out (docs/design.md §4.11). A root that isn't there, such as one on a disk
     that isn't mounted, gets no copy: kb would make the folder, and no session can run in it."""
-    out = {None if root is None else expand(root, env).resolve() for root in machine_opt_outs(env)}
-    if workspace.root in out:
+    config = read_config(env)
+    if workspace.root in config.opted_out:
         return [workspace]
-    others = [other for other in every_workspace(env) if other != workspace and other.root not in out]
+    others = [other for other in _every(config) if other != workspace and other.root not in config.opted_out]
     return [workspace, *(other for other in others if other.root is None or other.root.is_dir())]
 
 
