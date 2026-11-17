@@ -45,9 +45,13 @@ class Workspace:
 def workspace_of(folder: Path, env: Mapping[str, str]) -> Workspace:
     """The registered root that holds the folder, the inner one where roots nest; the default workspace under none. A
     git checkout is placed by its main checkout, since some agents put worktrees outside the project."""
+    return Workspace(innermost(folder, [expand(root, env).resolve() for root in workspace_roots(env)]))
+
+
+def innermost(folder: Path, roots: list[Path]) -> Path | None:
+    """Of these resolved roots, the innermost that holds the folder's main checkout; None for the default."""
     physical = main_checkout(folder) or folder.resolve()
-    holding = [path for root in workspace_roots(env) if physical.is_relative_to(path := expand(root, env).resolve())]
-    return Workspace(max(holding, key=lambda path: len(path.parts), default=None))
+    return max((root for root in roots if physical.is_relative_to(root)), key=lambda r: len(r.parts), default=None)
 
 
 def every_workspace(env: Mapping[str, str]) -> list[Workspace]:

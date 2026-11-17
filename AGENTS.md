@@ -75,6 +75,9 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   `kb ingest` and `kb lint` work on one workspace (`--workspace default|ROOT`, else the current folder's): its inbox,
   wiki, worktree, lock, allow list and backend all come from the `Workspace`. `kb doctor` sets up every workspace: its
   inbox, the sandboxes' write lists, a timer pair per workspace with a project allowed, and its wiki's rows.
+  `kb setup` asks the workspaces' roots, allow lists, backends and machine-note sharing, and the hooks, through an
+  `setup.Asker`, then writes them with `config.record_workspaces` and runs `kb doctor --fix`. Tests answer through a
+  scripted asker; `asker.py` wraps `questionary`, which only `kb setup` imports.
 - **Who signs a note.** `agents.detect_agent` depends on whether an agent's variable is set. With one, an `--agent`
   naming a tool wins, because an agent started by another inherits its variables, and otherwise the variable does. With
   none, an `--agent` naming Copilot CLI or Cursor CLI wins, then the hooks' markers, then any other `--agent`. `kb`
@@ -87,8 +90,8 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   format and `manifests.py` records what each branch took. `lint.py` is `kb lint`, and ingest runs it too.
 - **`kb doctor`.** `doctor.py` gathers one `report.Row` per check, with `sandboxes.py` and `hookfiles.py` covering the
   agents' settings, `timer.py` the systemd units that run `kb ingest` daily, and `report.py` renders one TOON
-  document. It writes TOON by hand: `toon-format` is a dev dependency that tests use as an independent decoder, and
-  the package has no runtime dependencies yet.
+  document. It writes TOON by hand: `toon-format` is a dev dependency that tests use as an independent decoder. The
+  one runtime dependency is `questionary`, for `kb setup`.
 
 These hold across the code:
 
@@ -101,7 +104,8 @@ These hold across the code:
 - Ingest fails closed: if gitleaks can't vouch for a text, the run stops before any model sees it. A file is redacted
   and scanned whole before it's cut to an excerpt, because a cut can hide what makes a secret recognisable.
 - `kb doctor` only reads, unless given `--fix`. `--fix` edits the user's agent settings and keeps everything else in
-  them. A file it can't edit safely gets a `problem` row with a step for the user, and stays as it is.
+  them. A file it can't edit safely gets a `problem` row with a step for the user, and stays as it is. kb's own config
+  is edited the same way: only kb's lines change, and only where the result reads back as intended.
 - `src/agent_fabric/skills/kb-note/SKILL.md` is the one copy of the skill. `kb doctor` compares the installed copies
   byte for byte with its own package's copy, so after an edit only `uv run kb doctor` shows `outdated`. The `kb` on
   PATH says `ok` until `scripts/install.sh` runs again.
@@ -111,4 +115,5 @@ These hold across the code:
 
 The vet gate fails any version published less than 14 days ago. `exclude-newer` in `pyproject.toml` holds uv to an
 older PyPI snapshot. To upgrade, move that date forward, keeping it at least 14 days back, then run `uv lock --upgrade`:
-moving the date alone changes no versions, and the checks still pass.
+moving the date alone changes no versions, and the checks still pass. `uv tool install` ignores both the lock and
+that date, so `scripts/install.sh` passes the lock's versions to it as constraints.

@@ -110,25 +110,46 @@ def run_in(argv: list[str], ctx: Context) -> Result:
     ingest_cmd.add_argument(
         "--dry-run", action="store_true", help="say which notes it would take, and change nothing"
     )
+    commands.add_parser(
+        "setup", help="choose the workspaces, allow lists, backends and hooks, then run kb doctor --fix"
+    )
     lint_cmd = commands.add_parser("lint", help="what's stale or broken in the wiki (docs/design.md §4.7)")
     lint_cmd.add_argument("--workspace", help=WORKSPACE_HELP)
-    env, now = ctx.env, ctx.now
     try:
         args = parser.parse_args(argv)
         if args.command == "hook":
             return Result(0, run_hook(args.event, args.agent, ctx), "")
         if args.command in ("lint", "ingest"):
             return _wiki_command(args, ctx)
-        if args.command == "doctor":
-            if args.hooks is not None and not args.fix:
-                raise UsageError("--hooks goes with --fix, which records the choice")
-            exit_code, report = doctor(env, now, fix=args.fix, hooks=args.hooks)
-            return Result(exit_code, report, "")
+        if args.command in ("setup", "doctor"):
+            return _setup_command(args, ctx)
         return _notes_command(args, ctx)
     except UsageError as e:
         if argv[:1] == ["hook"]:
             return Result(0, "", "")  # an agent's hook never fails (docs/design.md §4.10)
         return Result(2, "", f"kb: {e}\n")
+
+
+def _setup_command(args: argparse.Namespace, ctx: Context) -> Result:
+    """`kb doctor`, and `kb setup`, which asks in a person's terminal (docs/design.md §4.11): `questionary` is loaded
+    only here."""
+    if args.command == "doctor":
+        if args.hooks is not None and not args.fix:
+            raise UsageError("--hooks goes with --fix, which records the choice")
+        exit_code, report = doctor(ctx.env, ctx.now, fix=args.fix, hooks=args.hooks)
+        return Result(exit_code, report, "")
+    if not (ctx.stdin.isatty() and sys.stdout.isatty()):  # the lists are drawn on stdout
+        raise UsageError("setup asks its questions in a terminal: run it in your own, or run kb doctor --fix")
+    from agent_fabric.asker import QuestionaryAsker  # noqa: PLC0415
+    from agent_fabric.setup import QUIT, UNCHANGED, NothingChanged, Quit, setup  # noqa: PLC0415
+
+    try:
+        exit_code, report = setup(ctx, QuestionaryAsker())
+    except Quit:
+        return Result(QUIT, "", "kb setup: stopped; nothing changed\n")
+    except NothingChanged as e:
+        return Result(UNCHANGED, "", f"kb setup: {e}; nothing changed\n")
+    return Result(exit_code, report, "")
 
 
 def _notes_command(args: argparse.Namespace, ctx: Context) -> Result:
