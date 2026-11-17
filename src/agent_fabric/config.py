@@ -137,6 +137,10 @@ class Config:
             raise ValueError(f"{setting(self.env, root, 'ingest', 'backend')} must be a name, such as codex")
         return backend
 
+    def backend_written(self, root: Path | None = None) -> bool:
+        """Whether the workspace's backend is set, not `codex` by default."""
+        return "backend" in self._settings(root, "ingest")
+
     @cached_property
     def _shares(self) -> tuple[bool, ...]:
         """`share_machine_notes` of the default workspace, under `[publish]`, then of each entry. Sharing is on by

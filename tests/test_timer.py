@@ -413,3 +413,76 @@ def test_a_masked_service_whose_timer_still_fires_is_a_problem(lab: Lab) -> None
     systemd_state(lab.kb, "stopped")
 
     assert timer_rows(lab.kb)[0][1].startswith("turned off (masked)")
+
+
+def on_claude(lab: Lab) -> None:
+    config = lab.kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.write_text(config.read_text() + '\n[ingest]\nbackend = "claude"\n')
+
+
+def test_a_workspace_on_claude_needs_claude_not_codex(lab: Lab, tmp_path: Path) -> None:
+    on_claude(lab)
+    only_on_path(lab, tmp_path, "claude", "gitleaks")
+    a_stub(tmp_path / "only", "systemctl", (tmp_path / "stubs" / "systemctl").read_text())
+    lab.kb.env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "claude-home")
+
+    result = lab.kb("doctor", "--fix")
+
+    assert timer_rows(lab.kb) == [("ok", DAILY)]
+    assert "isn't on PATH" not in result.stdout
+    service = unit(lab.kb, "fabric-ingest@default.service")
+    assert f'Environment="PATH={tmp_path / "only"}:' in service
+    assert f'Environment="CLAUDE_CONFIG_DIR={tmp_path}/claude-home"\n' in service
+
+
+def test_fix_leaves_the_timer_alone_while_the_workspaces_backend_is_not_on_path(lab: Lab, tmp_path: Path) -> None:
+    lab.kb("doctor", "--fix")
+    written = unit(lab.kb, "fabric-ingest@default.service")
+    on_claude(lab)
+    only_on_path(lab, tmp_path, "codex", "gitleaks")
+    a_stub(tmp_path / "only", "systemctl", (tmp_path / "stubs" / "systemctl").read_text())
+
+    result = lab.kb("doctor", "--fix")
+
+    assert "claude isn't on PATH" in result.stdout
+    assert unit(lab.kb, "fabric-ingest@default.service") == written
+
+
+def test_a_unit_whose_saved_path_lost_the_workspaces_backend_is_outdated(lab: Lab, tmp_path: Path) -> None:
+    on_claude(lab)
+    claude = a_stub(tmp_path / "claude-bin", "claude", "#!/bin/sh\n")
+    lab.kb.env["PATH"] = f"{claude.parent}:{lab.kb.env['PATH']}"
+    lab.kb("doctor", "--fix")
+    moved = a_stub(tmp_path / "moved", "claude", "#!/bin/sh\n")
+    claude.unlink()
+    lab.kb.env["PATH"] = f"{moved.parent}:{lab.kb.env['PATH']}"
+
+    assert timer_rows(lab.kb) == [("outdated", "its PATH no longer finds claude, so each run fails")]
+
+
+def test_a_backend_kb_doesnt_have_is_a_problem_on_the_ingest_row(lab: Lab) -> None:
+    config = lab.kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.write_text(config.read_text() + '\n[ingest]\nbackend = "cursor"\n')
+
+    rows = [(row["status"], row["detail"]) for row in doctor(lab.kb)["checks"] if row["check"] == "ingest"]
+
+    assert rows == [("problem", "the backend 'cursor' isn't one this kb has: codex, claude")]
+
+
+def test_no_timer_for_a_workspace_whose_backend_kb_doesnt_have(lab: Lab) -> None:
+    config = lab.kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.write_text(config.read_text() + '\n[ingest]\nbackend = "cursor"\n')
+
+    assert timer_rows(lab.kb, "--fix") == []
+    assert not (lab.kb.home / UNITS / "fabric-ingest@default.timer").exists()
+
+
+def test_a_unit_carries_only_its_own_backends_home(lab: Lab, tmp_path: Path) -> None:
+    lab.kb.env["CODEX_HOME"] = str(tmp_path / "codex-home")
+    lab.kb.env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "claude-home")
+
+    lab.kb("doctor", "--fix")
+
+    service = unit(lab.kb, "fabric-ingest@default.service")
+    assert "CODEX_HOME=" in service
+    assert "CLAUDE_CONFIG_DIR" not in service

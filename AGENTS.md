@@ -42,8 +42,9 @@ itself.
   allowed there. Tests that run `kb doctor` with an allow list use the `lab` fixture, whose stand-in `systemctl` keeps
   them off the real user manager. To try a command that writes, with `XDG_DATA_HOME` unset, give it a throwaway home:
   `HOME="$(mktemp -d)" .venv/bin/kb <args>`.
-- `kb ingest` moves notes out of the inbox, writes `~/wiki` and spends model requests through `codex`, so ask first. To
-  try it, use a throwaway home with a stub `codex` on PATH (`tests/test_codex.py` has one).
+- `kb ingest` moves notes out of the inbox, writes `~/wiki` and spends model requests through the workspace's backend
+  (`codex` or `claude`), so ask first. To try it, use a throwaway home with a stub backend on PATH
+  (`tests/test_codex.py` and `tests/test_claude.py` have one each).
 - Under `uv run`, `kb doctor` reports a `problem` on its `kb` row, because `.venv/bin` comes first on PATH. That's
   expected.
 - A commit in a sandbox with other changes unstaged fails, because pre-commit can't stash them in its read-only cache.
@@ -85,9 +86,10 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   The same markers limit the stop question to once per session and give `kb doctor` its "last ran".
 - **Hooks.** `hooks.py` runs at each hook and knows each agent's events and output format. `hookfiles.py` installs kb's
   entries in each agent's hooks file, recognises them by their command, and keeps every other entry.
-- **Ingest.** `ingest.py` runs §4.7's steps, and the model answers only through `backends.Backend`. `decisions.py` turns
-  answers into one action, `evidence.py` reads a note's refs, `secretgate.py` redacts and scans, `pages.py` is the page
-  format and `manifests.py` records what each branch took. `lint.py` is `kb lint`, and ingest runs it too.
+- **Ingest.** `ingest.py` runs §4.7's steps, and the model answers only through `backends.Backend`: `CodexBackend` or
+  `ClaudeBackend`, by the workspace's `backend`. `decisions.py` turns answers into one action, `evidence.py` reads a
+  note's refs, `secretgate.py` redacts and scans, `pages.py` is the page format and `manifests.py` records what each
+  branch took. `lint.py` is `kb lint`, and ingest runs it too.
 - **`kb doctor`.** `doctor.py` gathers one `report.Row` per check, with `sandboxes.py` and `hookfiles.py` covering the
   agents' settings, `timer.py` the systemd units that run `kb ingest` daily, and `report.py` renders one TOON
   document. It writes TOON by hand: `toon-format` is a dev dependency that tests use as an independent decoder. The

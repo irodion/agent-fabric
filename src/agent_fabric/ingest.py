@@ -11,7 +11,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from agent_fabric import manifests
-from agent_fabric.backends import BACKENDS, Backend, CodexBackend, InvalidAnswer, Question
+from agent_fabric.backends import Backend, InvalidAnswer, Question, backend_named, not_ours
+from agent_fabric.config import setting
 from agent_fabric.context import Context
 from agent_fabric.decisions import (
     Decision,
@@ -309,7 +310,9 @@ def _flag_only(ctx: Context, workspace: Workspace, wiki: Git, current: Manifest,
 
 def _run(ctx: Context, workspace: Workspace, current: Manifest | None, take: list[Note], found: list[Finding]) -> str:
     env = ctx.env
-    backend = ctx.backend or CodexBackend(env)  # `ingest` sets the one chosen
+    backend = ctx.backend
+    if backend is None:  # `ingest` sets the workspace's: never codex in place of another
+        raise Stopped("no backend was chosen for this run")
     wiki = ensure_wiki(workspace.wiki(env), env, agents_file())
     if current is None:
         current = Manifest(manifests.next_name(wiki, f"{ctx.now:%Y-%m-%d}"), wiki("rev-parse", MAIN).strip())
@@ -358,10 +361,10 @@ def _backend(ctx: Context, workspace: Workspace, name: str | None) -> Backend:
         name = name or workspace.backend(ctx.env)
     except ValueError as e:
         raise Stopped(f"can't read {config_file(ctx.env)}: {e}") from e
-    if name not in BACKENDS:
-        config = tilde(config_file(ctx.env), ctx.env)
-        raise Stopped(f"the backend {name!r} in {config} isn't one this kb has: {', '.join(BACKENDS)}")
-    return ctx.backend or CodexBackend(ctx.env)  # a test's fake stands in for any
+    if problem := not_ours(name):
+        where = setting(ctx.env, workspace.root, "ingest", "backend")
+        raise Stopped(f"{problem}: {where} in {tilde(config_file(ctx.env), ctx.env)}")
+    return ctx.backend or backend_named(name, ctx.env)  # a test's fake stands in for any
 
 
 def ingest(

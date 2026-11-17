@@ -208,3 +208,16 @@ def test_a_file_in_the_worktrees_place_is_replaced_by_the_worktree(lab: Lab) -> 
     result = lab.kb("ingest")
 
     assert (result.exit_code, worktree.is_dir()) == (0, True), result.stderr
+
+
+def test_a_backend_kb_doesnt_have_is_named_by_its_workspaces_entry(lab: Lab) -> None:
+    root = in_a_root(lab)
+    config = lab.kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.write_text(config.read_text() + 'backend = "cursor"\n')
+    three_notes(lab)
+
+    result = lab.kb("ingest")
+
+    assert result.exit_code != 0
+    assert f"backend in the [[workspace]] for ~/{root.relative_to(lab.kb.home)}" in result.stderr
+    assert "isn't one this kb has" in result.stderr

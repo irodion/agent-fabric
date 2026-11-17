@@ -157,7 +157,7 @@ def _allow(
     return tuple(allow)
 
 
-def _backend(asker: Asker, root: str | None, recorded: Settings, env: Mapping[str, str]) -> str:
+def _backend(asker: Asker, root: str | None, recorded: Settings, env: Mapping[str, str], *, written: bool) -> str:
     """Step 3: a workspace's backend, among those installed, `codex` first, and the one recorded; named, not asked,
     where there's no choice, and named as missing where none is installed."""
     installed = [backend for backend in BACKENDS if shutil.which(backend, path=env.get("PATH"))]
@@ -171,7 +171,9 @@ def _backend(asker: Asker, root: str | None, recorded: Settings, env: Mapping[st
         asker.tell(f"{_name(root)}: kb ingest uses {recorded.backend}, the one backend kb has that's installed")
         return recorded.backend
     offered = list(dict.fromkeys([*installed, recorded.backend]))
-    return asker.select(f"{_name(root)}: backend for kb ingest", offered, recorded.backend)
+    # Enter keeps a backend that's written; codex, which stands where none is, gives way to one that's installed.
+    default = recorded.backend if written or recorded.backend in installed else installed[0]
+    return asker.select(f"{_name(root)}: backend for kb ingest", offered, default)
 
 
 def _workspace(asker: Asker, root: str | None, roots: list[str], config: Config) -> Settings:
@@ -179,10 +181,11 @@ def _workspace(asker: Asker, root: str | None, roots: list[str], config: Config)
     writes it, so that a root removed and added again under another spelling keeps its settings."""
     env = config.env
     folder = None if root is None else expand(root, env).resolve()
-    recorded = config.settings(folder) if folder is None or folder in config.folders else Settings()
+    known = folder is None or folder in config.folders
+    recorded = config.settings(folder) if known else Settings()
     return Settings(
         _allow(asker, root, roots, recorded, env),
-        _backend(asker, root, recorded, env),
+        _backend(asker, root, recorded, env, written=known and config.backend_written(folder)),
         asker.confirm(f"{_name(root)}: share machine notes with the other workspaces?", recorded.share_machine_notes),
     )
 

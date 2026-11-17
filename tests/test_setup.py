@@ -287,6 +287,29 @@ def test_the_backend_is_asked_only_between_backends_installed_and_named_where_th
     assert asker.told == ["default workspace: kb ingest uses codex, the one backend kb has that's installed"]
 
 
+def test_the_backend_is_asked_where_codex_and_claude_are_both_installed(lab: Lab) -> None:
+    for cli in ("codex", "claude"):
+        a_stub(lab.kb.home / ".local" / "bin", cli, "#!/bin/sh\nexit 1\n")
+    asker = Scripted({"default workspace: backend": "claude"})
+
+    kb_setup(lab.kb, asker)
+
+    backend = next(q for q in asker.questions("select") if q.message.startswith("default workspace"))
+    assert (backend.choices, backend.default) == (["codex", "claude"], "codex")
+    assert 'backend = "claude"' in config(lab.kb).read_text()
+
+
+def test_where_only_claude_is_installed_it_is_the_default_over_codex(lab: Lab) -> None:
+    a_stub(lab.kb.home / ".local" / "bin", "claude", "#!/bin/sh\nexit 1\n")
+    asker = Scripted()
+
+    kb_setup(lab.kb, asker)
+
+    backend = next(q for q in asker.questions("select") if q.message.startswith("default workspace"))
+    assert (backend.choices, backend.default) == (["claude", "codex"], "claude")
+    assert 'backend = "claude"' in config(lab.kb).read_text()
+
+
 @pytest.mark.parametrize("recorded", ["codex", "local"])
 def test_a_backend_that_isnt_installed_is_named_as_missing(lab: Lab, recorded: str) -> None:
     kb = lab.kb
@@ -295,7 +318,9 @@ def test_a_backend_that_isnt_installed_is_named_as_missing(lab: Lab, recorded: s
 
     kb_setup(kb, asker)
 
-    assert asker.told == [f"default workspace: kb ingest uses {recorded}, but no backend kb has is installed (codex)"]
+    assert asker.told == [
+        f"default workspace: kb ingest uses {recorded}, but no backend kb has is installed (codex, claude)"
+    ]
 
 
 def test_leaving_before_the_last_step_writes_nothing(kb: Kb) -> None:
