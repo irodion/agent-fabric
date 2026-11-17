@@ -509,3 +509,18 @@ def test_sharing_chosen_for_a_root_written_two_ways_takes_effect_in_both_entries
     assert config(kb).read_text() == (
         f'[[workspace]]\nroot = "~/work/acme"\n\n[[workspace]]\nroot = "{root}"\nshare_machine_notes = true\n'
     )
+
+
+@pytest.mark.parametrize("opted_out", [0, 1], ids=["first entry opts out", "second entry opts out"])
+def test_enter_keeps_a_root_written_two_ways_as_it_is(lab: Lab, opted_out: int) -> None:
+    kb = lab.kb
+    root = kb.home / "work" / "acme"
+    root.mkdir(parents=True)
+    entries = [f'[[workspace]]\nroot = "{written}"\n' for written in ("~/work/acme", root)]
+    entries[opted_out] += "share_machine_notes = false\n"
+    config(kb).write_text("\n".join(entries))
+    before = config(kb).read_text()
+
+    kb_setup(kb, Scripted())
+
+    assert config(kb).read_text() == before
