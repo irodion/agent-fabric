@@ -297,32 +297,43 @@ def check_editable(env: Mapping[str, str]) -> None:
 def _entry_edits(
     text: str, env: Mapping[str, str], roots: list[str], chosen: Mapping[str | None, Settings], expected: Any
 ) -> list[Edit]:
-    """Drop the entries whose root is left out; record the settings in each kept root's first entry."""
+    """Drop the entries whose root is left out; record the settings in each kept root's first entry, which kb reads.
+    Sharing is off where any entry for the folder opts out, so it changes only where the kept entries together say
+    otherwise than the choice: turned off in the first, or turned on in each that opts out."""
     nl = _newline(text)
     written = workspace_roots(env)
     entries = _entries(text)
     _check_entries(entries, written)
     edits: list[Edit] = []
-    kept = []
-    choices = {expand(root, env).resolve(): settings for root, settings in chosen.items() if root is not None}
-    done = set()  # the folders whose first kept entry, the one kb reads, has its settings
+    kept: list[tuple[int, Path]] = []
     for index, (root, (head, start, end)) in enumerate(zip(written, entries, strict=True)):
-        if root not in roots:
+        if root in roots:
+            kept.append((index, expand(root, env).resolve()))
+        else:
             edits.append((_comments_above(text, head), _blanks_after(text, _content_end(text, start, end)), ""))
-            continue
-        kept.append(entry := expected["workspace"][index])
-        if (wanted := choices.get(folder := expand(root, env).resolve())) is None:
+    choices = {expand(root, env).resolve(): settings for root, settings in chosen.items() if root is not None}
+    sharing = {folder: True for _, folder in kept}
+    for index, folder in kept:
+        sharing[folder] &= _written(expected["workspace"][index]).share_machine_notes
+    done = set()
+    for index, folder in kept:
+        if (wanted := choices.get(folder)) is None:
             continue
         # against this entry's own values: what was shown may be an earlier entry's for the same folder, dropped
-        mine = _written(entry)
-        if folder in done:  # a later entry counts only for its opt-out, which kb reads from any entry
-            wanted = replace(mine, share_machine_notes=wanted.share_machine_notes)
+        mine = _written(entry := expected["workspace"][index])
+        if wanted.share_machine_notes == sharing[folder]:
+            share = mine.share_machine_notes  # the kept entries say it already
+        elif wanted.share_machine_notes:
+            share = True  # each opt-out goes
+        else:
+            share = mine.share_machine_notes if folder in done else False  # one opt-out, in the first
+        changed = _changed(mine, replace(wanted if folder not in done else mine, share_machine_notes=share))
         done.add(folder)
-        changed = _changed(mine, wanted)
-        edits += [_set_key(text, (start, end), key, value, nl) for key, value in changed.items()]
+        edits += [_set_key(text, entries[index][1:], key, value, nl) for key, value in changed.items()]
         entry.update(_plain(changed))
-    if kept:
-        expected["workspace"] = kept
+    kept_entries = [expected["workspace"][index] for index, _ in kept]
+    if kept_entries:
+        expected["workspace"] = kept_entries
     else:
         expected.pop("workspace", None)
     return edits
