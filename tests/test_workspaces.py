@@ -5,9 +5,11 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
 from conftest import Kb
 
 from agent_fabric.cli import Result
+from agent_fabric.config import allowed_projects, hooks_choice, ingest_backend, machine_opt_outs
 
 
 def register(kb: Kb, *roots: Path) -> None:
@@ -553,3 +555,22 @@ def test_a_bad_share_setting_doesnt_stop_resolving_a_note_about_a_project(kb: Kb
     resolved = kb("note", "--resolve", note_id, "--agent", "Codex", "fixed: it resets weekly now")
 
     assert (resolved.exit_code, resolved.stderr) == (0, "")
+
+
+def test_a_bad_root_leaves_the_hooks_and_the_default_workspaces_settings_readable(kb: Kb) -> None:
+    config = kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text('[notes]\nhooks = ["start"]\n\n[publish]\nallow = ["a/b"]\n\n[[workspace]]\nroot = "rel/x"\n')
+    env = {"HOME": str(kb.home), **kb.env}
+
+    assert (hooks_choice(env), allowed_projects(env), ingest_backend(env)) == (("start",), ("a/b",), "codex")
+
+
+@pytest.mark.parametrize("text", ['[workspace]\nroot = "/x"\n', "workspace = [1]\n"], ids=["one table", "a number"])
+def test_a_misshapen_workspace_is_named_where_the_opt_outs_are_read(kb: Kb, text: str) -> None:
+    config = kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(text)
+
+    with pytest.raises(ValueError, match="needs a root"):
+        machine_opt_outs({"HOME": str(kb.home), **kb.env})

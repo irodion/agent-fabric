@@ -9,15 +9,7 @@ from pathlib import Path
 from typing import Protocol
 
 from agent_fabric.backends import BACKENDS
-from agent_fabric.config import (
-    HOOKS,
-    Settings,
-    check_editable,
-    hooks_choice,
-    record_workspaces,
-    settings_of,
-    workspace_roots,
-)
+from agent_fabric.config import HOOKS, Config, Settings, check_editable, firsts, read_config, record_workspaces
 from agent_fabric.context import Context
 from agent_fabric.doctor import doctor
 from agent_fabric.gitinfo import main_checkout, project_id
@@ -81,14 +73,14 @@ def _new_root(typed: str, roots: list[str], env: Mapping[str, str]) -> str | Non
     return None
 
 
-def _roots(asker: Asker, env: Mapping[str, str]) -> list[str]:
+def _roots(asker: Asker, config: Config) -> list[str]:
     """Step 1: the registered roots to keep, and folders to add. A folder with two entries, written two ways, is asked
     about once, by its first entry, which is the one kb reads; keeping it keeps both."""
-    written = list(workspace_roots(env))
-    firsts = _firsts(written, env)
-    registered = list(dict.fromkeys(firsts))
+    env = config.env
+    spelled = config.firsts
+    registered = list(dict.fromkeys(spelled))
     kept = asker.checkbox("Workspaces: keep which roots?", registered, registered) if registered else []
-    roots = [root for root, first in zip(written, firsts, strict=True) if first in kept]
+    roots = [root for root, first in zip(config.roots, spelled, strict=True) if first in kept]
 
     def check(typed: str) -> str | None:
         return _new_root(typed, roots, env) if typed.strip() else None
@@ -170,12 +162,12 @@ def _backend(asker: Asker, root: str | None, recorded: Settings, env: Mapping[st
     return asker.select(f"{_name(root)}: backend for kb ingest", offered, recorded.backend)
 
 
-def _workspace(asker: Asker, root: str | None, roots: list[str], env: Mapping[str, str]) -> Settings:
+def _workspace(asker: Asker, root: str | None, roots: list[str], config: Config) -> Settings:
     """Steps 2 and 3 for one workspace, each opening on what's recorded: for a root, by its folder, however the entry
     writes it, so that a root removed and added again under another spelling keeps its settings."""
-    registered = {expand(written, env).resolve() for written in workspace_roots(env)}
-    known = root is None or expand(root, env).resolve() in registered
-    recorded = settings_of(env, root) if known else Settings()
+    env = config.env
+    folder = None if root is None else expand(root, env).resolve()
+    recorded = config.settings(folder) if folder is None or folder in config.folders else Settings()
     return Settings(
         _allow(asker, root, roots, recorded, env),
         _backend(asker, root, recorded, env),
@@ -183,24 +175,19 @@ def _workspace(asker: Asker, root: str | None, roots: list[str], env: Mapping[st
     )
 
 
-def _firsts(roots: list[str], env: Mapping[str, str]) -> list[str]:
-    """Each folder's first spelling."""
-    first = {expand(root, env).resolve(): root for root in reversed(roots)}
-    return [first[expand(root, env).resolve()] for root in roots]
-
-
 def setup(ctx: Context, asker: Asker) -> tuple[int, str]:
     """Ask every choice, then write them and run `kb doctor --fix`, returning its exit code and report. Raises `Quit`
     where the user leaves, and `NothingChanged` where the config can't be read or edited safely."""
     env = ctx.env
     try:
-        check_editable(env)
+        config = read_config(env)
+        check_editable(config)
     except (OSError, ValueError) as e:  # TOMLDecodeError too
         reason = getattr(e, "strerror", None) or e
         raise NothingChanged(f"can't read {tilde(config_file(env), env)}: {reason}") from e
-    roots = _roots(asker, env)
-    chosen = {root: _workspace(asker, root, roots, env) for root in (None, *dict.fromkeys(_firsts(roots, env)))}
-    recorded_hooks = hooks_choice(env)
+    roots = _roots(asker, config)
+    chosen = {root: _workspace(asker, root, roots, config) for root in (None, *dict.fromkeys(firsts(roots, env)))}
+    recorded_hooks = config.hooks()
     label = next(label for label, hooks in HOOK_CHOICES.items() if hooks == recorded_hooks)
     hooks = HOOK_CHOICES[asker.select("Hooks: which reminders should agents get?", list(HOOK_CHOICES), label)]
     if not asker.confirm("Write these choices and run kb doctor --fix?", True):
