@@ -1129,8 +1129,10 @@ space, and applies them:
 1. **Workspaces.** The registered roots, to keep or remove, and a folder to add as a new root, which gets `.fabric/`.
 2. **For each workspace, its allow list:** the git projects the workspace owns below its root, leaving out those under
    a nested root (the default workspace: those with notes in its inbox), any project folder I name, and `machine`.
-3. **For each workspace, its backend:** the backends installed on the machine (§4.7), `codex` first; and whether it
-   shares machine notes with the other workspaces (on by default).
+3. **For each workspace, its backend:** the backends installed on the machine (§4.7), `codex` first, and the one
+   recorded. Where the one recorded is the only one installed, setup names it without a question, and where none is
+   installed, it names the one recorded as missing. Then whether it shares machine notes with the other workspaces (on
+   by default).
 4. **Hooks:** start and stop, start, stop, or none (§4.10).
 5. **Apply:** write the config, run `kb doctor --fix`, and show the report with the steps left for me.
 

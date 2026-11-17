@@ -12,6 +12,7 @@ import pytest
 from conftest import Kb, Lab, a_stub
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
+from prompt_toolkit.output.plain_text import PlainTextOutput
 from test_doctor import install_kb, report
 
 from agent_fabric.asker import QuestionaryAsker
@@ -37,6 +38,7 @@ class Scripted:
     answers: dict[str, object] = field(default_factory=dict)
     asked: list[Asked] = field(default_factory=list)
     refused: list[str] = field(default_factory=list)  # what `validate` said of a text answer
+    told: list[str] = field(default_factory=list)  # what setup said without asking
 
     def _answer(self, kind: str, message: str, choices: list[str], default: object) -> object:
         self.asked.append(Asked(kind, message, choices, default))
@@ -73,6 +75,9 @@ class Scripted:
                 return typed
             assert answer is not ENTER, f"Enter refused at {message!r}: {refusal}"
             self.refused.append(refusal)
+
+    def tell(self, message: str) -> None:
+        self.told.append(message)
 
     def questions(self, kind: str) -> list[Asked]:
         return [asked for asked in self.asked if asked.kind == kind]
@@ -272,12 +277,25 @@ def test_settings_that_change_from_their_defaults_are_added_to_their_tables(lab:
     )
 
 
-def test_the_backend_is_asked_only_between_backends_installed(lab: Lab) -> None:
+def test_the_backend_is_asked_only_between_backends_installed_and_named_where_there_is_one(lab: Lab) -> None:
+    a_stub(lab.kb.home / ".local" / "bin", "codex", "#!/bin/sh\nexit 1\n")
     asker = Scripted()
 
     kb_setup(lab.kb, asker)
 
     assert [q.message for q in asker.questions("select")] == ["Hooks: which reminders should agents get?"]
+    assert asker.told == ["default workspace: kb ingest uses codex, the one backend kb has that's installed"]
+
+
+@pytest.mark.parametrize("recorded", ["codex", "local"])
+def test_a_backend_that_isnt_installed_is_named_as_missing(lab: Lab, recorded: str) -> None:
+    kb = lab.kb
+    config(kb).write_text(f'[ingest]\nbackend = "{recorded}"\n')
+    asker = Scripted()
+
+    kb_setup(kb, asker)
+
+    assert asker.told == [f"default workspace: kb ingest uses {recorded}, but no backend kb has is installed (codex)"]
 
 
 def test_leaving_before_the_last_step_writes_nothing(kb: Kb) -> None:
@@ -524,3 +542,11 @@ def test_enter_keeps_a_root_written_two_ways_as_it_is(lab: Lab, opted_out: int) 
     kb_setup(kb, Scripted())
 
     assert config(kb).read_text() == before
+
+
+def test_the_terminal_asker_tells_a_choice_made_without_asking() -> None:
+    shown = io.StringIO()
+
+    QuestionaryAsker(output=PlainTextOutput(shown)).tell("default workspace: kb ingest uses codex")
+
+    assert shown.getvalue().splitlines() == ["  default workspace: kb ingest uses codex"]
