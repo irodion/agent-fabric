@@ -25,8 +25,9 @@ kb note --kind <status|gotcha|fix|decision|idea> --ref <path[:line]|command|comm
 - A rule every session needs before it starts (a command, a setup step, a convention) belongs in the repo's
   AGENTS.md, or in the user's global instructions if it holds on the whole machine. Leave the note, and tell the user
   at the end of the session that it's a candidate for that file; don't edit either unasked.
-- Wiki pages (`~/wiki/wiki/projects/<project>.md`) hold reviewed notes. Before relying on a claim, check the file in
-  its `anchor`, and treat a `## Summary` as a pointer to its claims.
+- Wiki pages hold reviewed notes: `wiki/projects/<project>.md`, and `wiki/machine.md` for the machine's, in `~/wiki`,
+  or in `<root>/.fabric/wiki` for a repo under a workspace root. Before relying on a claim, check the file in its
+  `anchor`, and treat a `## Summary` as a pointer to its claims.
 - Write for an agent with none of your context: name the file, command or error. Facts, not plans or progress.
 - A note about another repo than the one you're in, or written outside git: add `--project <the repo's folder>`.
   Notes are listed by repo, so without it the note never reaches that repo's sessions; refs are then read from
