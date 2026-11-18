@@ -91,9 +91,10 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   note's refs, `secretgate.py` redacts and scans, `pages.py` is the page format and `manifests.py` records what each
   branch took. `lint.py` is `kb lint`, and ingest runs it too.
 - **`kb doctor`.** `doctor.py` gathers one `report.Row` per check, with `sandboxes.py` and `hookfiles.py` covering the
-  agents' settings, `timer.py` the systemd units that run `kb ingest` daily, and `report.py` renders one TOON
-  document. It writes TOON by hand: `toon-format` is a dev dependency that tests use as an independent decoder. The
-  one runtime dependency is `questionary`, for `kb setup`.
+  agents' settings, `timer.py` the systemd units that run `kb ingest` daily, and `report.py` renders one TOON document.
+  It reads kb's config once and hands that `Config` down, so its rows can't disagree over a file edited mid-run; only
+  recording `--hooks` reads it again, to edit the file as it is. It writes TOON by hand: `toon-format` is a dev
+  dependency that tests use as an independent decoder. The one runtime dependency is `questionary`, for `kb setup`.
 
 These hold across the code:
 

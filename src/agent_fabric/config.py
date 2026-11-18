@@ -184,11 +184,6 @@ def read_config(env: Mapping[str, str]) -> Config:
     return Config.parse(_text(env), env)
 
 
-def hooks_choice(env: Mapping[str, str]) -> tuple[str, ...]:
-    """The recorded choice of hooks; both when nothing is recorded."""
-    return read_config(env).hooks()
-
-
 def allowed_projects(env: Mapping[str, str], root: Path | None = None) -> tuple[str, ...]:
     """`Config.allowed`, from the file. ValueError where it can't be read."""
     return read_config(env).allowed(root)
