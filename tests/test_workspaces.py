@@ -9,7 +9,7 @@ import pytest
 from conftest import Kb
 
 from agent_fabric.cli import Result
-from agent_fabric.config import allowed_projects, hooks_choice, ingest_backend, machine_opt_outs
+from agent_fabric.config import allowed_projects, ingest_backend, machine_opt_outs, read_config
 
 
 def register(kb: Kb, *roots: Path) -> None:
@@ -563,7 +563,7 @@ def test_a_bad_root_leaves_the_hooks_and_the_default_workspaces_settings_readabl
     config.write_text('[notes]\nhooks = ["start"]\n\n[publish]\nallow = ["a/b"]\n\n[[workspace]]\nroot = "rel/x"\n')
     env = {"HOME": str(kb.home), **kb.env}
 
-    assert (hooks_choice(env), allowed_projects(env), ingest_backend(env)) == (("start",), ("a/b",), "codex")
+    assert (read_config(env).hooks(), allowed_projects(env), ingest_backend(env)) == (("start",), ("a/b",), "codex")
 
 
 @pytest.mark.parametrize("text", ['[workspace]\nroot = "/x"\n', "workspace = [1]\n"], ids=["one table", "a number"])

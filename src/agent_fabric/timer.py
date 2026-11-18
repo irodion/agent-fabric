@@ -10,10 +10,11 @@ import shlex
 import shutil
 import subprocess
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from agent_fabric.backends import not_ours
+from agent_fabric.config import Config
 from agent_fabric.ingest import BUSY  # another run held the lock: not a failure for the timer
 from agent_fabric.paths import tilde, units_dir, uv_tool_dir
 from agent_fabric.report import Row
@@ -59,11 +60,13 @@ class Unit:
     """One workspace's pair of units."""
 
     workspace: Workspace
+    allowed: bool  # whether the workspace allows a project: one whose list kb can't read allows none
+    tools: tuple[str, ...] | None  # what its ingest runs; None where its backend can't run, so no run could
     moved_off: str | None = None  # how v0.6's timer was turned off, which the default workspace's takes over
 
     @property
     def instance(self) -> str:
-        return "default" if self.workspace.root is None else _escaped(str(self.workspace.root))
+        return _instance(self.workspace)
 
     @property
     def timer(self) -> str:
@@ -100,22 +103,31 @@ def _quoted(text: str, *, command: bool = False) -> str:
     return f'"{escaped.replace("$", "$$") if command else escaped}"'
 
 
-def needed(env: Mapping[str, str], workspace: Workspace) -> tuple[str, ...] | None:
-    """What the workspace's `kb ingest` runs: gitleaks and its backend's CLI. None where the backend can't be read or
-    isn't one kb has, so that every run would stop; doctor's ingest row says why."""
+def _instance(workspace: Workspace) -> str:
+    return "default" if workspace.root is None else _escaped(str(workspace.root))
+
+
+def unit_of(workspace: Workspace, config: Config | None) -> Unit:
+    """The workspace's units, with what the config says of its ingest: from the one read doctor makes, or none where
+    it couldn't read the file. Doctor's ingest and workspace rows say what's wrong with a setting kb can't use."""
+    if config is None:
+        return Unit(workspace, allowed=False, tools=None)
     try:
-        backend = workspace.backend(env)
-    except (OSError, ValueError):
-        return None
-    return None if not_ours(backend) else ("gitleaks", backend)
+        allowed = bool(config.allowed(workspace.root))
+    except ValueError:
+        allowed = False
+    try:
+        backend: str | None = config.backend(workspace.root)
+    except ValueError:
+        backend = None
+    tools = ("gitleaks", backend) if backend is not None and not not_ours(backend) else None
+    return Unit(workspace, allowed=allowed, tools=tools)
 
 
-def _path(env: Mapping[str, str], workspace: Workspace) -> str:
+def _path(env: Mapping[str, str], unit: Unit) -> str:
     """The folders of the tools ingest runs, from the PATH kb runs with: a unit gets none of a shell's PATH, and codex
     lives where its node does, such as under nvm."""
-    found = (
-        shutil.which(tool, path=env.get("PATH", "")) for tool in (*(needed(env, workspace) or ()), *ALSO_ON_PATH)
-    )
+    found = (shutil.which(tool, path=env.get("PATH", "")) for tool in (*(unit.tools or ()), *ALSO_ON_PATH))
     # Absolute, as a unit has no working folder to resolve against; not resolved, as codex's link would lead into
     # node's package folder, which holds no node.
     folders = [os.path.dirname(os.path.abspath(tool)) for tool in found if tool]
@@ -130,12 +142,10 @@ def installed_kb(env: Mapping[str, str]) -> Path:
 def units(env: Mapping[str, str], unit: Unit) -> dict[str, str]:
     """The workspace's two files, as kb would write them now."""
     kb = installed_kb(env)
-    tools = needed(env, unit.workspace)
-    homes = (HOMES[tools[1]],) if tools else ()
+    homes = (HOMES[unit.tools[1]],) if unit.tools else ()
     carried = [(name, env[name]) for name in (*CARRIED, *homes) if Path(env.get(name) or "").is_absolute()]
     environment = "".join(
-        f"Environment={_quoted(f'{name}={value}')}\n"
-        for name, value in [("PATH", _path(env, unit.workspace)), *carried]
+        f"Environment={_quoted(f'{name}={value}')}\n" for name, value in [("PATH", _path(env, unit)), *carried]
     )
     run = f"{_quoted(str(kb), command=True)} ingest --workspace {_quoted(unit.argument, command=True)}"
     service = (
@@ -180,15 +190,11 @@ def _turn_on(command: str, env: Mapping[str, str], shown: str, unit: Unit) -> Ro
     return Row("fixed", "timer", shown, DAILY)
 
 
-def _wanted(env: Mapping[str, str], workspace: Workspace) -> bool:
+def _wanted(env: Mapping[str, str], unit: Unit) -> bool:
     """Once there's a project for its ingest to publish and the tools it runs are on PATH: a unit written without one
     would lack it, and the ingest row says what to install."""
-    try:
-        allowed = workspace.allowed(env)
-    except (OSError, ValueError):  # the ingest or workspace row reports it
-        return False
-    tools = needed(env, workspace)
-    return bool(allowed) and tools is not None and all(shutil.which(tool, path=env.get("PATH", "")) for tool in tools)
+    tools = unit.tools
+    return unit.allowed and tools is not None and all(shutil.which(tool, path=env.get("PATH", "")) for tool in tools)
 
 
 def _read(path: Path) -> str | None:
@@ -303,7 +309,7 @@ def _instances(folder: Path) -> set[str]:
 
 
 def check(
-    env: Mapping[str, str], registered: list[Workspace], present: list[Workspace], *, fix: bool, known: bool
+    env: Mapping[str, str], registered: list[Workspace], present: list[Unit], *, fix: bool, known: bool
 ) -> list[Row]:
     """The timers' rows: one per workspace that's there and has or wants a timer, v0.6's timer moved to the default
     workspace's, and the units of a workspace that's no longer registered removed. A root that isn't there keeps its
@@ -311,19 +317,20 @@ def check(
     folder = units_dir(env)
     command = shutil.which("systemctl", path=env.get("PATH", ""))
     old = [name for name in OLD if (folder / name).exists() or (folder / name).is_symlink()]
-    gone = _instances(folder) - {Unit(workspace).instance for workspace in registered} if known else set()
+    gone = _instances(folder) - {_instance(workspace) for workspace in registered} if known else set()
     if command is None:
-        if old or any(_wanted(env, workspace) for workspace in present) or _instances(folder):
+        if old or any(_wanted(env, unit) for unit in present) or _instances(folder):
             detail = "no systemd here, so kb ingest runs only when you start it"
             return [Row("ok", "timer", tilde(folder, env), detail, step="Run kb ingest yourself every few days")]
         return []
     rows = []
     moving, off = False, None  # whether v0.6's timer moves to the default workspace's, and how it was turned off
+    default = next((unit for unit in present if unit.workspace.root is None), unit_of(Workspace(None), None))
     if old:
-        row, moving, off = _old(command, env, fix=fix)
+        row, moving, off = _old(command, env, default, fix=fix)
         rows += [row] if row else []
-    for workspace in present:
-        unit = Unit(workspace, off if workspace.root is None else None)
+    for each in present:
+        unit = replace(each, moved_off=off) if each.workspace.root is None else each
         one = _one(command, env, unit, fix=fix)
         rows += one
         if unit.workspace.root is None and moving:
@@ -332,12 +339,11 @@ def check(
     return rows
 
 
-def _old(command: str, env: Mapping[str, str], *, fix: bool) -> tuple[Row | None, bool, str | None]:
+def _old(command: str, env: Mapping[str, str], default: Unit, *, fix: bool) -> tuple[Row | None, bool, str | None]:
     """v0.6's fabric-ingest.timer, which the default workspace's replaces (docs/design.md §5): a row where it stays,
     whether it moves, and how the user had turned it off, which goes with it. While systemd can't say, it stays."""
     folder = units_dir(env)
     shown = tilde(folder / OLD[1], env)
-    default = Unit(Workspace(None))
     if not fix:
         return (
             Row("outdated", "timer", shown, f"v0.6's timer; kb doctor --fix moves it to {default.timer}"),
@@ -436,7 +442,7 @@ def _one(command: str, env: Mapping[str, str], unit: Unit, *, fix: bool) -> list
         return [Row("ok", "timer", shown, _turned_off("masked", unit))]
     installed = any(text is not None for text in current.values())
     # v0.6's timer turned off moves here even before the workspace wants one, or its state would be lost.
-    wanted = _wanted(env, unit.workspace) or unit.moved_off is not None
+    wanted = _wanted(env, unit) or unit.moved_off is not None
     if not wanted and not installed:
         return []
     if masked or not wanted:  # checked, never written
@@ -476,7 +482,7 @@ def _stale(
     saved = SAVED_PATH.search(current[unit.service] or "")
     path = saved[1].replace("%%", "%").replace('\\"', '"').replace("\\\\", "\\") if saved else ""
     node = ("node",) if shutil.which("node", path=env.get("PATH", "")) else ()
-    lost = [tool for tool in (*(needed(env, unit.workspace) or ()), *node) if not shutil.which(tool, path=path)]
+    lost = [tool for tool in (*(unit.tools or ()), *node) if not shutil.which(tool, path=path)]
     return f"its PATH no longer finds {' or '.join(lost)}, so each run fails" if lost else None
 
 

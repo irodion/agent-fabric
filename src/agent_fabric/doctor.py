@@ -12,13 +12,14 @@ from pathlib import Path
 
 from agent_fabric import config, hookfiles, timer
 from agent_fabric.backends import not_ours
+from agent_fabric.config import Config, read_config
 from agent_fabric.lint import findings, summary
 from agent_fabric.manifests import Manifest, unmerged
 from agent_fabric.paths import config_file, expand, tilde, uv_tool_dir
 from agent_fabric.report import Row, render
 from agent_fabric.sandboxes import cant_read, claude_code, codex
 from agent_fabric.wikirepo import WIKI_ERRORS, Git, GitError
-from agent_fabric.workspaces import Workspace, every_workspace
+from agent_fabric.workspaces import Workspace, workspaces_in
 
 BRANCH_WAIT = 7  # days an ingest branch can wait for review before kb doctor says so (docs/design.md §8)
 
@@ -132,16 +133,21 @@ class Workspaces:
     registered: list[Workspace]  # the default and each registered root
     present: list[Workspace]  # those that are there: a root on a disk that isn't mounted isn't
     rows: list[Row]
-    known: bool  # whether the config could be read; if not, only the default workspace is known
+    known: bool  # whether every root could be read; if not, only the default workspace is known
+    config: Config | Exception  # the one read of it, so the rows can't disagree over a file edited mid-run, or why
+    # it couldn't be read; with a root kb can't use, still the config, whose default workspace's settings can be read
 
 
 def _workspaces(env: Mapping[str, str]) -> Workspaces:
     """The workspaces (docs/design.md §4.11), and a row for each root that isn't there, in which nothing is made."""
+    read: Config | None = None
     try:
-        every = every_workspace(env)
-    except (OSError, ValueError) as e:  # TOMLDecodeError too
+        read = read_config(env)
+        every = workspaces_in(read)
+    except (OSError, ValueError) as e:  # TOMLDecodeError too, or a root kb can't use
         default = [Workspace(None)]
-        return Workspaces(default, default, [cant_read("workspace", tilde(config_file(env), env), e)], known=False)
+        row = cant_read("workspace", tilde(config_file(env), env), e)
+        return Workspaces(default, default, [row], known=False, config=e if read is None else read)
     present = [workspace for workspace in every if workspace.root is None or workspace.root.is_dir()]
     rows = [
         Row(
@@ -154,7 +160,7 @@ def _workspaces(env: Mapping[str, str]) -> Workspaces:
         for workspace in every
         if workspace not in present and workspace.root is not None
     ]
-    return Workspaces(every, present, rows, known=True)
+    return Workspaces(every, present, rows, known=True, config=read)
 
 
 def _skills(folders: list[tuple[Path, str]], env: Mapping[str, str], *, fix: bool) -> list[Row]:
@@ -207,13 +213,17 @@ def _old_copy(found: Agents, env: Mapping[str, str], *, fix: bool) -> list[Row]:
     return [Row("fixed", "skill", shown, "removed the old copy so Codex doesn't load the skill twice")]
 
 
-def _hooks_choice(env: Mapping[str, str], hooks: tuple[str, ...] | None) -> tuple[tuple[str, ...] | None, list[Row]]:
+def _hooks_choice(
+    env: Mapping[str, str], spaces: Workspaces, hooks: tuple[str, ...] | None
+) -> tuple[tuple[str, ...] | None, list[Row]]:
     """The hooks to install: `--hooks`, recorded for later runs, or the recorded choice; None if it can't tell."""
     shown = tilde(config_file(env), env)
     if hooks is None:
+        if isinstance(spaces.config, Exception):
+            return None, [cant_read("hooks", shown, spaces.config)]
         try:
-            return config.hooks_choice(env), []
-        except (OSError, ValueError) as e:
+            return spaces.config.hooks(), []
+        except ValueError as e:
             return None, [cant_read("hooks", shown, e)]
     try:
         config.record_hooks(env, hooks)
@@ -245,17 +255,17 @@ def _copilot_sync(settings: Path, env: Mapping[str, str]) -> Row:
     return Row("ok", "sync", shown, "Copilot CLI's session sync is off")
 
 
-def _ingest_tools(env: Mapping[str, str], workspaces: list[Workspace]) -> list[Row]:
+def _ingest_tools(env: Mapping[str, str], read: Config, workspaces: list[Workspace]) -> list[Row]:
     """What `kb ingest` needs, once some workspace has a project for it to publish (docs/design.md §4.5, §4.7)."""
     shown = tilde(config_file(env), env)
     rows = []
     tools: dict[str, None] = {}  # what the workspaces with a project allowed run, each once
-    for workspace in workspaces:  # each read, so that a bad list anywhere gets its row
+    for workspace in workspaces:  # each checked, so that a bad list anywhere gets its row
         try:
-            if not workspace.allowed(env):
+            if not read.allowed(workspace.root):
                 continue
-            backend = workspace.backend(env)
-        except (OSError, ValueError) as e:
+            backend = read.backend(workspace.root)
+        except ValueError as e:
             rows.append(Row("problem", "ingest", shown, f"can't read it ({e})"))
             continue
         if problem := not_ours(backend):
@@ -340,7 +350,7 @@ def doctor(
         (found.has_copilot, found.copilot / "hooks" / "kb.json", "copilot"),
         (found.has_cursor, found.home / ".cursor" / "hooks.json", "cursor"),
     )
-    chosen, problems = _hooks_choice(env, hooks)
+    chosen, problems = _hooks_choice(env, spaces, hooks)
     rows += problems
     for installed, path, agent in hooks_files:
         if not installed or chosen is None:
@@ -354,8 +364,21 @@ def doctor(
     if found.has_copilot:
         rows.append(_copilot_sync(found.copilot / "settings.json", env))
     rows += [
-        *(_ingest_tools(env, spaces.registered) if spaces.known else []),  # allow lists are in the config
-        *timer.check(env, spaces.registered, workspaces, fix=fix, known=spaces.known),
+        *(
+            _ingest_tools(env, spaces.config, spaces.registered)
+            if spaces.known and isinstance(spaces.config, Config)
+            else []
+        ),
+        *timer.check(
+            env,
+            spaces.registered,
+            [
+                timer.unit_of(workspace, None if isinstance(spaces.config, Exception) else spaces.config)
+                for workspace in workspaces
+            ],  # a bad root leaves the default's
+            fix=fix,
+            known=spaces.known,
+        ),
     ]
     rows += [row for workspace in workspaces for row in _wiki(env, now, workspace)]
     return (0 if all(row.status in ("ok", "fixed") for row in rows) else 1), render(rows, fix=fix)

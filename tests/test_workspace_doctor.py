@@ -4,11 +4,15 @@ import json
 import os
 import shutil
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
 from conftest import PROJECT, Kb, Lab
 from test_doctor import codex_config, install_kb, report, rows, uses_claude_code
 from test_timer import calls, installed_kb, systemd_state
+
+from agent_fabric import config
 
 
 def a_root(kb: Kb, *parts: str, extra: str = "") -> Path:
@@ -399,3 +403,22 @@ def test_a_bad_allow_list_of_a_root_that_isnt_mounted_still_gets_its_row(kb: Kb)
     ingest = rows(doctor(kb), "ingest")
 
     assert any("allow in the [[workspace]] for ~/mnt/clientdisk" in detail for _, _, detail in ingest)
+
+
+@pytest.mark.parametrize("args", [(), ("--fix",)], ids=["check", "fix"])
+def test_doctor_reads_the_config_once(lab: Lab, monkeypatch: pytest.MonkeyPatch, args: tuple[str, ...]) -> None:
+    """One parse for the whole report, so its rows can't disagree over a file edited mid-run."""
+    a_root(lab.kb, "work", "acme", extra=f'allow = ["{PROJECT}"]\nbackend = "codex"\n')
+    a_root(lab.kb, "work", "beta", extra=f'allow = ["{PROJECT}"]\n')
+    reads = []
+    real = config._text
+
+    def counted(env: Mapping[str, str]) -> str:
+        reads.append(env)
+        return real(env)
+
+    monkeypatch.setattr(config, "_text", counted)
+
+    lab.kb("doctor", *args)
+
+    assert len(reads) == 1

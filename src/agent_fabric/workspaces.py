@@ -56,10 +56,11 @@ def innermost(folder: Path, roots: list[Path]) -> Path | None:
 
 def every_workspace(env: Mapping[str, str]) -> list[Workspace]:
     """The default workspace and each registered root, once."""
-    return _every(read_config(env))
+    return workspaces_in(read_config(env))
 
 
-def _every(config: Config) -> list[Workspace]:
+def workspaces_in(config: Config) -> list[Workspace]:
+    """`every_workspace`, from a config already read. ValueError where a root can't be read."""
     return [Workspace(None), *(Workspace(root) for root in dict.fromkeys(config.folders))]
 
 
@@ -70,7 +71,7 @@ def machine_workspaces(workspace: Workspace, env: Mapping[str, str]) -> list[Wor
     config = read_config(env)
     if workspace.root in config.opted_out:
         return [workspace]
-    others = [other for other in _every(config) if other != workspace and other.root not in config.opted_out]
+    others = [other for other in workspaces_in(config) if other != workspace and other.root not in config.opted_out]
     return [workspace, *(other for other in others if other.root is None or other.root.is_dir())]
 
 
