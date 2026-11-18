@@ -579,8 +579,12 @@ workspaces on their backends.
     the run as a chat in `~/.cursor/chats/` with a transcript under `~/.cursor/projects/`, ran the user's hooks, and
     has no schema. Its sandbox, which might stop the read, doesn't start on the devbox (§4.10): "possibly due to
     AppArmor configuration".
-  - `copilot` isn't checked yet. Copilot CLI 1.0.105's help shows `--available-tools` and `--no-custom-instructions`,
-    but no schema, nothing that keeps a run out of its sessions, and nothing for hooks.
+  - `copilot` doesn't. Copilot CLI 1.0.105 (2026-11-18), run with `-p --available-tools= --no-custom-instructions
+    --disable-builtin-mcps --no-ask-user --sync-session=off --output-format json` in an empty folder and told to `cat`
+    the file, made no tool call and answered that it hadn't read it. But it kept the run as a session, in
+    `~/.copilot/session-state/` and its session store, and ran the user's hooks; it has no flag that stops either, and
+    no schema. Its default model, `auto`, picked `mai-code-2-flash`, and the call counted as one premium request.
+    Whether the user's own MCP servers and skills are left out wasn't checked, since it fails already.
 - `local`, nightly once it passes §10: a decision model on `llama-server`'s `/v1/systemone`, on loopback. Nightly runs
   append to one branch, so review stays weekly. These models are small enough for an 8 GB machine, and should take
   seconds per note on a CPU, which still has to be measured. Speed and RAM aren't the constraint; whether the decisions
@@ -1268,7 +1272,7 @@ shfmt, actionlint, zizmor; ruff, mypy and pytest on Python 3.13 and 3.14).
 | a backend returns an invalid answer | no decision | one retry, then it goes on the review list and reaches no page (§4.7) |
 | a confident wrong answer | noise filed, or a useful note dropped | review, least certain first; a dropped note is listed for review, and keeps its file (§4.7) |
 | a summary gets a connection wrong | a false lead that reads as fact | each sentence cites its claims and it's marked as model-written; review; deleting it loses nothing (§4.7) |
-| the hosted run still has a tool | a note could make it read a file | the first real run checks this (§4.7, §11) |
+| the hosted run still has a tool | a note could make it read a file | each backend is checked on the version it runs (§4.7) |
 | vendor prunes/migrates history | source files gone | agentsview archive + daily backup keep the raw layer |
 | own automated runs captured | feedback loop | `codex exec --ephemeral`; ignore `is_automated` sessions |
 | sandbox blocks the inbox write | `kb note` exits 1, the note is lost | the error names the folder to add to the sandbox's write list; `kb doctor` reports a missing or unwritable inbox and a write list without it, and `--fix` adds it (§4.10) |
@@ -1405,12 +1409,13 @@ under no registered root belongs to the default workspace, which is the setup be
 workspace, and a workspace can opt out of sharing them both ways; `codex` stays the default backend, and the other
 agents' CLIs can be chosen per workspace once each passes §4.7's check; `kb setup`, with `questionary`'s lists, is the
 way to set up, and `install.sh` only installs `kb` and starts it; every workspace's settings stay in `~/.config`, out of
-reach of an agent working in a root (§4.11).
+reach of an agent working in a root (§4.11). Decided 2026-11-18: `claude` is a backend, and `copilot` and `cursor`
+aren't, on the versions checked (§4.7).
 
-Open (2026-11-13):
+Open (2026-11-18):
 
-- Which of Claude Code, Copilot CLI and Cursor CLI can run as an ingest backend with no tools and an answer held to the
-  questions' options, and on which versions (§4.7).
+- Whether a later Copilot CLI or Cursor CLI passes §4.7's check: 1.0.105 and 2026.10.22 keep the run as a session,
+  run the user's hooks and have no schema.
 
 Open (2026-11-01):
 
