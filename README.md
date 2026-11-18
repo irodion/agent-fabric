@@ -37,6 +37,8 @@ To set it up, follow [Install](#install), on your own or with an agent guiding y
  wiki pages  ~/wiki/wiki/projects/<project>.md  agents read them; kb lint keeps them honest
 ```
 
+The paths are the default workspace's. A workspace root keeps its own inbox and wiki under `<root>/.fabric/`.
+
 Two hooks remind each agent that notes exist: at session start (with a count of open notes, never their text) and
 at the end of a turn, once per session and again later in a long one (a question: did this session find something the
 next agent must know?).
@@ -136,9 +138,8 @@ prints.
    `kb doctor`'s hooks row for each agent you use shows a "last ran" time.
 
 **Updating:** after `git pull`, run `scripts/install.sh` again in your own terminal; pressing Enter at each question
-keeps your choices. The
-install isn't editable, so agents keep the installed `kb` while the clone switches branches, and only the script
-updates `kb`, the skill copies and the hooks.
+keeps your choices. The install isn't editable, so agents keep the installed `kb` while the clone switches branches, and
+only the script updates `kb`, the skill copies and the hooks.
 
 The wiki is a separate, later step, with its own requirements: see [Turn it on](#turn-it-on).
 
@@ -171,6 +172,11 @@ It prints the note's id and file.
   stdin (`-` and a quoted heredoc) when the text has quotes, backticks or `$`.
 - **`--ref`** (repeatable): the evidence, such as a path (with `:line`, `#L12` or `:symbol`), a command, a commit, an
   error message or a URL. Ingest checks the note against its refs. A path that doesn't exist gets a warning.
+- **`--project <folder>`:** the note is about another repo than the current folder's, or was written outside git. Its
+  refs are then read from that folder. A folder in another workspace is refused: write the note from a session there.
+- **`--machine`:** a fact about the machine that holds in every repo, such as a tool that fails in the sandbox. Every
+  project's sessions see it, in every workspace that shares machine notes; written in one that doesn't, it stays there.
+  It takes no `--ref`.
 - **`--agent`:** who wrote it, as a tool name (Claude Code, Codex, Copilot CLI, Cursor CLI), not a model name. Claude
   Code and Codex are known from their environment, and Copilot CLI and Cursor CLI from their hooks' markers, so
   `kb` only asks when it can't tell. §4.10 has the rules.
@@ -204,8 +210,8 @@ nc815d0  2026-11-06 06:15  status  Codex  github.com/example/demo
 ```
 
 By default it lists the current project's open notes. `--kind`, `--since 7d`, `--project <id or folder>`,
-`--all-projects` and `--all` (notes resolved or ingested too, and resolutions) widen or narrow it. A `status` note older than 14 days
-is marked as possibly stale.
+`--all-projects` and `--all` (notes resolved or ingested too, and resolutions) widen or narrow it. A `status` note older
+than 14 days is marked as possibly stale.
 
 A project is named by its `origin` remote (`github.com/example/demo`), else its main checkout, else the folder. So
 the worktrees of a repo, and its clones with the same `origin`, share one project and its notes.
@@ -267,12 +273,14 @@ That's expected.
 ### Turn it on
 
 The wiki is optional, and these steps can be agent-guided too. Nothing goes to the wiki, or to a model, until step 2.
+They use the default workspace's wiki, `~/wiki`; a workspace root's is `<root>/.fabric/wiki`, so use that path in its
+place.
 
 1. **Install what ingest needs** (you). [gitleaks](https://github.com/gitleaks/gitleaks) on `PATH`, and the
    [Codex CLI](https://github.com/openai/codex) or [Claude Code](https://claude.com/claude-code), logged in. Done when
-   `gitleaks version` succeeds, and `codex login status` or `claude auth status` does. Cursor CLI can't be a backend:
-   it has no way to run with its tools off (design §4.7). Ingest stops before any model is asked if gitleaks is
-   missing.
+   `gitleaks version` succeeds, and `codex login status` or `claude auth status` does. Copilot CLI and Cursor CLI
+   can't be backends: both keep each run as a session and run your hooks, and Cursor CLI can't turn its tools off
+   (design §4.7). Ingest stops before any model is asked if gitleaks is missing.
 
 2. **Choose the projects** (you decide; an agent asks). Only notes of allowed projects are filed. A run sends those
    notes, with excerpts of the files they cite, to the model's vendor (OpenAI for Codex, Anthropic for Claude Code),
@@ -292,10 +300,10 @@ The wiki is optional, and these steps can be agent-guided too. Nothing goes to t
    Notes of other projects stay in the inbox. Done when `kb ingest --dry-run` no longer says "no project is allowed
    yet", and `kb doctor` shows no `problem` row for `ingest`.
 
-3. **See what a run would take** (agent or you): `kb ingest --dry-run`, which changes nothing. Done when it lists
-   the notes it would take, says how many it's waiting for, or says there's no new note to take. If it names a
-   project that isn't allowed, add it in step 2. Once there's a wiki, it first prints `kb lint`'s findings, if any; those
-   are for you to look at, and don't mean the run failed.
+3. **See what a run would take** (agent or you): `kb ingest --dry-run`, which changes nothing. Done when it lists the
+   notes it would take, says how many it's waiting for, or says there's no new note to take. If it names a project that
+   isn't allowed, add it in step 2. Once there's a wiki, it first prints `kb lint`'s findings, if any; those are for you
+   to look at, and don't mean the run failed.
 
 4. **Run it** (you): `kb ingest`. It spends model requests, and writes `~/wiki`. Done when it prints the branch and
    the review list to read.
@@ -337,11 +345,12 @@ kb ingest: 3 notes on ingest/2026-11-06: 2 add, 1 duplicate
 Review manifests/2026-11-06.md on ingest/2026-11-06, then: git -C ~/wiki merge ingest/2026-11-06
 ```
 
-`kb ingest [--project P] [--backend codex|claude] [--dry-run]` takes the open `gotcha`, `fix`, `decision` and `idea`
-notes of allowed projects. `status` notes describe a moment and never reach the wiki. An idea isn't a claim: it skips
-the model and goes under its project in `ideas.md` at the wiki's root, for you to act on. One open for over 30 days
-expires: `kb inbox` stops listing it (`--all` still does), and ingest moves it to `inbox/done/` unfiled. The first run
-creates `~/wiki` as a local git repo, with no remote. A run:
+`kb ingest [--workspace default|ROOT] [--project P] [--backend codex|claude] [--dry-run]` takes the open `gotcha`,
+`fix`, `decision` and `idea` notes of one workspace's allowed projects, the current folder's workspace by default.
+`status` notes describe a moment and never reach the wiki. An idea isn't a claim: it skips the model and goes under its
+project in `ideas.md` at the wiki's root, for you to act on. One open for over 30 days expires: `kb inbox` stops listing
+it (`--all` still does), and ingest moves it to `inbox/done/` unfiled. The first run creates the workspace's wiki
+(`~/wiki`, or `<root>/.fabric/wiki/`) as a local git repo, with no remote. A run:
 
 1. **Gates, with no model.** It runs `kb lint`, and moves resolved notes, and notes filed on a merged branch, to
    `inbox/done/<yyyy>/<mm>/`. With fewer than 3 notes to take and the oldest under 7 days old, it stops there and
@@ -408,8 +417,8 @@ Agents read the pages directly. The `kb-note` skill tells them to check a claim'
 
 ### `kb lint`
 
-`kb lint` checks the wiki with no model, and prints a TOON report like `kb doctor`'s. It runs at the start of every
-ingest and in `kb doctor`.
+`kb lint [--workspace default|ROOT]` checks one workspace's wiki with no model, and prints a TOON report like
+`kb doctor`'s. It runs at the start of every ingest and in `kb doctor`.
 
 - **Errors**, which stop an ingest commit that touches the page: `broken-link`, `no-source` (a claim with no source
   line), `missing-note` (a claim whose note isn't in `raw/notes/`) and `dangling-supersedes`.
@@ -444,7 +453,8 @@ exists (§5).
   untracked file or a `.env*` file, and every excerpt passes redaction and gitleaks.
 - **This repo is public.** It holds no session data, notes or wiki content, and its test fixtures are synthetic.
 
-Known gaps are listed in §7 and §11, including what the first real ingest run still has to show.
+Known gaps are listed in §7 and §11, including which local model can take over ingest's questions, and whether notes
+reach agents other than the one that wrote them.
 
 ## Development
 
@@ -463,7 +473,7 @@ scripts/check.sh --red <rev>     # names new tests that pass on <rev>'s code: th
   `systemctl`, so no test reaches the real user manager.
 - `kb note`, `kb hook` and `kb ingest` write real data, and `kb doctor --fix` edits real agent settings. To try one
   by hand, give it a throwaway home: `HOME="$(mktemp -d)" .venv/bin/kb <args>`, with `XDG_DATA_HOME` and
-  `XDG_CONFIG_HOME` unset, and for ingest a stub `codex` on `PATH`.
+  `XDG_CONFIG_HOME` unset, and for ingest a stub `codex` or `claude` on `PATH`.
 - [`AGENTS.md`](AGENTS.md) is the guide for agents working on this repo: architecture, invariants and traps.
 
 ```text
