@@ -5,17 +5,22 @@ All agentsview access goes through `AgentsviewSource`. An agent agentsview can't
 the normalized events of §4.2 is the normalizer's job.
 """
 
-from collections.abc import AsyncIterator, Iterator, Mapping
+import logging
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
-from types import TracebackType
-from typing import Any, Protocol, Self
+from types import NoneType, TracebackType
+from typing import Any, Protocol, Self, get_args
 from urllib.parse import quote
 
 import httpx
 from httpx_sse import aconnect_sse
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, ValidationInfo, field_validator
+
+log = logging.getLogger(__name__)
 
 PAGE = 500
+# How often a read of a session's messages starts over because agentsview re-parsed the transcript mid-read.
+REVISION_TRIES = 3
 TIMEOUT = 10.0
 # A session's watch sends a heartbeat every 30 s, so a stream quiet for longer than this has died.
 WATCH_READ_TIMEOUT = 90.0
@@ -34,9 +39,12 @@ class _Model(BaseModel):
 
     @field_validator("*", mode="before")
     @classmethod
-    def _empty_is_none(cls, value: Any) -> Any:
-        # agentsview writes "" for a value it doesn't have, such as a Cursor CLI message's timestamp.
-        return None if value == "" else value
+    def _empty_is_none(cls, value: Any, info: ValidationInfo) -> Any:
+        # agentsview writes "" for a value it doesn't have, such as a Cursor CLI message's timestamp. A field that
+        # must hold a string keeps it: a session with no project worked out is still a session.
+        if value == "" and info.field_name and NoneType in get_args(cls.model_fields[info.field_name].annotation):
+            return None
+        return value
 
 
 class ToolResultEvent(_Model):
@@ -90,11 +98,19 @@ class CaptureSource(Protocol):
         ...
 
     def watch(self, session_id: str) -> AsyncIterator[None]:
-        """One tick when the stream opens and one per change: a signal to read messages, carrying none."""
+        """One tick when the stream opens and one per change: a signal to read messages, carrying none.
+
+        It ends when agentsview closes the stream, as on a restart: the caller opens it again while the session is
+        active, and the opening tick covers what changed in between."""
         ...
 
     def messages(self, session_id: str, from_ordinal: int) -> list[Message]:
-        """The session's messages from `from_ordinal` on, in order."""
+        """The session's messages from `from_ordinal` on, in order, all of one transcript revision.
+
+        A message read before its tool calls finished can change: a result folds into the message that made the
+        call. So the caller reads again from the first message with a call not yet finished, not only past the
+        last ordinal it has. A new `transcript_revision` on the session means agentsview re-parsed it, and ordinals
+        read before may no longer hold."""
         ...
 
     def session(self, session_id: str) -> SessionMeta: ...
@@ -102,10 +118,11 @@ class CaptureSource(Protocol):
 
 class _Messages(_Model):
     messages: tuple[Message, ...]
+    transcript_revision: str | None = None
 
 
 class _Sessions(_Model):
-    sessions: tuple[SessionMeta, ...]
+    sessions: tuple[dict[str, Any], ...]  # read one by one, so one session the adapter can't read skips alone
     next_cursor: str | None = None
 
 
@@ -148,28 +165,46 @@ class AgentsviewSource:
         found: list[SessionMeta] = []
         while True:
             page = _parse(_Sessions, self._get("/api/v1/sessions", params))
-            found.extend(page.sessions)
+            for listed in page.sessions:
+                try:
+                    found.append(SessionMeta.model_validate(listed))
+                except ValidationError as error:
+                    # One session the adapter can't read mustn't stop capture of every other (§4.1).
+                    log.warning("skipping agentsview session %s: %s", listed.get("id"), error)
             # Only the cursor says whether more follow: agentsview caps `limit` (500 in v0.46.1) without saying so.
             if not page.next_cursor or not page.sessions:
                 return found
+            if page.next_cursor == params.get("cursor"):
+                raise CaptureError("agentsview /api/v1/sessions: the cursor doesn't move on")
             params["cursor"] = page.next_cursor
 
     def session(self, session_id: str) -> SessionMeta:
         return _parse(SessionMeta, self._get(f"/api/v1/sessions/{_id(session_id)}", {}))
 
     def messages(self, session_id: str, from_ordinal: int) -> list[Message]:
-        return list(self._messages(session_id, from_ordinal))
+        for _ in range(REVISION_TRIES):
+            read = self._one_revision(session_id, from_ordinal)
+            if read is not None:
+                return read
+        raise CaptureError(f"agentsview session {session_id}: the transcript kept changing while it was read")
 
-    def _messages(self, session_id: str, from_ordinal: int) -> Iterator[Message]:
+    def _one_revision(self, session_id: str, from_ordinal: int) -> list[Message] | None:
+        """The messages from `from_ordinal` on, or None when agentsview re-parsed the transcript between pages."""
         path = f"/api/v1/sessions/{_id(session_id)}/messages"
+        found: list[Message] = []
+        revision: str | None = None
         while True:
             page = _parse(_Messages, self._get(path, {"from": from_ordinal, "limit": self._page}))
+            if revision is None:
+                revision = page.transcript_revision
+            elif page.transcript_revision not in (None, revision):
+                return None
             # agentsview caps `limit` (1000 in v0.46.1) without saying so, and a page has no "more follow": read on
             # until a page comes back empty.
             later = [message for message in page.messages if message.ordinal >= from_ordinal]
             if not later:
-                return
-            yield from later
+                return found
+            found.extend(later)
             from_ordinal = later[-1].ordinal + 1
 
     async def watch(self, session_id: str) -> AsyncIterator[None]:
