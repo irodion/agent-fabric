@@ -35,6 +35,7 @@ To set it up, follow [Install](#install), on your own or with an agent guiding y
    │  you read the review list, then git merge
    ▼
  wiki pages  ~/wiki/wiki/projects/<project>.md  agents read them; kb lint keeps them honest
+             ~/wiki/wiki/machine.md             the machine's notes
 ```
 
 The paths are the default workspace's. A workspace root keeps its own inbox and wiki under `<root>/.fabric/`.
@@ -176,7 +177,7 @@ It prints the note's id and file.
   refs are then read from that folder. A folder in another workspace is refused: write the note from a session there.
 - **`--machine`:** a fact about the machine that holds in every repo, such as a tool that fails in the sandbox. Every
   project's sessions see it, in every workspace that shares machine notes; written in one that doesn't, it stays there.
-  It takes no `--ref`.
+  It takes no `--ref`, and can't be combined with `--project`.
 - **`--agent`:** who wrote it, as a tool name (Claude Code, Codex, Copilot CLI, Cursor CLI), not a model name. Claude
   Code and Codex are known from their environment, and Copilot CLI and Cursor CLI from their hooks' markers, so
   `kb` only asks when it can't tell. §4.10 has the rules.
@@ -191,7 +192,8 @@ A note is never edited or deleted. To close one, write another that points at it
 kb note --resolve nc815d0 "Fixed by pinning httpx 0.28."
 ```
 
-A note that ingest has already filed on the wiki can't be resolved. Write what's true now as a new note, and ingest
+A resolution takes no `--kind`, `--project` or `--machine`: `kb` finds the note by its id, wherever it's filed. A note
+that ingest has already filed on the wiki can't be resolved. Write what's true now as a new note, and ingest
 weighs it against the claim.
 
 ### Reading them
@@ -210,7 +212,9 @@ nc815d0  2026-11-06 06:15  status  Codex  github.com/example/demo
 ```
 
 By default it lists the current project's open notes. `--kind`, `--since 7d`, `--project <id or folder>`,
-`--all-projects` and `--all` (notes resolved or ingested too, and resolutions) widen or narrow it. A `status` note older
+`--all-projects` and `--all` (notes resolved or ingested too, and resolutions) widen or narrow it. `--project machine`
+lists the machine's notes. A folder in another workspace is refused, as for `kb note`: list its notes from a folder
+there. A `status` note older
 than 14 days is marked as possibly stale.
 
 A project is named by its `origin` remote (`github.com/example/demo`), else its main checkout, else the folder. So
@@ -273,8 +277,8 @@ That's expected.
 ### Turn it on
 
 The wiki is optional, and these steps can be agent-guided too. Nothing goes to the wiki, or to a model, until step 2.
-They use the default workspace's wiki, `~/wiki`; a workspace root's is `<root>/.fabric/wiki`, so use that path in its
-place.
+They're written for the default workspace. For a workspace root, run `kb ingest` from a folder inside the root or add
+`--workspace <root>`, and in the `git` commands use its wiki, `<root>/.fabric/wiki`, in place of `~/wiki`.
 
 1. **Install what ingest needs** (you). [gitleaks](https://github.com/gitleaks/gitleaks) on `PATH`, and the
    [Codex CLI](https://github.com/openai/codex) or [Claude Code](https://claude.com/claude-code), logged in. Done when
@@ -305,8 +309,8 @@ place.
    isn't allowed, add it in step 2. Once there's a wiki, it first prints `kb lint`'s findings, if any; those are for you
    to look at, and don't mean the run failed.
 
-4. **Run it** (you): `kb ingest`. It spends model requests, and writes `~/wiki`. Done when it prints the branch and
-   the review list to read.
+4. **Run it** (you): `kb ingest`. It spends model requests, and writes the workspace's wiki. Done when it prints the
+   branch and the review list to read.
 
 5. **Review and merge** (you). Read the review list and the branch's changes, then run the merge command the run
    printed:
