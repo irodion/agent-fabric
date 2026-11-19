@@ -190,6 +190,45 @@ def test_a_session_id_with_a_colon_reaches_its_session() -> None:
     assert fake.requests[0].url.raw_path.decode().startswith("/api/v1/sessions/codex%3A")
 
 
+def listing(*sessions: dict[str, Any], next_cursor: str | None = None) -> httpx.Response:
+    body: dict[str, Any] = {"sessions": list(sessions), "total": len(sessions)}
+    if next_cursor:
+        body["next_cursor"] = next_cursor
+    return httpx.Response(200, json=body)
+
+
+def test_a_session_without_a_project_keeps_an_empty_one() -> None:
+    nameless = load("codex/session.json") | {"project": ""}
+
+    with source_over(lambda request: listing(nameless)) as source:
+        (found,) = source.active_sessions(SINCE)
+    assert found.project == ""
+
+
+def test_a_session_the_adapter_cant_read_is_skipped_alone(caplog: pytest.LogCaptureFixture) -> None:
+    broken = load("codex/session.json") | {"started_at": "yesterday"}
+    fine = load("claude/session.json")
+
+    with source_over(lambda request: listing(broken, fine)) as source:
+        found = source.active_sessions(SINCE)
+    assert [s.id for s in found] == [fine["id"]]
+    assert broken["id"] in caplog.text
+
+
+def test_a_cursor_that_doesnt_move_on_is_a_capture_error() -> None:
+    session = load("codex/session.json")
+    asked = 0
+
+    def same_cursor(request: httpx.Request) -> httpx.Response:
+        nonlocal asked
+        asked += 1
+        assert asked < 50, "the adapter kept asking"  # fail here, not after the loop has eaten the memory
+        return listing(session, next_cursor="same")
+
+    with source_over(same_cursor) as source, pytest.raises(CaptureError, match="cursor"):
+        source.active_sessions(SINCE)
+
+
 # ── messages ──────────────────────────────────────────────────────────────
 
 
@@ -244,6 +283,39 @@ def test_a_message_without_a_timestamp_has_none() -> None:
         assert source.messages(ids("claude"), 0)[0].timestamp is None
 
 
+class Reparsed(Agentsview):
+    """agentsview re-parsing the transcript after the first `reparses` pages: each new revision renumbers it."""
+
+    def __init__(self, reparses: int) -> None:
+        super().__init__(cap=2)
+        self.reparses = reparses
+        self.revision = 1
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        response = super().handle(request)
+        body = response.json()
+        if "messages" in body and request.url.params["from"] != "0" and self.reparses:
+            self.reparses -= 1
+            self.revision += 1
+        if "messages" in body:
+            body["transcript_revision"] = str(self.revision)
+        return httpx.Response(response.status_code, json=body)
+
+
+def test_a_read_starts_over_when_the_transcript_is_reparsed_mid_read() -> None:
+    fake = Reparsed(reparses=1)
+    with source_over(fake, page=10) as source:
+        got = source.messages(ids("claude"), 0)
+    assert [m.ordinal for m in got] == [0, 1, 3, 5, 7]
+    froms = [r.url.params["from"] for r in fake.requests]
+    assert froms.count("0") == 2
+
+
+def test_a_transcript_that_keeps_changing_is_a_capture_error() -> None:
+    with source_over(Reparsed(reparses=99), page=10) as source, pytest.raises(CaptureError, match="kept changing"):
+        source.messages(ids("claude"), 0)
+
+
 # ── watch ─────────────────────────────────────────────────────────────────
 
 
@@ -284,7 +356,7 @@ def test_agentsview_down_is_a_capture_error() -> None:
 
 def test_an_answer_the_adapter_cant_read_is_a_capture_error() -> None:
     def changed(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"sessions": [{"id": "x"}], "total": 1})
+        return httpx.Response(200, json={"sessions": "none", "total": 1})
 
     with source_over(changed) as source, pytest.raises(CaptureError, match="can't read"):
         source.active_sessions(SINCE)
