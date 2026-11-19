@@ -334,7 +334,9 @@ each tool call in it is an action; the session's own fields (`agent`, `project`,
 | `command`, `exit_code` (derived, shell only) | parsed from the input and output per agent; an `EXIT:N` that a command echoing it printed counts over the shell's 0 or none |
 | `failed` (derived) | `status = errored`, a non-zero `exit_code`, or an error pattern in the output (traceback, `error:`, `FAILED`, `permission denied`, patch did not apply, `Script failed`, `apply_patch verification failed`, `Failed to apply patch`) of an edit, or of a command whose exit code isn't known and that doesn't only show files (`cat`, `sed`, `rg`, `git show`, …) |
 
-The patterns stop there because a command's exit code says more than words in its output: Codex reads files through
+A command counts as only showing files when the shell would split it into readers alone, with no redirect but to
+`/dev/null` or another descriptor; in doubt it doesn't, since the exemption can hide a failure. The patterns stop
+there because a command's exit code says more than words in its output: Codex reads files through
 the shell, and in source code these words are everywhere. Applied to every command, they failed about a fifth of
 Codex's commands on the devbox that had exited 0 (2026-11-19, figures in the report). The per-agent tables say
 where each keeps its command and exit code, covered by fixture tests; an agent without one gets the kind and command

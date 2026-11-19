@@ -187,6 +187,11 @@ def test_a_command_that_also_runs_something_can_fail_on_its_words(command: str) 
         ("rg x src 2>&1 | head", True),
         ("cat a 2>>err.log", False),
         ("cat a > out.txt", False),
+        ("cat a&&>/dev/null rm -rf b", False),
+        ("cat a\n>/dev/null rm -rf b", False),
+        ("cat a >| out.txt", False),
+        ("cat a;>out.txt", False),
+        ("cat a # it's fine", False),  # in doubt, no: an apostrophe the splitting can't follow
         ('echo "unclosed', False),
     ],
 )
@@ -386,6 +391,16 @@ def test_a_script_that_mentions_promise_still_pairs() -> None:
     assert [(a.exit_code, a.failed) for a in found] == [(0, False), (1, True)]
 
 
+def test_calls_run_in_async_closures_dont_pair() -> None:
+    script = (
+        'await Promise.all([(async()=>text(await tools.exec_command({cmd:"slow_fail"})))(),'
+        ' (async()=>text(await tools.exec_command({cmd:"fast_ok"})))()]);'
+    )
+    result = script_result("Script completed", chunk(0, "ok"), chunk(1, "x"))
+    found = one("codex", call("exec", "Bash", script, result, "completed"))
+    assert [(a.command, a.exit_code) for a in found] == [("slow_fail", None), ("fast_ok", None)]
+
+
 def test_a_scripts_output_that_cant_be_paired_stays_on_its_last_call() -> None:
     script = 'const r = await tools.exec_command({cmd:"make"});\ntext(r.output);\ntext(`exit_code=${r.exit_code}`);\n'
     result = script_result("Script completed", "make: *** [all] Error 2", "exit_code=2")
@@ -513,6 +528,34 @@ def test_the_oldest_codex_shell_gave_an_argv_and_its_code_in_json(
 ) -> None:
     (action,) = one("codex", call("shell", "Bash", {"command": argv}, json.dumps(output), "completed"))
     assert (action.command, action.exit_code, action.failed) == (command, code, bool(code))
+
+
+@pytest.mark.parametrize(
+    ("argv", "command"),
+    [(["python3", "-c", "print(1)"], "python3 -c 'print(1)'"), (["/bin/sh", "-c", "make"], "make")],
+)
+def test_only_a_shells_script_is_the_command(argv: list[str], command: str) -> None:
+    answer = json.dumps({"output": "", "metadata": {"exit_code": 0}})
+    (action,) = one("codex", call("shell", "Bash", {"command": argv}, answer, "completed"))
+    assert action.command == command
+
+
+def test_the_oldest_codex_shells_output_is_its_text() -> None:
+    answer = json.dumps({"output": "FAIL x\nEXIT:1\n", "metadata": {"exit_code": 0}})
+    (action,) = one("codex", call("shell", "Bash", {"command": ["bash", "-lc", "make; echo EXIT:$?"]}, answer, "x"))
+    assert (action.output, action.exit_code, action.failed) == ("FAIL x\nEXIT:1\n", 1, True)
+
+
+def test_a_boolean_isnt_an_exit_code() -> None:
+    answer = json.dumps({"output": "", "metadata": {"exit_code": True}})
+    (action,) = one("codex", call("shell", "Bash", {"command": ["ls"]}, answer, "completed"))
+    assert action.exit_code is None
+
+
+def test_copilots_wrapper_alone_is_unwrapped() -> None:
+    shown = json.dumps({"content": "hi", "id": 3})
+    (action,) = one("copilot", call("view", "Read", {"path": "x.json"}, shown, "completed"))
+    assert action.output == shown
 
 
 # ── any other agent ───────────────────────────────────────────────────────

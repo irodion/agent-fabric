@@ -13,7 +13,8 @@ import shlex
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from pathlib import Path
+from typing import Literal, TypeGuard
 
 from agent_fabric.capture import Message, SessionMeta, ToolCall
 
@@ -123,12 +124,18 @@ def _action(
     return Action(kind, call.tool_name, call.input_json, command, exit_code, status, output, failed)
 
 
+# The redirects that write no file, as a whole word: errors away (2>/dev/null) or to another descriptor (2>&1).
+HARMLESS_REDIRECT = re.compile(r"(?<!\S)(?:\d?>>?\s*/dev/null|\d?>&\d|&>>?\s*/dev/null)(?=\s|$)")
+
+
 def _reads(command: str | None) -> bool:
-    """Whether every part of the command only shows files: `rg 'a|b' | head` does; `cat a && pytest` and `cat > f`
-    don't. A command the shell's quoting can't split doesn't."""
-    if "$(" in (command or "") or "`" in (command or ""):
-        return False  # a substitution runs a command of its own
-    lexer = shlex.shlex(command or "", posix=True, punctuation_chars="();<>|&\n")
+    """Whether every part of the command only shows files: `rg 'a|b' 2>/dev/null | head` does; `cat a && pytest`
+    and `cat a > f` don't. It hides a command's failure, so in doubt it says no: any other redirect, a substitution,
+    or quoting the shell's splitting can't follow."""
+    text = HARMLESS_REDIRECT.sub(" ", command or "")
+    if ">" in text or "$(" in text or "`" in text:
+        return False  # a redirect that may write a file, or a substitution that runs a command of its own
+    lexer = shlex.shlex(text, posix=True, punctuation_chars="();<>|&\n")
     lexer.whitespace, lexer.whitespace_split = " \t\r", True
     lexer.commenters = ""  # POSIX shlex ends a word at "#", and its comment would swallow the next line's command
     try:
@@ -136,20 +143,15 @@ def _reads(command: str | None) -> bool:
     except ValueError:
         return False
     parts: list[list[str]] = [[]]
-    for index, token in enumerate(tokens):
-        if ">" in token and set(token) <= set("<>&\n"):
-            target = tokens[index + 1] if index + 1 < len(tokens) else ""
-            if target != "/dev/null" and not (token.endswith("&") and target.isdigit()):
-                return False  # a redirect writes a file; to /dev/null or another descriptor (2>&1) it doesn't
-            if parts[-1] and parts[-1][-1].isdigit():
-                parts[-1].pop()  # the descriptor redirected, as the 2 of 2>/dev/null
-            continue
-        if index and tokens[index - 1] in (">", ">>", ">&", "&>") and (token == "/dev/null" or token.isdigit()):
-            continue
-        if set(token) <= set("();|&\n"):
-            parts.append([])  # shlex groups punctuation that follows itself: `;` and a newline are one token
-        elif set(token) <= set("<"):
-            continue  # input from a file or here-document: still only shown
+    source = False  # the next word is what "<" reads from, not a command
+    for token in tokens:
+        if set(token) <= set("();|&<\n"):
+            # shlex groups punctuation that follows itself (`;` and a newline, `&&<`); input from a file only shows
+            if set(token) - {"<"}:
+                parts.append([])
+            source = "<" in token
+        elif source:
+            source = False
         else:
             parts[-1].append(token)
     parts = [words for words in parts if words]
@@ -176,6 +178,9 @@ def _arguments(call: ToolCall) -> dict[str, object]:
     return arguments if isinstance(arguments, dict) else {}
 
 
+SHELLS = frozenset({"bash", "sh", "zsh", "dash"})
+
+
 def _command(call: ToolCall, *keys: str) -> str | None:
     arguments = _arguments(call)
     for key in keys:
@@ -184,7 +189,7 @@ def _command(call: ToolCall, *keys: str) -> str | None:
             return value
         if isinstance(value, list) and value and all(isinstance(word, str) for word in value):
             # An argv, as the oldest Codex `shell` tool gave it: a shell's script is the command, else the words.
-            if len(value) == 3 and value[1] in ("-c", "-lc"):
+            if len(value) == 3 and Path(value[0]).name in SHELLS and value[1] in ("-c", "-lc"):
                 return str(value[2])
             return shlex.join(value)
     return None
@@ -200,7 +205,10 @@ def _unwrapped(content: str | None) -> str | None:
         answer = json.loads(content or "")
     except ValueError:
         return content
-    text = answer.get("content") if isinstance(answer, dict) else None
+    # Copilot's own keys only: a file whose whole text is some other JSON with a `content` stays as it is.
+    if not isinstance(answer, dict) or not set(answer) <= {"content", "detailedContent"}:
+        return content
+    text = answer.get("content")
     return text if isinstance(text, str) else content
 
 
@@ -249,6 +257,7 @@ CODEX_EXIT = re.compile(r"Process exited with code (\d+)")
 PRINTED_EXIT = re.compile(r"^\s*\[?exit_code\s*[=:]\s*(\d+)\]?\s*$", re.MULTILINE)
 READS_EXIT = re.compile(r"\.exit_code\b")
 SCRIPT_CALL = re.compile(r"\btools\.(\w+)\s*\(")
+RUN_TOGETHER = re.compile(r"\b(?:Promise|async)\b")
 PRINTED_AT_ONCE = re.compile(r"\btext\(\s*await\s*$")  # `text(await tools.x(…))`: printed as it returns
 SCRIPT_KINDS: dict[str, Kind] = {"exec_command": "shell", "write_stdin": "shell", "apply_patch": "edit"}
 
@@ -260,7 +269,9 @@ def _codex(call: ToolCall) -> Iterator[Action]:
         # The code is in the call's own lines above `Output:`; below is the command's, which may say anything. The
         # oldest `shell` tool answered in JSON, the code in its `metadata`.
         metadata = (call.result_content or "").split("\nOutput:", 1)[0]
-        code = _json_exit(call.result_content)
+        code, output = _json_answer(call.result_content)
+        if output is not None:
+            call = call.model_copy(update={"result_content": output})
         yield _action(call, command=command, exit_code=code if code is not None else _code(CODEX_EXIT, metadata))
         return
     yield from _codex_script(call)
@@ -285,8 +296,10 @@ def _codex_script(call: ToolCall) -> Iterator[Action]:
     # each call gets the script's failure, its own being unknown.
     # Equal counts alone don't pair them: a script can print its results in another order, or as calls run
     # together finish. Only when each call prints its own result as it returns do the orders match.
-    # A call run together with others (Promise.all) or kept to print later isn't written so, and can't pass.
-    at_once = all(PRINTED_AT_ONCE.search(script, 0, match_start) for match_start in starts)
+    # A call run together with others (Promise.all, async closures) prints when it finishes, whatever order its
+    # `text(await …)` is written in: their code, not a word in a string, keeps them from pairing.
+    together = any(in_code[match.start()] for match in RUN_TOGETHER.finditer(script))
+    at_once = not together and all(PRINTED_AT_ONCE.search(script, 0, match_start) for match_start in starts)
     paired = len(outputs) == len(calls) and (at_once or len(calls) == 1)  # one call and one output can't be mixed
     if not calls:
         yield _action(call, command=None, exit_code=None, status="errored" if script_failed else status)
@@ -321,14 +334,21 @@ def _codex_script(call: ToolCall) -> Iterator[Action]:
         yield _action(inner, command=command, exit_code=code, status=inner_status, patterns=paired)
 
 
-def _json_exit(content: str | None) -> int | None:
+def _json_answer(content: str | None) -> tuple[int | None, str | None]:
+    """The exit code and output of the oldest `shell` tool's JSON answer: `{"output": …, "metadata": {…}}`."""
     try:
         answer = json.loads(content or "")
     except ValueError:
-        return None
-    metadata = answer.get("metadata") if isinstance(answer, dict) else None
-    code = metadata.get("exit_code") if isinstance(metadata, dict) else None
-    return code if isinstance(code, int) else None
+        return None, None
+    if not isinstance(answer, dict) or not isinstance(answer.get("metadata"), dict):
+        return None, None
+    code = answer["metadata"].get("exit_code")
+    output = answer.get("output")
+    return (code if _is_int(code) else None), (output if isinstance(output, str) else None)
+
+
+def _is_int(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _script_result(content: str | None) -> tuple[str, list[str]]:
@@ -350,7 +370,7 @@ def _printed_code(output: str | None, prints_codes: bool) -> int | None:
     chunk = _chunk(output)
     if chunk:
         code = chunk.get("exit_code")
-        return code if isinstance(code, int) else None
+        return code if _is_int(code) else None
     return _code(PRINTED_EXIT, output) if prints_codes else None
 
 
