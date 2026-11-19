@@ -94,7 +94,14 @@ class Agentsview:
     def revision(self, sid: str) -> str:
         return str(self.sessions[sid]["transcript_revision"])
 
-    def page(self, sid: str, start: int, limit: int) -> dict[str, Any]:
+    def read(self, sid: str, params: httpx.QueryParams, limit: int) -> httpx.Response:
+        revision = self.revision(sid)
+        if params.get("expected_revision", revision) != revision:
+            detail = "source changed: transcript revision does not match"
+            return httpx.Response(409, json={"status": 409, "code": "source_changed", "detail": detail})
+        return httpx.Response(200, json=self.page(sid, int(params.get("from", "0")), limit, revision))
+
+    def page(self, sid: str, start: int, limit: int, revision: str) -> dict[str, Any]:
         later = [m for m in self.messages[sid] if m["ordinal"] >= start][:limit]
         if not later:
             # Past the last message agentsview's Go slice was never filled: null, and no revision to look up.
@@ -102,7 +109,7 @@ class Agentsview:
         return {
             "messages": later,
             "count": len(later),
-            "transcript_revision": self.revision(sid),
+            "transcript_revision": revision,
             "first_ordinal": later[0]["ordinal"],
             "last_ordinal": later[-1]["ordinal"],
         }
@@ -125,7 +132,7 @@ class Agentsview:
         if len(parts) == 5:
             return httpx.Response(200, json=self.sessions[sid])
         if parts[5] == "messages":
-            return httpx.Response(200, json=self.page(sid, int(params.get("from", "0")), limit))
+            return self.read(sid, params, limit)
         if parts[5] == "watch":
             agent = self.sessions[sid]["agent"]
             stream = (FIXTURES / agent / "watch.sse").read_bytes()
@@ -396,6 +403,25 @@ def test_a_revision_after_a_page_without_one_is_a_reparse() -> None:
         read = source.messages(ids("claude"), 0)
     assert read.revision == "2"
     assert [r.url.params["from"] for r in fake.requests].count("0") == 2
+
+
+def test_a_read_starts_over_when_a_reparse_shortens_the_transcript_mid_read() -> None:
+    class Shortened(Agentsview):
+        """After the first page, agentsview re-parses the session into its first message alone."""
+
+        def revision(self, sid: str) -> str:
+            return "2" if len(self.requests) > 1 else "1"
+
+        def handle(self, request: httpx.Request) -> httpx.Response:
+            if len(self.requests) == 1:
+                del self.messages[ids("claude")][1:]
+            return super().handle(request)
+
+    fake = Shortened(cap=2)
+    with source_over(fake, page=2) as source:
+        read = source.messages(ids("claude"), 0)
+    assert (read.revision, [m.ordinal for m in read.messages]) == ("2", [0])
+    assert fake.requests[1].url.params["expected_revision"] == "1"
 
 
 def test_a_transcript_that_keeps_changing_is_a_capture_error() -> None:
