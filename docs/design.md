@@ -127,7 +127,7 @@ All actions are pinned by commit SHA.
    fails on:
    - known malware (`--malware-query`). SafeDep's database covered 265 of the 564 npm packages in v0.45.0, so
      this catches known cases only;
-   - lockfile poisoning, meaning a package resolved from an unexpected URL. v0.45.0 has two on purpose, the `vite`
+   - lockfile poisoning, meaning a package resolved from an unexpected URL. v0.46.1 has two on purpose, the `vite`
      npm alias and the commit-pinned `@kenn-io/kit-ui`; `.github/vet/agentsview-trusted-urls.txt` trusts those
      exact URLs;
    - the policy in `.github/vet/policy.yml`: a critical vulnerability, or a version published less than 14 days
@@ -136,10 +136,11 @@ All actions are pinned by commit SHA.
    Exceptions go in `.github/vet/exceptions.yml`, each with the advisory, why it doesn't apply, and an expiry of at
    most 30 days. An exception skips that version in every check, malware included. Run against v0.45.0 on
    2026-10-23, the gate needed one: `dompurify` 3.4.16 (GHSA-cg2g-xh64-v4q7), which only affects the
-   `SAFE_FOR_TEMPLATES` option; agentsview calls `DOMPurify.sanitize` with the default config.
+   `SAFE_FOR_TEMPLATES` option; agentsview calls `DOMPurify.sanitize` with the default config. v0.46.1 ships the
+   fixed 3.4.17, so the exception went with the pin bump.
    `go.kenn.io/kit` v0.33.0, published with agentsview v0.45.0 on 2026-10-09, cleared the 14-day rule that day.
 3. Build. The frontend builds in its own job (Node 24, `npm ci --ignore-scripts && npm run build`). The binary
-   builds in `golang:1.27.0-bookworm`, pinned by digest: the go-sqlite3 header and pricing-snapshot steps from
+   builds in `golang:1.27.3-bookworm`, pinned by digest: the go-sqlite3 header and pricing-snapshot steps from
    upstream's Dockerfile, then `go build -tags fts5,kit_posthog_disabled -trimpath …`, then the glibc check below.
    By hand on 2 vCPU this took about 7 minutes; the binary is 145 MB (DuckDB is linked in statically).
 4. Smoke test on GitHub's `ubuntu-24.04` runner, the minimum desktop (`.github/scripts/smoke-agentsview.sh`):
@@ -153,13 +154,13 @@ All actions are pinned by commit SHA.
 **glibc.** The binary uses cgo (SQLite, DuckDB) and links glibc and libstdc++ dynamically, so it runs only on
 distros at least as new as the build image. The devbox build needs `GLIBC_2.43` and would not start on Ubuntu 24.04
 (2.39). The minimum desktop is **Ubuntu 24.04** (glibc 2.39, libstdc++ up to `GLIBCXX_3.4.33`), so the build job
-runs in `golang:1.27.0-bookworm` (glibc 2.36, GCC 12), pinned by digest. It also fails if `objdump -T` shows a
+runs in `golang:1.27.3-bookworm` (glibc 2.36, GCC 12), pinned by digest. It also fails if `objdump -T` shows a
 `GLIBC_` version above 2.39 or a `GLIBCXX_` version above 3.4.33, so a base-image bump can't raise the floor
 unnoticed. Options considered:
 
 | Option | Runs on | Cost |
 |---|---|---|
-| **Build in an old-enough container** (chosen): `golang:1.27.0-bookworm`, the base of upstream's own Dockerfile | glibc ≥ 2.36: Ubuntu 24.04+, Debian 12+, Fedora 37+ | none |
+| **Build in an old-enough container** (chosen): `golang:1.27.3-bookworm`, the base of upstream's own Dockerfile | glibc ≥ 2.36: Ubuntu 24.04+, Debian 12+, Fedora 37+ | none |
 | Build in `ubuntu:24.04` + Go tarball | Ubuntu 24.04+ | more CI setup, no gain over bookworm |
 | Fully static binary (musl or static glibc) | any Linux | DuckDB is a prebuilt glibc C++ library with no build tag to leave it out in v0.45.0, so this means patching agentsview; not worth it |
 | Upstream release binary, checksum-verified | whatever upstream targets | loses the compile-time telemetry removal and our `vet` gate on what runs; needs `AGENTSVIEW_TELEMETRY_ENABLED=0` |
@@ -251,8 +252,10 @@ tmux as well as headless.
   `CaptureSource` (Adapter, below) that opens `store.db` read-only, rather than write access for agentsview to
   Cursor's data; the bug also goes upstream.
 - **Upgrade.** v0.46.0 (2026-10-23) reads Codex rollouts after Codex compresses them to `.jsonl.zst` (none on the
-  devbox yet), and keeps archived Claude Code tool output after Claude Code deletes its tool-result files. It clears
-  the 14-day rule on 2026-11-06; bump the pin then.
+  devbox yet), and keeps archived Claude Code tool output after Claude Code deletes its tool-result files. The pin
+  moved to v0.46.1 on 2026-11-19. Its `go.mod` needs Go 1.27.3, so the build image moved with it. kit-ui adds browser
+  telemetry: the web UI posts events to agentsview's own `/api/v1/telemetry/events`, which hands them to the same
+  reporter as the server's, so `kit_posthog_disabled` still keeps them on the machine.
 - **Cost.** The first full sync of 6,391 sessions took 5 min 39 s on 2 vCPU and made a 497 MB archive; incremental
   syncs take about 1 s.
 
@@ -1257,8 +1260,8 @@ shfmt, actionlint, zizmor; ruff, mypy and pytest on Python 3.13 and 3.14).
 | agentsview upgrade changes API | adapter errors | pinned version; contract tests gate upgrades |
 | sandbox blocks a read agentsview needs | an agent's sessions missing | `agentsview doctor` and per-agent session counts in `kb doctor`; widen only that path |
 | agentsview can't write `~/.cursor/chats` | every Cursor CLI session fails to sync | Cursor CLI's own `CaptureSource` (§4.1); never give agentsview write access to agent data |
-| Codex compresses old rollouts to `.jsonl.zst` | v0.45.0 can't read them; sessions not yet synced are missed | pin v0.46.0 or newer (§4.1) |
-| Claude Code deletes its tool-result files | archived output can be lost on a re-parse in v0.45.0 | pin v0.46.0 or newer |
+| Codex compresses old rollouts to `.jsonl.zst` | v0.45.0 can't read them; sessions not yet synced are missed | pinned v0.46.1 reads them (§4.1) |
+| Claude Code deletes its tool-result files | archived output can be lost on a re-parse in v0.45.0 | pinned v0.46.1 keeps it |
 | headless runs in bulk (benchmarks, scripts) | wiki flooded with digests nobody reads | local-only unless the project opts in (§4.3) |
 | MCP client starts its own daemon | unconfined second daemon | `--server` in every MCP registration; the unit's `--replace` takes over from one that started first |
 | Cursor IDE updates lag | panel late for Cursor | measure in spike; add Cursor hooks (`afterAgentResponse`, `afterFileEdit`) as a second source if needed |
@@ -1316,7 +1319,7 @@ item 3 (cross-agent search) are still to do for the CLIs. Items 1–3 and 7 for 
 neither agentsview nor fabricd, so a one-week trial in one or two projects runs while the rest is built. Notes-only
 `kb ingest` and `kb lint` on the `codex` backend follow, for the same reason (§4.7). They are built and first ran on a
 real model on 2026-11-12; their daily timer followed (§5), and `kb lint`'s summary check comes with `kb prune`. Then
-CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.x (from 2026-11-06, §4.1); adapter,
+CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.1 (2026-11-19, §4.1); adapter,
 normalizer, tracker, digester with allow list/redaction/gate/commit, for the CLI agents: agentsview for Claude Code,
 Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI + `kb mcp`; a prototype session
 for the panel layout, then the panel with rules only (incl. open loops and carry-over).

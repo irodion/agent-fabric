@@ -2,7 +2,7 @@
 # check would flag, passed as --trusted-registry. Each line must be one full URL that a review of
 # the pinned agentsview version confirmed; a changed URL fails the gate until it is reviewed here.
 #
-# vite is an npm alias: "vite": "npm:@voidzero-dev/vite-plus-core@1.0.0" (agentsview v0.45.0).
-https://registry.npmjs.org/@voidzero-dev/vite-plus-core/-/vite-plus-core-1.0.0.tgz
+# vite is an npm alias: "vite": "npm:@voidzero-dev/vite-plus-core@1.3.0" (agentsview v0.46.1).
+https://registry.npmjs.org/@voidzero-dev/vite-plus-core/-/vite-plus-core-1.3.0.tgz
 # @kenn-io/kit-ui is a commit-pinned git dependency from the agentsview author's own org.
-git+ssh://git@github.com/kenn-io/kit-ui.git#ceff715d835017daa9ec099446fa6ce71233829f
+git+ssh://git@github.com/kenn-io/kit-ui.git#c4c3c9253d1172d5960054488bd74297ba8fc51d
