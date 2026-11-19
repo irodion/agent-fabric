@@ -97,6 +97,10 @@ def test_copilots_own_reader_comes_out_as_agentsview_does_and_keeps_the_error(tm
     session_id = "copilot:3e7dddb4-4c41-489e-877a-4b5c684bcd6c"
     own = events(source.session(session_id), source.messages(session_id, 0).messages)
     assert summary(own) == summary(recorded("copilot"))
+    # A command's output reads the same from both; agentsview drops reads' and failed calls' text.
+    assert [a.output for a in actions(own) if a.kind == "shell"] == [
+        a.output for a in actions(recorded("copilot")) if a.kind == "shell"
+    ]
     failed_edit = actions(own)[1]
     assert failed_edit.output is not None
     assert failed_edit.output.startswith("Failed to apply patch")
@@ -177,6 +181,12 @@ def test_a_command_that_also_runs_something_can_fail_on_its_words(command: str) 
         ("cat log.txt;\npytest", False),
         ("cat log.txt\n\npytest", False),
         ("cat < log.txt", True),
+        ("echo foo#bar; pytest -q", False),
+        ("ls # list\npytest", False),
+        ("rg -n 'error:' src 2>/dev/null", True),
+        ("rg x src 2>&1 | head", True),
+        ("cat a 2>>err.log", False),
+        ("cat a > out.txt", False),
         ('echo "unclosed', False),
     ],
 )
@@ -226,6 +236,14 @@ def test_a_command_still_running_hasnt_failed() -> None:
 def test_a_failed_edit_with_no_output_failed() -> None:
     (action,) = one("copilot", call("apply_patch", "Edit", "*** Begin Patch", None, "started", "errored"))
     assert (action.kind, action.failed) == ("edit", True)
+
+
+def test_an_echoed_exit_code_counts_inside_agentsviews_wrapping_of_copilots_result() -> None:
+    result = json.dumps({"content": "FAIL tests\nEXIT:1\n<shellId: 0 completed with exit code 0>"})
+    (action,) = one("copilot", call("bash", "Bash", {"command": "npm test; echo EXIT:$?"}, result, "completed"))
+    assert (action.exit_code, action.failed) == (1, True)
+    assert action.output is not None
+    assert action.output.startswith("FAIL tests")
 
 
 def test_the_exit_code_copilots_own_reader_keeps_wins() -> None:
@@ -361,6 +379,13 @@ def test_one_call_printed_later_still_pairs_with_its_one_output(
     assert (action.status, action.exit_code) == (status, code)
 
 
+def test_a_script_that_mentions_promise_still_pairs() -> None:
+    script = 'text(await tools.exec_command({cmd:"rg Promise src"}));\ntext(await tools.exec_command({cmd:"false"}));'
+    result = script_result("Script completed", chunk(0, "x"), chunk(1))
+    found = one("codex", call("exec", "Bash", script, result, "completed"))
+    assert [(a.exit_code, a.failed) for a in found] == [(0, False), (1, True)]
+
+
 def test_a_scripts_output_that_cant_be_paired_stays_on_its_last_call() -> None:
     script = 'const r = await tools.exec_command({cmd:"make"});\ntext(r.output);\ntext(`exit_code=${r.exit_code}`);\n'
     result = script_result("Script completed", "make: *** [all] Error 2", "exit_code=2")
@@ -474,6 +499,20 @@ def test_a_long_script_scans_in_linear_time() -> None:
     (action,) = one("codex", call("exec", "Bash", script, script_result("Script completed", chunk(0)), "completed"))
     assert action.command == "ls"
     assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.parametrize(
+    ("argv", "output", "command", "code"),
+    [
+        (["bash", "-lc", "pytest -q"], {"output": "1 failed", "metadata": {"exit_code": 1}}, "pytest -q", 1),
+        (["ls", "-la", "my dir"], {"output": "x", "metadata": {"exit_code": 0}}, "ls -la 'my dir'", 0),
+    ],
+)
+def test_the_oldest_codex_shell_gave_an_argv_and_its_code_in_json(
+    argv: list[str], output: dict[str, object], command: str, code: int
+) -> None:
+    (action,) = one("codex", call("shell", "Bash", {"command": argv}, json.dumps(output), "completed"))
+    assert (action.command, action.exit_code, action.failed) == (command, code, bool(code))
 
 
 # ── any other agent ───────────────────────────────────────────────────────

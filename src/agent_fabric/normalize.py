@@ -130,14 +130,22 @@ def _reads(command: str | None) -> bool:
         return False  # a substitution runs a command of its own
     lexer = shlex.shlex(command or "", posix=True, punctuation_chars="();<>|&\n")
     lexer.whitespace, lexer.whitespace_split = " \t\r", True
+    lexer.commenters = ""  # POSIX shlex ends a word at "#", and its comment would swallow the next line's command
     try:
         tokens = list(lexer)
     except ValueError:
         return False
     parts: list[list[str]] = [[]]
-    for token in tokens:
+    for index, token in enumerate(tokens):
         if ">" in token and set(token) <= set("<>&\n"):
-            return False  # a redirect writes a file
+            target = tokens[index + 1] if index + 1 < len(tokens) else ""
+            if target != "/dev/null" and not (token.endswith("&") and target.isdigit()):
+                return False  # a redirect writes a file; to /dev/null or another descriptor (2>&1) it doesn't
+            if parts[-1] and parts[-1][-1].isdigit():
+                parts[-1].pop()  # the descriptor redirected, as the 2 of 2>/dev/null
+            continue
+        if index and tokens[index - 1] in (">", ">>", ">&", "&>") and (token == "/dev/null" or token.isdigit()):
+            continue
         if set(token) <= set("();|&\n"):
             parts.append([])  # shlex groups punctuation that follows itself: `;` and a newline are one token
         elif set(token) <= set("<"):
@@ -170,12 +178,30 @@ def _arguments(call: ToolCall) -> dict[str, object]:
 
 def _command(call: ToolCall, *keys: str) -> str | None:
     arguments = _arguments(call)
-    return next((value for key in keys if isinstance(value := arguments.get(key), str)), None)
+    for key in keys:
+        value = arguments.get(key)
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list) and value and all(isinstance(word, str) for word in value):
+            # An argv, as the oldest Codex `shell` tool gave it: a shell's script is the command, else the words.
+            if len(value) == 3 and value[1] in ("-c", "-lc"):
+                return str(value[2])
+            return shlex.join(value)
+    return None
 
 
 def _code(pattern: re.Pattern[str], text: str | None) -> int | None:
     found = pattern.findall(text or "")
     return int(found[-1]) if found else None
+
+
+def _unwrapped(content: str | None) -> str | None:
+    try:
+        answer = json.loads(content or "")
+    except ValueError:
+        return content
+    text = answer.get("content") if isinstance(answer, dict) else None
+    return text if isinstance(text, str) else content
 
 
 def _generic(call: ToolCall) -> Iterator[Action]:
@@ -206,6 +232,8 @@ COPILOT_EXIT = re.compile(r"completed with exit code (\d+)>")
 
 
 def _copilot(call: ToolCall) -> Iterator[Action]:
+    # agentsview keeps Copilot's result as Copilot sent it, `{"content": "…"}`; its own reader keeps the text.
+    call = call.model_copy(update={"result_content": _unwrapped(call.result_content)})
     if KINDS.get(call.category) != "shell":
         yield _action(call, command=None, exit_code=None)
         return
@@ -229,9 +257,11 @@ def _codex(call: ToolCall) -> Iterator[Action]:
     if call.tool_name != "exec":
         # Before code mode, a call was the tool itself: `exec_command` with a `cmd`, its exit code in the output.
         command = _command(call, "cmd", "command") if KINDS.get(call.category) == "shell" else None
-        # The code is in the call's own lines above `Output:`; below is the command's, which may say anything.
+        # The code is in the call's own lines above `Output:`; below is the command's, which may say anything. The
+        # oldest `shell` tool answered in JSON, the code in its `metadata`.
         metadata = (call.result_content or "").split("\nOutput:", 1)[0]
-        yield _action(call, command=command, exit_code=_code(CODEX_EXIT, metadata))
+        code = _json_exit(call.result_content)
+        yield _action(call, command=command, exit_code=code if code is not None else _code(CODEX_EXIT, metadata))
         return
     yield from _codex_script(call)
 
@@ -255,9 +285,8 @@ def _codex_script(call: ToolCall) -> Iterator[Action]:
     # each call gets the script's failure, its own being unknown.
     # Equal counts alone don't pair them: a script can print its results in another order, or as calls run
     # together finish. Only when each call prints its own result as it returns do the orders match.
-    at_once = (
-        all(PRINTED_AT_ONCE.search(script, 0, match_start) for match_start in starts) and "Promise" not in script
-    )
+    # A call run together with others (Promise.all) or kept to print later isn't written so, and can't pass.
+    at_once = all(PRINTED_AT_ONCE.search(script, 0, match_start) for match_start in starts)
     paired = len(outputs) == len(calls) and (at_once or len(calls) == 1)  # one call and one output can't be mixed
     if not calls:
         yield _action(call, command=None, exit_code=None, status="errored" if script_failed else status)
@@ -290,6 +319,16 @@ def _codex_script(call: ToolCall) -> Iterator[Action]:
         )
         inner_status = "errored" if failed_here else "running" if running else status
         yield _action(inner, command=command, exit_code=code, status=inner_status, patterns=paired)
+
+
+def _json_exit(content: str | None) -> int | None:
+    try:
+        answer = json.loads(content or "")
+    except ValueError:
+        return None
+    metadata = answer.get("metadata") if isinstance(answer, dict) else None
+    code = metadata.get("exit_code") if isinstance(metadata, dict) else None
+    return code if isinstance(code, int) else None
 
 
 def _script_result(content: str | None) -> tuple[str, list[str]]:
