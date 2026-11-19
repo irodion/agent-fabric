@@ -195,7 +195,7 @@ def _claude(call: ToolCall) -> Iterator[Action]:
     # Claude Code starts a failed command's result with `Exit code N`, and says nothing of a successful one's.
     status = _status(call)
     code = _code(CLAUDE_EXIT, call.result_content)
-    if code is None and status != "errored" and call.result_content is not None:
+    if code is None and status not in ("errored", "started", "running") and call.result_content is not None:
         code = 0
     yield _action(call, command=_command(call, "command"), exit_code=code)
 
@@ -374,6 +374,9 @@ def _scan(script: str, index: int, code: list[bool], *, in_template: bool) -> in
                 continue
             end = found
             code[index:end] = [False] * (end - index)
+            if script.startswith(("//", "/*"), index):
+                index = end  # a comment is nothing: what came before it still decides what a "/" after it is
+                continue
         last = end - 1
         index = end
     return index
