@@ -33,6 +33,10 @@ CHANGE_EVENTS = frozenset({"session_ready", "session_updated"})
 class CaptureError(Exception):
     """agentsview couldn't be asked, or answered with an error or with something the adapter can't read."""
 
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status  # agentsview's HTTP status, when it answered with an error
+
 
 class _Model(BaseModel):
     # agentsview adds fields between versions; the contract tests catch what the adapter reads changing.
@@ -212,7 +216,17 @@ class AgentsviewSource:
         found: list[Message] = []
         revisions: set[str | None] = set()
         while True:
-            page = _parse(_Messages, self._get(path, {"from": from_ordinal, "limit": self._page}))
+            params: dict[str, str | int] = {"from": from_ordinal, "limit": self._page}
+            if revisions and (revision := next(iter(revisions))):
+                # agentsview answers 409 when the transcript is no longer of this revision, even on an empty page,
+                # which carries no revision to compare: a reparse into fewer messages ends a read early otherwise.
+                params["expected_revision"] = revision
+            try:
+                page = _parse(_Messages, self._get(path, params))
+            except CaptureError as error:
+                if error.status == httpx.codes.CONFLICT:
+                    return None
+                raise
             # agentsview caps `limit` (1000 in v0.46.1) without saying so, and a page has no "more follow": read on
             # until a page comes back empty. An empty page carries no revision: agentsview looks it up with the rows.
             if not page.messages:
@@ -238,7 +252,7 @@ class AgentsviewSource:
             ):
                 if events.response.status_code != httpx.codes.OK:
                     await events.response.aread()
-                    raise CaptureError(_status(path, events.response))
+                    raise CaptureError(_status(path, events.response), events.response.status_code)
                 async for event in events.aiter_sse():
                     if event.event in CHANGE_EVENTS:
                         yield None
@@ -251,7 +265,7 @@ class AgentsviewSource:
         except httpx.HTTPError as error:
             raise CaptureError(f"agentsview {path}: {error!r}") from error
         if response.status_code != httpx.codes.OK:
-            raise CaptureError(_status(path, response))
+            raise CaptureError(_status(path, response), response.status_code)
         try:
             return response.json()
         except ValueError as error:
