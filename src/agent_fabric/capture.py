@@ -5,6 +5,7 @@ All agentsview access goes through `AgentsviewSource`. An agent agentsview can't
 the normalized events of §4.2 is normalize.py's job.
 """
 
+import json
 import logging
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
@@ -238,7 +239,7 @@ class AgentsviewSource:
             later = [message for message in page.messages if message.ordinal >= from_ordinal]
             if not later:
                 raise CaptureError(f"agentsview {path}: asked from ordinal {from_ordinal}, got only earlier ones")
-            found.extend(later)
+            found.extend(_unwrap_copilot(message) for message in later)
             from_ordinal = later[-1].ordinal + 1
 
     async def watch(self, session_id: str) -> AsyncIterator[None]:
@@ -271,6 +272,26 @@ class AgentsviewSource:
             return response.json()
         except ValueError as error:
             raise CaptureError(f"agentsview {path}: not JSON") from error
+
+
+def _unwrap_copilot(message: Message) -> Message:
+    """agentsview keeps a Copilot CLI tool's result as Copilot sent it, an object `{"content": …}`; give its text, as
+    Copilot's own reader does, so that both sources read the same."""
+    if not message.session_id.startswith("copilot:") or not message.tool_calls:
+        return message
+    calls = tuple(
+        call.model_copy(update={"result_content": _copilot_text(call.result_content)}) for call in message.tool_calls
+    )
+    return message.model_copy(update={"tool_calls": calls})
+
+
+def _copilot_text(content: str | None) -> str | None:
+    try:
+        result = json.loads(content or "")
+    except ValueError:
+        return content
+    text = result.get("content") if isinstance(result, dict) else None
+    return text if isinstance(text, str) else content
 
 
 def _parse[M: BaseModel](model: type[M], body: Any) -> M:

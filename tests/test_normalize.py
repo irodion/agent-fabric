@@ -10,9 +10,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
-from agent_fabric.capture import Message, SessionMeta, ToolCall, ToolResultEvent
+from agent_fabric.capture import AgentsviewSource, Message, SessionMeta, ToolCall, ToolResultEvent
 from agent_fabric.copilot import CopilotSource
 from agent_fabric.normalize import Action, Event, events
 
@@ -20,9 +21,16 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def recorded(agent: str) -> list[Event]:
+    """The recorded session as the agentsview adapter reads it."""
     session = SessionMeta.model_validate(json.loads((FIXTURES / "agentsview" / agent / "session.json").read_text()))
     body = json.loads((FIXTURES / "agentsview" / agent / "messages.json").read_text())
-    return events(session, [Message.model_validate(m) for m in body["messages"]])
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        later = [m for m in body["messages"] if m["ordinal"] >= int(request.url.params["from"])]
+        return httpx.Response(200, json={"messages": later or None, "count": len(later)})
+
+    with AgentsviewSource("http://av", transport=httpx.MockTransport(serve)) as source:
+        return events(session, source.messages(session.id, 0).messages)
 
 
 def actions(found: list[Event]) -> list[Action]:
@@ -192,6 +200,9 @@ def test_a_command_that_also_runs_something_can_fail_on_its_words(command: str) 
         ("cat a >| out.txt", False),
         ("cat a;>out.txt", False),
         ("cat a # it's fine", False),  # in doubt, no: an apostrophe the splitting can't follow
+        ("rg x src 2>/dev/null|head", True),
+        ("rg x src;2>&1 ls", True),
+        ("rg '->' src", False),  # in doubt, no: a ">" in quotes can't be told from a redirect
         ('echo "unclosed', False),
     ],
 )
@@ -241,14 +252,6 @@ def test_a_command_still_running_hasnt_failed() -> None:
 def test_a_failed_edit_with_no_output_failed() -> None:
     (action,) = one("copilot", call("apply_patch", "Edit", "*** Begin Patch", None, "started", "errored"))
     assert (action.kind, action.failed) == ("edit", True)
-
-
-def test_an_echoed_exit_code_counts_inside_agentsviews_wrapping_of_copilots_result() -> None:
-    result = json.dumps({"content": "FAIL tests\nEXIT:1\n<shellId: 0 completed with exit code 0>"})
-    (action,) = one("copilot", call("bash", "Bash", {"command": "npm test; echo EXIT:$?"}, result, "completed"))
-    assert (action.exit_code, action.failed) == (1, True)
-    assert action.output is not None
-    assert action.output.startswith("FAIL tests")
 
 
 def test_the_exit_code_copilots_own_reader_keeps_wins() -> None:
@@ -552,8 +555,9 @@ def test_a_boolean_isnt_an_exit_code() -> None:
     assert action.exit_code is None
 
 
-def test_copilots_wrapper_alone_is_unwrapped() -> None:
-    shown = json.dumps({"content": "hi", "id": 3})
+def test_copilots_output_is_taken_as_given() -> None:
+    # Whether a result is wrapped is the source's to know; agentsview's adapter unwraps it (test_capture.py).
+    shown = json.dumps({"content": "hi"})
     (action,) = one("copilot", call("view", "Read", {"path": "x.json"}, shown, "completed"))
     assert action.output == shown
 

@@ -125,7 +125,7 @@ def _action(
 
 
 # The redirects that write no file, as a whole word: errors away (2>/dev/null) or to another descriptor (2>&1).
-HARMLESS_REDIRECT = re.compile(r"(?<!\S)(?:\d?>>?\s*/dev/null|\d?>&\d|&>>?\s*/dev/null)(?=\s|$)")
+HARMLESS_REDIRECT = re.compile(r"(?<![^\s;|&(])(?:\d?>>?\s*/dev/null|\d?>&\d|&>>?\s*/dev/null)(?=[\s;|&)]|$)")
 
 
 def _reads(command: str | None) -> bool:
@@ -200,18 +200,6 @@ def _code(pattern: re.Pattern[str], text: str | None) -> int | None:
     return int(found[-1]) if found else None
 
 
-def _unwrapped(content: str | None) -> str | None:
-    try:
-        answer = json.loads(content or "")
-    except ValueError:
-        return content
-    # Copilot's own keys only: a file whose whole text is some other JSON with a `content` stays as it is.
-    if not isinstance(answer, dict) or not set(answer) <= {"content", "detailedContent"}:
-        return content
-    text = answer.get("content")
-    return text if isinstance(text, str) else content
-
-
 def _generic(call: ToolCall) -> Iterator[Action]:
     command = _command(call, "command", "cmd") if KINDS.get(call.category) == "shell" else None
     yield _action(call, command=command, exit_code=call.exit_code)
@@ -240,8 +228,6 @@ COPILOT_EXIT = re.compile(r"completed with exit code (\d+)>")
 
 
 def _copilot(call: ToolCall) -> Iterator[Action]:
-    # agentsview keeps Copilot's result as Copilot sent it, `{"content": "…"}`; its own reader keeps the text.
-    call = call.model_copy(update={"result_content": _unwrapped(call.result_content)})
     if KINDS.get(call.category) != "shell":
         yield _action(call, command=None, exit_code=None)
         return
