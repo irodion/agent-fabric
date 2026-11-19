@@ -4,8 +4,9 @@
 
 `docs/design.md` plans a memory shared across coding agents: session digests, a live panel, a wiki, an MCP server.
 Three parts are built: agent notes (`kb note`, `inbox`, `doctor`, `hook` and the `kb-note` skill), notes into the wiki
-(`kb ingest`, `kb lint`), and the CI that builds and vets agentsview. The rest of the design, including `fabricd` and
-the other `kb` commands, is still a plan (§9 has the phases).
+(`kb ingest`, `kb lint`), and the CI that builds and vets agentsview. The agentsview adapter, the first piece of
+capture, is built too. The rest of the design, including `fabricd` and the other `kb` commands, is still a plan (§9
+has the phases).
 
 The design holds decisions, their reasons and dated findings from real agent runs. Details live in code and tests,
 which cite it by section. Read the section before changing what it covers:
@@ -94,7 +95,12 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   agents' settings, `timer.py` the systemd units that run `kb ingest` daily, and `report.py` renders one TOON document.
   It reads kb's config once and hands that `Config` down, so its rows can't disagree over a file edited mid-run; only
   recording `--hooks` reads it again, to edit the file as it is. It writes TOON by hand: `toon-format` is a dev
-  dependency that tests use as an independent decoder. The one runtime dependency is `questionary`, for `kb setup`.
+  dependency that tests use as an independent decoder. `questionary` is a runtime dependency only for `kb setup`.
+- **Capture.** `capture.py` is the `CaptureSource` that fabricd will read sessions through, and `AgentsviewSource`
+  implements it over agentsview's API, with `httpx`, `httpx-sse` and `pydantic` (§6). Its models keep agentsview's
+  fields. Normalizing them into events (§4.2) is the next layer's job. The tests serve responses recorded from
+  agentsview at the pin, scrubbed, through a fake agentsview. Each recorded response is checked against the pinned
+  spec, cut down by `scripts/agentsview-openapi.py`, which a pin bump reruns: a test fails while the two differ.
 
 These hold across the code:
 

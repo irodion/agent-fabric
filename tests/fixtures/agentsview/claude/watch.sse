@@ -1,0 +1,15 @@
+event: session_ready
+data: 23fbfc23-9b07-4533-a313-31d6c5c5ce29
+
+event: session.timing
+data: {"session_id":"23fbfc23-9b07-4533-a313-31d6c5c5ce29","total_duration_ms":3665,"tool_duration_ms":0,"turn_count":2,"tool_call_count":2,"subagent_count":0,"slowest_call":null,"by_category":[{"category":"Bash","duration_ms":0,"call_count":2}],"turns":[{"message_id":86545,"ordinal":1,"started_at":"2026-11-19T07:46:07.56Z","duration_ms":1729,"primary_category":"Bash","calls":[{"tool_use_id":"toolu_01HuWAd6Sk1WnrcSa7vG2zpg","tool_name":"Bash","category":"Bash","duration_ms":null,"is_parallel":false,"input_preview":"python3 check.py"}]},{"message_id":86546,"ordinal":3,"started_at":"2026-11-19T07:46:09.289Z","duration_ms":355,"primary_category":"Bash","calls":[{"tool_use_id":"toolu_01MvnXT6pUix2Hhndg7S8jM5","tool_name":"Bash","category":"Bash","duration_ms":null,"is_parallel":false,"input_preview":"cat notes.txt"}]}],"running":false,"activity":[{"message_id":86544,"ordinal":0,"started_at":"2026-11-19T07:46:06.555Z","duration_ms":3089,"tool_ms":0,"unattributed_ms":3089,"running":false}],"activity_totals":{"tool_ms":0,"unattributed_ms":3089}}
+
+event: session_updated
+data: 23fbfc23-9b07-4533-a313-31d6c5c5ce29
+
+event: session.timing
+data: {"session_id":"23fbfc23-9b07-4533-a313-31d6c5c5ce29","total_duration_ms":7104,"tool_duration_ms":0,"turn_count":3,"tool_call_count":3,"subagent_count":0,"slowest_call":null,"by_category":[{"category":"Bash","duration_ms":0,"call_count":2},{"category":"Write","duration_ms":0,"call_count":1}],"turns":[{"message_id":86545,"ordinal":1,"started_at":"2026-11-19T07:46:07.56Z","duration_ms":1729,"primary_category":"Bash","calls":[{"tool_use_id":"toolu_01HuWAd6Sk1WnrcSa7vG2zpg","tool_name":"Bash","category":"Bash","duration_ms":null,"is_parallel":false,"input_preview":"python3 check.py"}]},{"message_id":86546,"ordinal":3,"started_at":"2026-11-19T07:46:09.289Z","duration_ms":2682,"primary_category":"Bash","calls":[{"tool_use_id":"toolu_01MvnXT6pUix2Hhndg7S8jM5","tool_name":"Bash","category":"Bash","duration_ms":null,"is_parallel":false,"input_preview":"cat notes.txt"}]},{"message_id":86547,"ordinal":5,"started_at":"2026-11-19T07:46:11.971Z","duration_ms":979,"primary_category":"Write","calls":[{"tool_use_id":"toolu_013bPnq5R1dkZRWApA2oR9EY","tool_name":"Write","category":"Write","duration_ms":null,"is_parallel":false,"input_preview":"/home/user/code/…"}]}],"running":false,"activity":[{"message_id":86544,"ordinal":0,"started_at":"2026-11-19T07:46:06.555Z","duration_ms":6528,"tool_ms":0,"unattributed_ms":6528,"running":false}],"activity_totals":{"tool_ms":0,"unattributed_ms":6528}}
+
+event: heartbeat
+data: 2026-11-19T07:46:41Z
+
