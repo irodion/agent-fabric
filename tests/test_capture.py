@@ -311,6 +311,20 @@ def test_a_failed_command_keeps_its_status_and_output() -> None:
     assert edit.result_content is None
 
 
+def test_copilots_results_come_as_the_text_copilot_sent() -> None:
+    # agentsview keeps them as Copilot's `{"content": …}`; Copilot's own reader gives the text.
+    with source_over(Agentsview()) as source:
+        calls = [c for m in source.messages(ids("copilot"), 0).messages for c in m.tool_calls]
+    assert calls[0].result_content == "FAILED test_retry: expected 3, got 2\n<shellId: 0 completed with exit code 1>"
+
+
+def test_another_agents_json_result_is_left_as_it_is() -> None:
+    with source_over(Agentsview()) as source:
+        codex = [c for m in source.messages(ids("codex"), 0).messages for c in m.tool_calls]
+    assert codex[0].result_content is not None
+    assert codex[0].result_content.startswith('[{"type"')
+
+
 def test_a_messages_timestamp_reads_as_a_time() -> None:
     with source_over(Agentsview(), page=10) as source:
         first = source.messages(ids("codex"), 0).messages[0]
