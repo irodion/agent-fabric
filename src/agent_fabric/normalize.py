@@ -40,7 +40,6 @@ READERS = frozenset(
     {"cat", "sed", "rg", "grep", "head", "tail", "less", "wc", "ls", "find", "nl", "tree", "jq", "diff"}
     | {"cd", "pwd", "echo", "printf", "sort", "uniq", "cut", "tr", "stat", "file", "du", "which", "realpath", "true"}
 )
-SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "\n", "(", ")"})
 GIT_READERS = frozenset({"show", "diff", "log", "grep", "blame", "status"})
 # An agent that ends a command with `echo EXIT:$?` (Copilot CLI and Cursor CLI did in the capture check) gets 0 from
 # the shell; the code the command really exited with is in its output.
@@ -137,10 +136,12 @@ def _reads(command: str | None) -> bool:
         return False
     parts: list[list[str]] = [[]]
     for token in tokens:
-        if ">" in token and set(token) <= set("<>&"):
+        if ">" in token and set(token) <= set("<>&\n"):
             return False  # a redirect writes a file
-        if token in SEPARATORS:
-            parts.append([])
+        if set(token) <= set("();|&\n"):
+            parts.append([])  # shlex groups punctuation that follows itself: `;` and a newline are one token
+        elif set(token) <= set("<"):
+            continue  # input from a file or here-document: still only shown
         else:
             parts[-1].append(token)
     parts = [words for words in parts if words]
@@ -363,7 +364,8 @@ def _scan(script: str, index: int, code: list[bool], *, in_template: bool) -> in
         if char == "`":
             end = _template(script, index, code)
         else:
-            regex_may_start = last == condition_closed or _regex_may_start(script, last)
+            # Whether a regex may start matters only at a "/", and looking back costs: ask only there.
+            regex_may_start = char == "/" and (last == condition_closed or _regex_may_start(script, last))
             found = _not_code_end(script, index, regex_may_start)
             if found is None:
                 if not char.isspace():
@@ -421,9 +423,12 @@ def _regex_may_start(script: str, last: int) -> bool:
 
 
 def _word_before(script: str, end: int) -> str:
-    """The identifier that ends at `end`, if one does."""
-    word = re.search(r"[A-Za-z_$][\w$]*$", script[: max(end, 0)])
-    return word.group() if word else ""
+    """The identifier that ends at `end`, if one does; looks back no further than the word itself."""
+    start = end
+    while start > 0 and (script[start - 1].isalnum() or script[start - 1] in "_$"):
+        start -= 1
+    word = script[start:end]
+    return word if word and not word[0].isdigit() else ""
 
 
 def _regex_end(script: str, index: int) -> int | None:
