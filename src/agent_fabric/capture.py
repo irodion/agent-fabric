@@ -7,9 +7,10 @@ the normalized events of §4.2 is the normalizer's job.
 
 import logging
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import NoneType, TracebackType
-from typing import Any, Protocol, Self, get_args
+from typing import Any, Protocol, Self, get_args, get_origin
 from urllib.parse import quote
 
 import httpx
@@ -40,10 +41,16 @@ class _Model(BaseModel):
     @field_validator("*", mode="before")
     @classmethod
     def _empty_is_none(cls, value: Any, info: ValidationInfo) -> Any:
+        if not info.field_name:
+            return value
+        annotation = cls.model_fields[info.field_name].annotation
         # agentsview writes "" for a value it doesn't have, such as a Cursor CLI message's timestamp. A field that
         # must hold a string keeps it: a session with no project worked out is still a session.
-        if value == "" and info.field_name and NoneType in get_args(cls.model_fields[info.field_name].annotation):
+        if value == "" and NoneType in get_args(annotation):
             return None
+        # Go writes an empty list it never filled as null, as agentsview does for a page past the last message.
+        if value is None and get_origin(annotation) is tuple:
+            return ()
         return value
 
 
@@ -104,16 +111,22 @@ class CaptureSource(Protocol):
         active, and the opening tick covers what changed in between."""
         ...
 
-    def messages(self, session_id: str, from_ordinal: int) -> list[Message]:
-        """The session's messages from `from_ordinal` on, in order, all of one transcript revision.
+    def messages(self, session_id: str, from_ordinal: int) -> "Transcript":
+        """The session's messages from `from_ordinal` on, in order, all of the one transcript revision returned.
 
         A message read before its tool calls finished can change: a result folds into the message that made the
         call. So the caller reads again from the first message with a call not yet finished, not only past the
-        last ordinal it has. A new `transcript_revision` on the session means agentsview re-parsed it, and ordinals
-        read before may no longer hold."""
+        last ordinal it has. A revision other than the one the caller read before means agentsview re-parsed the
+        session, and ordinals read before may no longer hold."""
         ...
 
     def session(self, session_id: str) -> SessionMeta: ...
+
+
+@dataclass(frozen=True)
+class Transcript:
+    revision: str | None  # agentsview's `transcript_revision`; None when the read found no messages
+    messages: tuple[Message, ...]
 
 
 class _Messages(_Model):
@@ -162,48 +175,54 @@ class AgentsviewSource:
             "include_one_shot": "true",  # the default list hides sessions with one user message
             "limit": self._page,
         }
-        found: list[SessionMeta] = []
+        found: dict[str, SessionMeta] = {}
+        cursors: set[str] = set()
         while True:
             page = _parse(_Sessions, self._get("/api/v1/sessions", params))
             for listed in page.sessions:
                 try:
-                    found.append(SessionMeta.model_validate(listed))
+                    session = SessionMeta.model_validate(listed)
                 except ValidationError as error:
                     # One session the adapter can't read mustn't stop capture of every other (§4.1).
                     log.warning("skipping agentsview session %s: %s", listed.get("id"), error)
+                    continue
+                # The list is ordered by activity, so a session active during the read can show on two pages.
+                found.setdefault(session.id, session)
             # Only the cursor says whether more follow: agentsview caps `limit` (500 in v0.46.1) without saying so.
             if not page.next_cursor or not page.sessions:
-                return found
-            if page.next_cursor == params.get("cursor"):
-                raise CaptureError("agentsview /api/v1/sessions: the cursor doesn't move on")
+                return list(found.values())
+            if page.next_cursor in cursors:
+                raise CaptureError("agentsview /api/v1/sessions: the cursor came back to a page already read")
+            cursors.add(page.next_cursor)
             params["cursor"] = page.next_cursor
 
     def session(self, session_id: str) -> SessionMeta:
         return _parse(SessionMeta, self._get(f"/api/v1/sessions/{_id(session_id)}", {}))
 
-    def messages(self, session_id: str, from_ordinal: int) -> list[Message]:
+    def messages(self, session_id: str, from_ordinal: int) -> Transcript:
         for _ in range(REVISION_TRIES):
             read = self._one_revision(session_id, from_ordinal)
             if read is not None:
                 return read
         raise CaptureError(f"agentsview session {session_id}: the transcript kept changing while it was read")
 
-    def _one_revision(self, session_id: str, from_ordinal: int) -> list[Message] | None:
+    def _one_revision(self, session_id: str, from_ordinal: int) -> Transcript | None:
         """The messages from `from_ordinal` on, or None when agentsview re-parsed the transcript between pages."""
         path = f"/api/v1/sessions/{_id(session_id)}/messages"
         found: list[Message] = []
-        revision: str | None = None
+        revisions: set[str | None] = set()
         while True:
             page = _parse(_Messages, self._get(path, {"from": from_ordinal, "limit": self._page}))
-            if revision is None:
-                revision = page.transcript_revision
-            elif page.transcript_revision not in (None, revision):
-                return None
             # agentsview caps `limit` (1000 in v0.46.1) without saying so, and a page has no "more follow": read on
-            # until a page comes back empty.
+            # until a page comes back empty. An empty page carries no revision: agentsview looks it up with the rows.
+            if not page.messages:
+                return Transcript(next(iter(revisions), None), tuple(found))
+            revisions.add(page.transcript_revision)
+            if len(revisions) > 1:
+                return None
             later = [message for message in page.messages if message.ordinal >= from_ordinal]
             if not later:
-                return found
+                raise CaptureError(f"agentsview {path}: asked from ordinal {from_ordinal}, got only earlier ones")
             found.extend(later)
             from_ordinal = later[-1].ordinal + 1
 

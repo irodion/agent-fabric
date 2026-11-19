@@ -48,8 +48,9 @@ def main() -> int:
     paths = {}
     for path in ENDPOINTS:
         get = spec["paths"][path]["get"]
+        declared = [*spec["paths"][path].get("parameters", []), *get.get("parameters", [])]  # path level, then op
         paths[path] = {
-            "parameters": sorted(param["name"] for param in get.get("parameters", []) if param["in"] == "query"),
+            "parameters": sorted({param["name"] for param in declared if param["in"] == "query"}),
             "response": get["responses"]["200"]["content"]["application/json"]["schema"],
         }
     wanted, todo = set(), refs(paths)
