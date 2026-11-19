@@ -320,38 +320,48 @@ reconcile).
 
 ### 4.2 Normalized event model
 
-Borrowed from OpenHands/Pi: typed, append-only, addressed by `(session_id, ordinal)`.
+Borrowed from OpenHands/Pi: typed, append-only, addressed by `(session_id, ordinal)`. An event is one message, and
+each tool call in it is an action; the session's own fields (`agent`, `project`, `cwd`, `git_branch`,
+`parent_session_id`) stay on the session, read once.
 
-| Field | Source (agentsview) |
+| Field | Source |
 |---|---|
-| `session_id` | `DbSession.id` (prefixed, e.g. `codex:…`, except Claude Code's bare ids) |
-| `agent`, `project`, `cwd`, `git_branch`, `parent_session_id` | `DbSession` |
-| `ordinal`, `ts`, `role`, `model` | `DbMessage` |
+| `session_id` | the session's id (prefixed, e.g. `codex:…`, except Claude Code's bare ids) |
+| `ordinal`, `ts`, `role`, `model` | the message |
 | `text`, `thinking` | `content`, `thinking_text` |
-| `tool_calls[]`: `tool`, `category`, `input`, `result` (full output), `result_status` | `ToolCall.result_content` (stored in full, except Claude Code's Read and Glob results, §4.1) + `result_events[].status` (`completed`, `errored`, `running`, …) |
-| `kind` (derived) | `user` · `assistant` · `shell` · `edit` · `read` · `search` · `other` |
-| `command`, `exit_code` (derived, shell only) | parsed from `input_json` / `result_content` per agent |
-| `failed` (derived) | `result_status = errored`, a non-zero `exit_code`, or an error pattern in the result (traceback, `error:`, `FAILED`, `permission denied`, patch did not apply, `Script failed`, `apply_patch verification failed`, `Failed to apply patch`) |
+| `actions[]`: `kind`, `tool`, `input`, `output` (full), `status` | a tool call: its name, `input_json`, `result_content` (in full, except Claude Code's Read and Glob results, §4.1) and the last of `result_events[].status` (`started`, `completed`, `errored`, …) |
+| `kind` (derived) | `shell` · `edit` · `read` · `search` · `other`, from the tool's category, which agentsview gives every agent's tools and Copilot CLI's reader gives too |
+| `command`, `exit_code` (derived, shell only) | parsed from the input and output per agent; an `EXIT:N` that a command echoing it printed counts over the shell's 0 or none |
+| `failed` (derived) | `status = errored`, a non-zero `exit_code`, or an error pattern in the output (traceback, `error:`, `FAILED`, `permission denied`, patch did not apply, `Script failed`, `apply_patch verification failed`, `Failed to apply patch`) of an edit, or of a command whose exit code isn't known and that doesn't only show files (`cat`, `sed`, `rg`, `git show`, …) |
 
-The per-agent mapping of tool names to `kind` and of shell results to exit codes lives in a small table per agent,
-covered by fixture tests. Sessions with `is_automated = true` are ignored; headless runs follow §4.3.
+The patterns stop there because a command's exit code says more than words in its output: Codex reads files through
+the shell, and in source code these words are everywhere. Applied to every command, they failed about a fifth of
+Codex's commands on the devbox that had exited 0 (2026-11-19, figures in the report). The per-agent tables say
+where each keeps its command and exit code, covered by fixture tests; an agent without one gets the kind and command
+its category gives. Sessions with `is_automated = true` are ignored; headless runs follow §4.3.
 
 Codex 0.162 runs every tool through one code-mode tool, `exec`, whose input is a JavaScript program that calls
-`tools.exec_command({cmd: …})` or `tools.apply_patch("*** Begin Patch …")`. agentsview files both as `exec`, category
-Bash. The Codex mapping takes `kind` and `command` from the calls inside the script, and a result that starts with
-`Script failed` counts as failed.
+`tools.exec_command({cmd: …})`, `tools.apply_patch("*** Begin Patch …")` and others. agentsview files it as `exec`,
+category Bash. Each call inside the script is an action, with its `kind` and `command`, the latter only from a
+string literal that is the whole `cmd`. The script prints what it likes: often each call's result as it returns
+(`text(await tools.exec_command(…))`), a chunk's JSON with that command's exit code, none while it still runs; but
+also a command's output and then `exit_code=N` apart, results in another order, or calls run together. Outputs pair
+with calls only in the first case, with as many of them, or when one call printed one output. Otherwise each call
+gets the script's failure, a result that
+starts with `Script failed` or a non-zero exit code it printed, and what it printed goes on its last call.
+Before code mode, Codex's `exec_command` call was the tool itself, its exit code in `Process exited with code N`.
 
-Failed calls keep the output agentsview stores. v0.46.1 sets `errored` for a failed Claude Code command and a failed
-Copilot edit, but a Copilot or Codex command that exits non-zero is `completed`, and Cursor sets none, so failure
-also comes from the exit code and the error patterns. Each agent puts the exit code somewhere else: Claude Code
-starts the result with `Exit code N`, Copilot ends it with `completed with exit code N`, and Codex puts it in the
-JSON of each command's output chunk. Claude Code and Copilot fold a tool's result into the message that called it,
-so their ordinals have gaps. Agents often append
-`; echo EXIT:$?` to a command (Copilot and Cursor both did in the capture check), so the shell's own exit code is 0;
-the error patterns still catch the failing test. Copilot stores a failed call's status but not its error text, so
-the adapter takes that text from the session's `events.jsonl` (`tool.execution_complete`, `error`). The digest
-stores an excerpt and the message ordinal (§4.4); `kb show <session>#<ordinal>` or `agentsview mcp` `get_messages`
-return the full output from the local archive.
+Failed calls keep the output their source stores. agentsview v0.46.1 sets `errored` for a failed Claude Code command
+and a failed Copilot edit, but a Copilot or Codex command that exits non-zero is `completed`, and Cursor sets none,
+so failure also comes from the exit code and the error patterns. Each agent puts the exit code somewhere else:
+Claude Code starts a failed command's result with `Exit code N` and says nothing of a successful one's, Copilot ends
+it with `completed with exit code N` and records it apart in its own files, and Codex puts it in each command's
+output chunk. Claude Code and Copilot fold a tool's result into the message that called it, so their ordinals in
+agentsview have gaps. Agents often append `; echo EXIT:$?` to a command (Copilot and Cursor both did in the capture
+check), so the shell's own exit code is 0; the echoed code is the command's. A Codex command whose chunk has no
+exit code is still running, whatever the script around it did. Copilot's own reader keeps the error
+text of a failed call, which agentsview drops (§4.1). The digest stores an excerpt and the message ordinal (§4.4);
+`kb show <session>#<ordinal>` or `agentsview mcp` `get_messages` return the full output from the local archive.
 
 ### 4.3 Session lifecycle
 

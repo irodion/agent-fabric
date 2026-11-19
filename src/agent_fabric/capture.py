@@ -2,7 +2,7 @@
 
 All agentsview access goes through `AgentsviewSource`. An agent agentsview can't read gets its own `CaptureSource`
 (Cursor CLI, §4.1) without touching the rest. The models keep agentsview's own fields and names; turning them into
-the normalized events of §4.2 is the normalizer's job.
+the normalized events of §4.2 is normalize.py's job.
 """
 
 import logging

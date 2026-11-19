@@ -98,12 +98,16 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   dependency that tests use as an independent decoder. `questionary` is a runtime dependency only for `kb setup`.
 - **Capture.** `capture.py` is the `CaptureSource` that fabricd will read sessions through, and `AgentsviewSource`
   implements it over agentsview's API, with `httpx`, `httpx-sse` and `pydantic` (§6). Its models keep agentsview's
-  fields. Normalizing them into events (§4.2) is the next layer's job. The tests serve responses recorded from
+  fields; `normalize.py` turns them into events (§4.2). The tests serve responses recorded from
   agentsview at the pin, scrubbed, through a fake agentsview. Each recorded response is checked against the pinned
   spec, cut down by `scripts/agentsview-openapi.py`, which a pin bump reruns: a test fails while the two differ.
   `copilot.py` is Copilot CLI's own `CaptureSource` over its session folders, since agentsview fails Copilot under a
   read-only home (§4.1). It reads `events.jsonl` the way agentsview does, and its tests compare the two readings of
   the live check's Copilot session.
+- **Normalizing.** `normalize.events` turns a session's messages into §4.2's events, one per message, each tool call
+  an action with a kind, a command, an exit code and whether it failed. A table per agent (`ACTIONS`) says where it
+  keeps its command and exit code; Codex's code-mode scripts split into one action per call inside. The tests run the
+  recorded sessions through it, Copilot's through both sources.
 
 These hold across the code:
 
