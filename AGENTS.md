@@ -5,7 +5,7 @@
 `docs/design.md` plans a memory shared across coding agents: session digests, a live panel, a wiki, an MCP server.
 Three parts are built: agent notes (`kb note`, `inbox`, `doctor`, `hook` and the `kb-note` skill), notes into the wiki
 (`kb ingest`, `kb lint`), and the CI that builds and vets agentsview. The agentsview adapter, the first piece of
-capture, is built too. The rest of the design, including `fabricd` and the other `kb` commands, is still a plan (§9
+capture, is built too, with Copilot CLI's own reader. The rest of the design, including `fabricd` and the other `kb` commands, is still a plan (§9
 has the phases).
 
 The design holds decisions, their reasons and dated findings from real agent runs. Details live in code and tests,
@@ -101,6 +101,9 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   fields. Normalizing them into events (§4.2) is the next layer's job. The tests serve responses recorded from
   agentsview at the pin, scrubbed, through a fake agentsview. Each recorded response is checked against the pinned
   spec, cut down by `scripts/agentsview-openapi.py`, which a pin bump reruns: a test fails while the two differ.
+  `copilot.py` is Copilot CLI's own `CaptureSource` over its session folders, since agentsview fails Copilot under a
+  read-only home (§4.1). It reads `events.jsonl` the way agentsview does, and its tests compare the two readings of
+  the live check's Copilot session.
 
 These hold across the code:
 
