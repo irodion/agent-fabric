@@ -91,6 +91,22 @@ class Agentsview:
         self.messages = {ids(agent): load(f"{agent}/messages.json")["messages"] for agent in AGENTS}
         self.requests: list[httpx.Request] = []
 
+    def revision(self, sid: str) -> str:
+        return str(self.sessions[sid]["transcript_revision"])
+
+    def page(self, sid: str, start: int, limit: int) -> dict[str, Any]:
+        later = [m for m in self.messages[sid] if m["ordinal"] >= start][:limit]
+        if not later:
+            # Past the last message agentsview's Go slice was never filled: null, and no revision to look up.
+            return {"messages": None, "count": 0}
+        return {
+            "messages": later,
+            "count": len(later),
+            "transcript_revision": self.revision(sid),
+            "first_ordinal": later[0]["ordinal"],
+            "last_ordinal": later[-1]["ordinal"],
+        }
+
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         path, params = request.url.path, request.url.params
@@ -109,11 +125,7 @@ class Agentsview:
         if len(parts) == 5:
             return httpx.Response(200, json=self.sessions[sid])
         if parts[5] == "messages":
-            later = [m for m in self.messages[sid] if m["ordinal"] >= int(params.get("from", "0"))][:limit]
-            body = {"messages": later, "count": len(later)}
-            if later:
-                body |= {"first_ordinal": later[0]["ordinal"], "last_ordinal": later[-1]["ordinal"]}
-            return httpx.Response(200, json=body)
+            return httpx.Response(200, json=self.page(sid, int(params.get("from", "0")), limit))
         if parts[5] == "watch":
             agent = self.sessions[sid]["agent"]
             stream = (FIXTURES / agent / "watch.sse").read_bytes()
@@ -153,7 +165,7 @@ def test_active_sessions_follow_the_cursor_past_a_page_agentsview_cut_short() ->
 @pytest.mark.parametrize("agent", AGENTS)
 def test_messages_read_on_past_a_page_agentsview_cut_short(agent: str) -> None:
     with source_over(Agentsview(cap=2), page=10) as source:
-        got = source.messages(ids(agent), 0)
+        got = source.messages(ids(agent), 0).messages
     assert [m.ordinal for m in got] == [m["ordinal"] for m in load(f"{agent}/messages.json")["messages"]]
 
 
@@ -215,6 +227,34 @@ def test_a_session_the_adapter_cant_read_is_skipped_alone(caplog: pytest.LogCapt
     assert broken["id"] in caplog.text
 
 
+def test_no_active_session_is_an_empty_list() -> None:
+    with source_over(lambda request: httpx.Response(200, json={"sessions": None, "total": 0})) as source:
+        assert source.active_sessions(SINCE) == []
+
+
+def test_a_session_on_two_pages_is_listed_once() -> None:
+    codex, claude = load("codex/session.json"), load("claude/session.json")
+
+    def moved(request: httpx.Request) -> httpx.Response:
+        if "cursor" not in request.url.params:
+            return listing(codex, claude, next_cursor="1")
+        return listing(codex)  # active again while the list was read, so it moved up a page
+
+    with source_over(moved) as source:
+        assert [s.id for s in source.active_sessions(SINCE)] == [codex["id"], claude["id"]]
+
+
+def test_a_cursor_that_comes_back_is_a_capture_error() -> None:
+    session = load("codex/session.json")
+    cycle = iter(["a", "b"] * 25)
+
+    def cycling(request: httpx.Request) -> httpx.Response:
+        return listing(session, next_cursor=next(cycle))  # runs out, and fails, if the adapter never stops
+
+    with source_over(cycling) as source, pytest.raises(CaptureError, match="came back"):
+        source.active_sessions(SINCE)
+
+
 def test_a_cursor_that_doesnt_move_on_is_a_capture_error() -> None:
     session = load("codex/session.json")
     asked = 0
@@ -235,21 +275,21 @@ def test_a_cursor_that_doesnt_move_on_is_a_capture_error() -> None:
 @pytest.mark.parametrize("agent", AGENTS)
 def test_messages_page_through_to_the_last(agent: str) -> None:
     with source_over(Agentsview()) as source:
-        got = source.messages(ids(agent), 0)
+        got = source.messages(ids(agent), 0).messages
     assert [m.ordinal for m in got] == [m["ordinal"] for m in load(f"{agent}/messages.json")["messages"]]
 
 
 def test_messages_start_at_the_ordinal_asked_for_across_gaps() -> None:
     # Claude Code's ordinals skip the tool results: 0, 1, 3, 5, 7.
     with source_over(Agentsview()) as source:
-        got = source.messages(ids("claude"), 2)
+        got = source.messages(ids("claude"), 2).messages
     assert [m.ordinal for m in got] == [3, 5, 7]
 
 
 def test_a_failed_command_keeps_its_status_and_output() -> None:
     with source_over(Agentsview(), page=10) as source:
-        claude = [c for m in source.messages(ids("claude"), 0) for c in m.tool_calls]
-        copilot = [c for m in source.messages(ids("copilot"), 0) for c in m.tool_calls]
+        claude = [c for m in source.messages(ids("claude"), 0).messages for c in m.tool_calls]
+        copilot = [c for m in source.messages(ids("copilot"), 0).messages for c in m.tool_calls]
     check = claude[0]
     assert check.tool_name == "Bash"
     assert check.input_json is not None
@@ -266,21 +306,55 @@ def test_a_failed_command_keeps_its_status_and_output() -> None:
 
 def test_a_messages_timestamp_reads_as_a_time() -> None:
     with source_over(Agentsview(), page=10) as source:
-        first = source.messages(ids("codex"), 0)[0]
+        first = source.messages(ids("codex"), 0).messages[0]
     assert first.role == "user"
     assert first.timestamp is not None
     assert first.timestamp.year == 2026
 
 
+class Edited(Agentsview):
+    """agentsview with the recorded Claude Code messages changed by `edit`."""
+
+    def __init__(self, edit: Callable[[list[dict[str, Any]]], object]) -> None:
+        super().__init__()
+        edit(self.messages[ids("claude")])
+
+
 def test_a_message_without_a_timestamp_has_none() -> None:
-    recorded = load("claude/messages.json")
-    recorded["messages"][0]["timestamp"] = ""  # how agentsview stores a Cursor CLI message it can't date
+    def undated(messages: list[dict[str, Any]]) -> None:
+        messages[0]["timestamp"] = ""  # how agentsview stores a Cursor CLI message it can't date
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=recorded | {"count": len(recorded["messages"])})
+    with source_over(Edited(undated)) as source:
+        assert source.messages(ids("claude"), 0).messages[0].timestamp is None
 
-    with source_over(handler, page=100) as source:
-        assert source.messages(ids("claude"), 0)[0].timestamp is None
+
+def test_a_message_whose_tool_calls_are_null_has_none() -> None:
+    def nulls(messages: list[dict[str, Any]]) -> None:
+        messages[1]["tool_calls"] = None
+
+    with source_over(Edited(nulls)) as source:
+        assert source.messages(ids("claude"), 0).messages[1].tool_calls == ()
+
+
+def test_a_read_returns_the_revision_its_messages_are_of() -> None:
+    with source_over(Agentsview()) as source:
+        read = source.messages(ids("codex"), 0)
+    assert read.revision == load("codex/session.json")["transcript_revision"]
+
+
+def test_a_read_past_the_last_message_finds_none_and_no_revision() -> None:
+    # agentsview answers it with `"messages": null`, as Go writes an empty list it never filled.
+    with source_over(Agentsview()) as source:
+        read = source.messages(ids("codex"), 100)
+    assert (read.revision, read.messages) == (None, ())
+
+
+def test_a_page_of_only_earlier_messages_is_a_capture_error() -> None:
+    def ignores_from(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=load("codex/messages.json"))
+
+    with source_over(ignores_from, page=100) as source, pytest.raises(CaptureError, match="only earlier"):
+        source.messages(ids("codex"), 2)
 
 
 class Reparsed(Agentsview):
@@ -289,26 +363,39 @@ class Reparsed(Agentsview):
     def __init__(self, reparses: int) -> None:
         super().__init__(cap=2)
         self.reparses = reparses
-        self.revision = 1
+        self.current = 1
+
+    def revision(self, sid: str) -> str:
+        return str(self.current)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
-        response = super().handle(request)
-        body = response.json()
-        if "messages" in body and request.url.params["from"] != "0" and self.reparses:
+        if request.url.path.endswith("/messages") and request.url.params["from"] != "0" and self.reparses:
             self.reparses -= 1
-            self.revision += 1
-        if "messages" in body:
-            body["transcript_revision"] = str(self.revision)
-        return httpx.Response(response.status_code, json=body)
+            self.current += 1
+        return super().handle(request)
 
 
 def test_a_read_starts_over_when_the_transcript_is_reparsed_mid_read() -> None:
     fake = Reparsed(reparses=1)
     with source_over(fake, page=10) as source:
-        got = source.messages(ids("claude"), 0)
+        got = source.messages(ids("claude"), 0).messages
     assert [m.ordinal for m in got] == [0, 1, 3, 5, 7]
     froms = [r.url.params["from"] for r in fake.requests]
     assert froms.count("0") == 2
+
+
+def test_a_revision_after_a_page_without_one_is_a_reparse() -> None:
+    pages = iter([None, "2", "2", "2", "2", "2"])
+
+    class Unstamped(Agentsview):
+        def revision(self, sid: str) -> str:
+            return next(pages) or ""
+
+    fake = Unstamped(cap=3)
+    with source_over(fake, page=3) as source:
+        read = source.messages(ids("claude"), 0)
+    assert read.revision == "2"
+    assert [r.url.params["from"] for r in fake.requests].count("0") == 2
 
 
 def test_a_transcript_that_keeps_changing_is_a_capture_error() -> None:
