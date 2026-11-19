@@ -25,6 +25,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from agent_fabric.capture import CaptureError, Message, SessionMeta, Transcript
+from agent_fabric.paths import expand
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +36,8 @@ SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 
 
 def copilot_home(env: Mapping[str, str]) -> Path:
-    home = Path(env.get("COPILOT_HOME") or "")
+    """`COPILOT_HOME`, `~` expanded as `kb doctor` expands it, else `~/.copilot`."""
+    home = expand(env.get("COPILOT_HOME") or "", env)
     return home if home.is_absolute() else Path(env["HOME"]) / ".copilot"
 
 
@@ -70,7 +72,11 @@ class CopilotSource:
                 found.append(self._read(folder.name).session)
             except FileNotFoundError:
                 continue  # never got a message, or removed since the listing
-            except (OSError, CaptureError) as error:
+            except CaptureError as error:
+                if isinstance(error.__cause__, FileNotFoundError):
+                    continue  # removed between the listing and the read
+                log.warning("skipping Copilot CLI session %s: %s", folder.name, error)
+            except OSError as error:
                 # One session that can't be read mustn't stop capture of every other (§4.1).
                 log.warning("skipping Copilot CLI session %s: %s", folder.name, error)
         return found
@@ -160,7 +166,7 @@ class _Builder:
         self.calls: dict[str, dict[str, Any]] = {}  # by toolCallId, into the message that made the call
 
     def add(self, event: dict[str, Any]) -> None:
-        stamp = event.get("timestamp") if isinstance(event.get("timestamp"), str) else None
+        stamp = _stamp_of(event.get("timestamp"))  # one event's bad timestamp spoils nothing else
         if stamp:
             self.first = self.first or stamp
             self.last = stamp
@@ -180,7 +186,11 @@ class _Builder:
             case "tool.execution_start":
                 self._result(data, stamp, "started")
             case "tool.execution_complete":
-                self._result(data, stamp, "completed" if data.get("success") is not False else "errored")
+                # Failed: said so, or an error with no result, whatever `success` says or leaves out.
+                failed = data.get("success") is False or (
+                    data.get("error") is not None and data.get("result") is None
+                )
+                self._result(data, stamp, "errored" if failed else "completed")
 
     def _prompt(self, data: dict[str, Any], stamp: str | None) -> None:
         content = (_text(data.get("content")) or "").strip()
@@ -263,6 +273,16 @@ class _Builder:
 
 def _compact(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _stamp_of(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return value
 
 
 def _text(value: object) -> str | None:
