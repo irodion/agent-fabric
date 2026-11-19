@@ -1,0 +1,22 @@
+event: session_ready
+data: codex:01a1f2c2-eb87-7743-97f3-eba0fe2f6192
+
+event: session.timing
+data: {"session_id":"codex:01a1f2c2-eb87-7743-97f3-eba0fe2f6192","total_duration_ms":5804,"tool_duration_ms":0,"turn_count":1,"tool_call_count":1,"subagent_count":0,"slowest_call":null,"by_category":[{"category":"Bash","duration_ms":0,"call_count":1}],"turns":[{"message_id":86510,"ordinal":2,"started_at":"2026-11-19T07:43:50.403Z","duration_ms":792,"primary_category":"Bash","calls":[{"tool_use_id":"call_3923546daefe4bfd97e3dad0a1be5827","tool_name":"exec","category":"Bash","duration_ms":null,"is_parallel":false,"input_preview":""}]}],"running":false,"activity":[{"message_id":86508,"ordinal":0,"started_at":"2026-11-19T07:43:47.268Z","duration_ms":3927,"tool_ms":0,"unattributed_ms":3927,"running":false}],"activity_totals":{"tool_ms":0,"unattributed_ms":3927}}
+
+event: session_updated
+data: codex:01a1f2c2-eb87-7743-97f3-eba0fe2f6192
+
+event: session.timing
+data: {"session_id":"codex:01a1f2c2-eb87-7743-97f3-eba0fe2f6192","total_duration_ms":11273,"tool_duration_ms":0,"turn_count":2,"tool_call_count":2,"subagent_count":0,"slowest_call":null,"by_category":[{"category":"Bash","duration_ms":0,"call_count":2}],"turns":[{"message_id":86510,"ordinal":2,"started_at":"2026-11-19T07:43:50.403Z","duration_ms":3320,"primary_category":"Bash","calls":[{"tool_use_id":"call_3923546daefe4bfd97e3dad0a1be5827","tool_name":"exec","category":"Bash","duration_ms":null,"is_parallel":false,"input_preview":""}]},{"message_id":86511,"ordinal":3,"started_at":"2026-11-19T07:43:53.723Z","duration_ms":2814,"primary_category":"Bash","calls":[{"tool_use_id":"call_0bcffe158fa2446bb4818675a8da30d9","tool_name":"exec","category":"Bash","duration_ms":null,"is_parallel":false,"input_preview":""}]}],"running":false,"activity":[{"message_id":86508,"ordinal":0,"started_at":"2026-11-19T07:43:47.268Z","duration_ms":9396,"tool_ms":0,"unattributed_ms":9396,"running":false}],"activity_totals":{"tool_ms":0,"unattributed_ms":9396}}
+
+event: session_updated
+data: codex:01a1f2c2-eb87-7743-97f3-eba0fe2f6192
+
+event: session.timing
+data: {"session_id":"codex:01a1f2c2-eb87-7743-97f3-eba0fe2f6192","total_duration_ms":11273,"tool_duration_ms":0,"turn_count":2,"tool_call_count":2,"subagent_count":0,"slowest_call":null,"by_category":[{"category":"Bash","duration_ms":0,"call_count":2}],"turns":[{"message_id":86510,"ordinal":2,"started_at":"2026-11-19T07:43:50.403Z","duration_ms":3320,"primary_category":"Bash","calls":[{"tool_use_id":"call_3923546daefe4bfd97e3dad0a1be5827","tool_name":"exec","category":"Bash","duration_ms":null,"is_parallel":false,"input_preview":""}]},{"message_id":86511,"ordinal":3,"started_at":"2026-11-19T07:43:53.723Z","duration_ms":2814,"primary_category":"Bash","calls":[{"tool_use_id":"call_0bcffe158fa2446bb4818675a8da30d9","tool_name":"exec","category":"Bash","duration_ms":null,"is_parallel":false,"input_preview":""}]}],"running":false,"activity":[{"message_id":86508,"ordinal":0,"started_at":"2026-11-19T07:43:47.268Z","duration_ms":9396,"tool_ms":0,"unattributed_ms":9396,"running":false}],"activity_totals":{"tool_ms":0,"unattributed_ms":9396}}
+
+event: heartbeat
+data: 2026-11-19T07:44:21Z
+
+event: heartbeat

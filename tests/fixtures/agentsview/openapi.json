@@ -1,0 +1,1033 @@
+{
+ "commit": "65523169ae016d10112b70ed3410487204764fbc",
+ "components": {
+  "schemas": {
+   "DbCaptureCoverageView": {
+    "additionalProperties": false,
+    "properties": {
+     "last_capture_at": {
+      "type": "string"
+     },
+     "uncaptured_turns": {
+      "format": "int64",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "uncaptured_turns"
+    ],
+    "type": "object"
+   },
+   "DbMessage": {
+    "additionalProperties": false,
+    "properties": {
+     "claude_message_id": {
+      "type": "string"
+     },
+     "claude_request_id": {
+      "type": "string"
+     },
+     "content": {
+      "type": "string"
+     },
+     "content_length": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "context_tokens": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "has_context_tokens": {
+      "type": "boolean"
+     },
+     "has_output_tokens": {
+      "type": "boolean"
+     },
+     "has_thinking": {
+      "type": "boolean"
+     },
+     "has_tool_use": {
+      "type": "boolean"
+     },
+     "id": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "is_compact_boundary": {
+      "type": "boolean"
+     },
+     "is_sidechain": {
+      "type": "boolean"
+     },
+     "is_system": {
+      "type": "boolean"
+     },
+     "model": {
+      "type": "string"
+     },
+     "ordinal": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "output_tokens": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "prompt_source": {
+      "type": "string"
+     },
+     "provider_id": {
+      "type": "string"
+     },
+     "reasoning_effort": {
+      "type": "string"
+     },
+     "role": {
+      "type": "string"
+     },
+     "session_id": {
+      "type": "string"
+     },
+     "source_parent_uuid": {
+      "type": "string"
+     },
+     "source_subtype": {
+      "type": "string"
+     },
+     "source_type": {
+      "type": "string"
+     },
+     "source_uuid": {
+      "type": "string"
+     },
+     "thinking_text": {
+      "type": "string"
+     },
+     "timestamp": {
+      "type": "string"
+     },
+     "token_usage": {},
+     "tool_calls": {
+      "items": {
+       "$ref": "#/components/schemas/DbToolCall"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "id",
+     "session_id",
+     "ordinal",
+     "role",
+     "content",
+     "thinking_text",
+     "timestamp",
+     "has_thinking",
+     "has_tool_use",
+     "content_length",
+     "model",
+     "context_tokens",
+     "output_tokens",
+     "has_context_tokens",
+     "has_output_tokens",
+     "is_system"
+    ],
+    "type": "object"
+   },
+   "DbPlanUsageView": {
+    "additionalProperties": false,
+    "properties": {
+     "counted_under": {
+      "type": "string"
+     },
+     "credits": {
+      "type": "string"
+     },
+     "data_as_of": {
+      "type": "string"
+     },
+     "data_status": {
+      "type": "string"
+     },
+     "final": {
+      "type": "boolean"
+     },
+     "five_hour_percent": {
+      "format": "double",
+      "type": "number"
+     },
+     "groups": {
+      "items": {
+       "$ref": "#/components/schemas/DbSessionPlanUsageGroup"
+      },
+      "type": "array"
+     },
+     "outcome_at": {
+      "type": "string"
+     },
+     "outcome_kind": {
+      "type": "string"
+     },
+     "usage_source": {
+      "type": "string"
+     },
+     "weekly_percent": {
+      "format": "double",
+      "type": "number"
+     }
+    },
+    "required": [
+     "groups",
+     "final"
+    ],
+    "type": "object"
+   },
+   "DbQualitySignals": {
+    "additionalProperties": false,
+    "properties": {
+     "duplicate_prompt_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "missing_success_criteria_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "missing_verification_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "no_code_context_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "runaway_tool_loop_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "short_prompt_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "unstructured_start": {
+      "type": "boolean"
+     },
+     "version": {
+      "format": "int64",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "version",
+     "short_prompt_count",
+     "unstructured_start",
+     "missing_success_criteria_count",
+     "missing_verification_count",
+     "duplicate_prompt_count",
+     "no_code_context_count",
+     "runaway_tool_loop_count"
+    ],
+    "type": "object"
+   },
+   "DbSession": {
+    "additionalProperties": false,
+    "properties": {
+     "agent": {
+      "type": "string"
+     },
+     "agent_label": {
+      "type": "string"
+     },
+     "compaction_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "consecutive_failure_max": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "context_pressure_max": {
+      "format": "double",
+      "type": "number"
+     },
+     "created_at": {
+      "type": "string"
+     },
+     "cwd": {
+      "type": "string"
+     },
+     "deleted_at": {
+      "type": "string"
+     },
+     "display_name": {
+      "type": "string"
+     },
+     "edit_churn_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "ended_at": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "ended_with_role": {
+      "type": "string"
+     },
+     "entrypoint": {
+      "type": "string"
+     },
+     "file_device": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "file_hash": {
+      "type": "string"
+     },
+     "file_inode": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "file_mtime": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "file_path": {
+      "type": "string"
+     },
+     "file_size": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "final_failure_streak": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "first_message": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "git_branch": {
+      "type": "string"
+     },
+     "group_key": {
+      "type": "string"
+     },
+     "has_peak_context_tokens": {
+      "type": "boolean"
+     },
+     "has_total_output_tokens": {
+      "type": "boolean"
+     },
+     "health_grade": {
+      "type": "string"
+     },
+     "health_score": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "id": {
+      "type": "string"
+     },
+     "is_automated": {
+      "type": "boolean"
+     },
+     "is_truncated": {
+      "type": "boolean"
+     },
+     "labels": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "local_modified_at": {
+      "type": "string"
+     },
+     "machine": {
+      "type": "string"
+     },
+     "message_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "mid_task_compaction_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "outcome": {
+      "type": "string"
+     },
+     "outcome_confidence": {
+      "type": "string"
+     },
+     "parent_session_id": {
+      "type": "string"
+     },
+     "parent_session_ids": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "parser_malformed_lines": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "peak_context_tokens": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "pr_links": {
+      "items": {
+       "$ref": "#/components/schemas/ParserPRLink"
+      },
+      "type": "array"
+     },
+     "project": {
+      "type": "string"
+     },
+     "project_assigned": {
+      "type": "boolean"
+     },
+     "quality_signals": {
+      "$ref": "#/components/schemas/DbQualitySignals"
+     },
+     "relationship_type": {
+      "type": "string"
+     },
+     "secret_leak_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "session_kind": {
+      "type": "string"
+     },
+     "signals_pending_since": {
+      "type": "string"
+     },
+     "source_session_id": {
+      "type": "string"
+     },
+     "source_version": {
+      "type": "string"
+     },
+     "started_at": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "termination_status": {
+      "type": "string"
+     },
+     "tool_failure_signal_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "tool_retry_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "total_output_tokens": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "transcript_fidelity": {
+      "type": "string"
+     },
+     "transcript_revision": {
+      "type": "string"
+     },
+     "user_message_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "web_url": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "id",
+     "project",
+     "machine",
+     "agent",
+     "first_message",
+     "started_at",
+     "ended_at",
+     "message_count",
+     "user_message_count",
+     "total_output_tokens",
+     "peak_context_tokens",
+     "has_total_output_tokens",
+     "has_peak_context_tokens",
+     "is_automated",
+     "tool_failure_signal_count",
+     "tool_retry_count",
+     "edit_churn_count",
+     "consecutive_failure_max",
+     "outcome",
+     "outcome_confidence",
+     "ended_with_role",
+     "final_failure_streak",
+     "compaction_count",
+     "mid_task_compaction_count",
+     "secret_leak_count",
+     "created_at"
+    ],
+    "type": "object"
+   },
+   "DbSessionPlanUsageGroup": {
+    "additionalProperties": false,
+    "properties": {
+     "credits": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "five_hour_percent": {
+      "format": "double",
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "model": {
+      "type": "string"
+     },
+     "product_experience": {
+      "type": "string"
+     },
+     "reasoning_effort": {
+      "type": "string"
+     },
+     "speed": {
+      "type": "string"
+     },
+     "weekly_percent": {
+      "format": "double",
+      "type": [
+       "number",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "model",
+     "reasoning_effort",
+     "speed",
+     "product_experience",
+     "weekly_percent",
+     "five_hour_percent",
+     "credits"
+    ],
+    "type": "object"
+   },
+   "DbToolCall": {
+    "additionalProperties": false,
+    "properties": {
+     "category": {
+      "type": "string"
+     },
+     "input_json": {
+      "type": "string"
+     },
+     "result_content": {
+      "type": "string"
+     },
+     "result_content_length": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "result_events": {
+      "items": {
+       "$ref": "#/components/schemas/DbToolResultEvent"
+      },
+      "type": "array"
+     },
+     "skill_name": {
+      "type": "string"
+     },
+     "subagent_session_id": {
+      "type": "string"
+     },
+     "tool_name": {
+      "type": "string"
+     },
+     "tool_use_id": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "tool_name",
+     "category"
+    ],
+    "type": "object"
+   },
+   "DbToolResultEvent": {
+    "additionalProperties": false,
+    "properties": {
+     "agent_id": {
+      "type": "string"
+     },
+     "content": {
+      "type": "string"
+     },
+     "content_length": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "event_index": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "source": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string"
+     },
+     "subagent_session_id": {
+      "type": "string"
+     },
+     "timestamp": {
+      "type": "string"
+     },
+     "tool_use_id": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "source",
+     "status",
+     "content",
+     "content_length",
+     "event_index"
+    ],
+    "type": "object"
+   },
+   "ParserPRLink": {
+    "additionalProperties": false,
+    "properties": {
+     "host": {
+      "type": "string"
+     },
+     "number": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "repository": {
+      "type": "string"
+     },
+     "url": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "url",
+     "host",
+     "repository",
+     "number"
+    ],
+    "type": "object"
+   },
+   "ServiceMessageList": {
+    "additionalProperties": false,
+    "properties": {
+     "count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "evidence_source": {
+      "type": "string"
+     },
+     "first_ordinal": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "last_ordinal": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "messages": {
+      "items": {
+       "$ref": "#/components/schemas/DbMessage"
+      },
+      "type": "array"
+     },
+     "transcript_revision": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "messages",
+     "count"
+    ],
+    "type": "object"
+   },
+   "ServiceSessionDetail": {
+    "additionalProperties": false,
+    "properties": {
+     "agent": {
+      "type": "string"
+     },
+     "agent_label": {
+      "type": "string"
+     },
+     "capture_coverage": {
+      "$ref": "#/components/schemas/DbCaptureCoverageView"
+     },
+     "compaction_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "consecutive_failure_max": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "context_pressure_max": {
+      "format": "double",
+      "type": "number"
+     },
+     "created_at": {
+      "type": "string"
+     },
+     "cwd": {
+      "type": "string"
+     },
+     "decode_confidence": {
+      "type": "string"
+     },
+     "deleted_at": {
+      "type": "string"
+     },
+     "display_name": {
+      "type": "string"
+     },
+     "edit_churn_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "ended_at": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "ended_with_role": {
+      "type": "string"
+     },
+     "entrypoint": {
+      "type": "string"
+     },
+     "file_device": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "file_hash": {
+      "type": "string"
+     },
+     "file_inode": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "file_mtime": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "file_path": {
+      "type": "string"
+     },
+     "file_size": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "final_failure_streak": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "first_message": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "git_branch": {
+      "type": "string"
+     },
+     "group_key": {
+      "type": "string"
+     },
+     "has_peak_context_tokens": {
+      "type": "boolean"
+     },
+     "has_total_output_tokens": {
+      "type": "boolean"
+     },
+     "health_grade": {
+      "type": "string"
+     },
+     "health_penalties": {
+      "additionalProperties": {
+       "format": "int64",
+       "type": "integer"
+      },
+      "type": "object"
+     },
+     "health_score": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "health_score_basis": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "id": {
+      "type": "string"
+     },
+     "is_automated": {
+      "type": "boolean"
+     },
+     "is_truncated": {
+      "type": "boolean"
+     },
+     "labels": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "local_modified_at": {
+      "type": "string"
+     },
+     "machine": {
+      "type": "string"
+     },
+     "message_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "mid_task_compaction_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "outcome": {
+      "type": "string"
+     },
+     "outcome_confidence": {
+      "type": "string"
+     },
+     "parent_session_id": {
+      "type": "string"
+     },
+     "parent_session_ids": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "parser_malformed_lines": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "peak_context_tokens": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "plan_usage": {
+      "$ref": "#/components/schemas/DbPlanUsageView"
+     },
+     "pr_links": {
+      "items": {
+       "$ref": "#/components/schemas/ParserPRLink"
+      },
+      "type": "array"
+     },
+     "project": {
+      "type": "string"
+     },
+     "project_assigned": {
+      "type": "boolean"
+     },
+     "quality_signals": {
+      "$ref": "#/components/schemas/DbQualitySignals"
+     },
+     "relationship_type": {
+      "type": "string"
+     },
+     "secret_leak_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "session_kind": {
+      "type": "string"
+     },
+     "signals_pending_since": {
+      "type": "string"
+     },
+     "source_session_id": {
+      "type": "string"
+     },
+     "source_version": {
+      "type": "string"
+     },
+     "started_at": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "termination_status": {
+      "type": "string"
+     },
+     "tool_failure_signal_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "tool_retry_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "total_output_tokens": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "transcript_fidelity": {
+      "type": "string"
+     },
+     "transcript_revision": {
+      "type": "string"
+     },
+     "user_message_count": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "web_url": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "id",
+     "project",
+     "machine",
+     "agent",
+     "first_message",
+     "started_at",
+     "ended_at",
+     "message_count",
+     "user_message_count",
+     "total_output_tokens",
+     "peak_context_tokens",
+     "has_total_output_tokens",
+     "has_peak_context_tokens",
+     "is_automated",
+     "tool_failure_signal_count",
+     "tool_retry_count",
+     "edit_churn_count",
+     "consecutive_failure_max",
+     "outcome",
+     "outcome_confidence",
+     "ended_with_role",
+     "final_failure_streak",
+     "compaction_count",
+     "mid_task_compaction_count",
+     "secret_leak_count",
+     "created_at"
+    ],
+    "type": "object"
+   },
+   "ServiceSessionList": {
+    "additionalProperties": false,
+    "properties": {
+     "next_cursor": {
+      "type": "string"
+     },
+     "sessions": {
+      "items": {
+       "$ref": "#/components/schemas/DbSession"
+      },
+      "type": "array"
+     },
+     "total": {
+      "format": "int64",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "sessions",
+     "total"
+    ],
+    "type": "object"
+   }
+  }
+ },
+ "paths": {
+  "/api/v1/sessions": {
+   "parameters": [
+    "active_since",
+    "agent",
+    "cursor",
+    "date",
+    "date_from",
+    "date_to",
+    "descending",
+    "exclude_project",
+    "git_branch",
+    "has_secret",
+    "health_grade",
+    "ids",
+    "include_automated",
+    "include_children",
+    "include_one_shot",
+    "include_source",
+    "label",
+    "limit",
+    "machine",
+    "max_messages",
+    "min_messages",
+    "min_tool_failures",
+    "min_user_messages",
+    "order_by",
+    "outcome",
+    "pr",
+    "project",
+    "starred",
+    "termination",
+    "timezone"
+   ],
+   "response": {
+    "$ref": "#/components/schemas/ServiceSessionList"
+   }
+  },
+  "/api/v1/sessions/{id}": {
+   "parameters": [],
+   "response": {
+    "$ref": "#/components/schemas/ServiceSessionDetail"
+   }
+  },
+  "/api/v1/sessions/{id}/messages": {
+   "parameters": [
+    "after",
+    "around",
+    "before",
+    "direction",
+    "evidence_source",
+    "expected_revision",
+    "from",
+    "limit",
+    "roles"
+   ],
+   "response": {
+    "$ref": "#/components/schemas/ServiceMessageList"
+   }
+  }
+ },
+ "tag": "v0.46.1"
+}

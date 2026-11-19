@@ -1,0 +1,283 @@
+"""Seam: the agentsview adapter against responses recorded from agentsview (docs/design.md §4.1).
+
+The fixtures come from the live check of 2026-11-19: one scripted headless session each of Claude Code, Codex and
+Copilot CLI, recorded from agentsview at the pin and scrubbed of the machine's paths. The contract tests hold them
+to the pinned spec; the rest serve them from a fake agentsview that pages them the way agentsview does."""
+
+import asyncio
+import json
+from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+from jsonschema import Draft202012Validator
+
+from agent_fabric.capture import AgentsviewSource, CaptureError
+
+FIXTURES = Path(__file__).parent / "fixtures" / "agentsview"
+PIN = Path(__file__).parent.parent / "vendor" / "agentsview.pin"
+AGENTS = ("claude", "codex", "copilot")
+SINCE = datetime(2026, 11, 19, 7, 0, tzinfo=UTC)
+
+
+def load(name: str) -> Any:
+    return json.loads((FIXTURES / name).read_text())
+
+
+SPEC = load("openapi.json")
+
+
+def ids(agent: str) -> str:
+    return str(load(f"{agent}/session.json")["id"])
+
+
+# ── contract ──────────────────────────────────────────────────────────────
+
+
+def test_the_spec_is_the_pinned_versions() -> None:
+    pin = dict(line.split("=", 1) for line in PIN.read_text().splitlines() if line and not line.startswith("#"))
+    assert (SPEC["tag"], SPEC["commit"]) == (pin["tag"], pin["commit"]), "run scripts/agentsview-openapi.py"
+
+
+@pytest.mark.parametrize(
+    ("path", "fixture"),
+    [
+        ("/api/v1/sessions", "sessions.json"),
+        *[("/api/v1/sessions/{id}", f"{agent}/session.json") for agent in AGENTS],
+        *[("/api/v1/sessions/{id}/messages", f"{agent}/messages.json") for agent in AGENTS],
+    ],
+)
+def test_a_recorded_response_matches_the_pinned_spec(path: str, fixture: str) -> None:
+    schema = {**SPEC["paths"][path]["response"], "components": SPEC["components"]}
+    errors = sorted(Draft202012Validator(schema).iter_errors(load(fixture)), key=lambda e: list(e.absolute_path))
+    assert not errors, "\n".join(f"{list(e.absolute_path)}: {e.message}" for e in errors[:5])
+
+
+def test_the_adapter_sends_only_parameters_the_spec_has() -> None:
+    sent: dict[str, set[str]] = {}
+
+    def record(request: httpx.Request) -> httpx.Response:
+        sent.setdefault(spec_path(request.url.path), set()).update(request.url.params.keys())
+        return Agentsview(page=2).handle(request)
+
+    with AgentsviewSource("http://av", transport=httpx.MockTransport(record), page=2) as source:
+        source.active_sessions(SINCE)
+        source.session(ids("codex"))
+        source.messages(ids("claude"), 0)
+    for path, params in sent.items():
+        assert params <= set(SPEC["paths"][path]["parameters"]), path
+
+
+# ── a fake agentsview over the fixtures ───────────────────────────────────
+
+
+def spec_path(path: str) -> str:
+    parts = path.split("/")
+    if len(parts) > 4:
+        parts[4] = "{id}"
+    return "/".join(parts)
+
+
+class Agentsview:
+    """Serves the fixtures, paging the session list by cursor and messages by ordinal, as agentsview does."""
+
+    def __init__(self, page: int) -> None:
+        self.page = page
+        self.sessions = {ids(agent): load(f"{agent}/session.json") for agent in AGENTS}
+        self.messages = {ids(agent): load(f"{agent}/messages.json")["messages"] for agent in AGENTS}
+        self.requests: list[httpx.Request] = []
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        path, params = request.url.path, request.url.params
+        limit = int(params.get("limit", "0")) or 10_000
+        if path == "/api/v1/sessions":
+            listed = load("sessions.json")["sessions"]
+            start = int(params.get("cursor", "0"))
+            body: dict[str, Any] = {"sessions": listed[start : start + limit], "total": len(listed)}
+            if start + limit < len(listed):
+                body["next_cursor"] = str(start + limit)
+            return httpx.Response(200, json=body)
+        parts = path.split("/")
+        sid = parts[4]
+        if sid not in self.sessions:
+            return httpx.Response(404, json={"title": "Not Found", "status": 404, "detail": "session not found"})
+        if len(parts) == 5:
+            return httpx.Response(200, json=self.sessions[sid])
+        if parts[5] == "messages":
+            later = [m for m in self.messages[sid] if m["ordinal"] >= int(params.get("from", "0"))][:limit]
+            body = {"messages": later, "count": len(later)}
+            if later:
+                body |= {"first_ordinal": later[0]["ordinal"], "last_ordinal": later[-1]["ordinal"]}
+            return httpx.Response(200, json=body)
+        if parts[5] == "watch":
+            agent = self.sessions[sid]["agent"]
+            stream = (FIXTURES / agent / "watch.sse").read_bytes()
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=stream)
+        return httpx.Response(404)
+
+
+def source_over(fake: Agentsview | Callable[[httpx.Request], httpx.Response], page: int = 2) -> AgentsviewSource:
+    handler = fake.handle if isinstance(fake, Agentsview) else fake
+    transport = httpx.MockTransport(handler)
+    return AgentsviewSource("http://av", transport=transport, async_transport=transport, page=page)
+
+
+# ── sessions ──────────────────────────────────────────────────────────────
+
+
+def test_active_sessions_takes_every_page_with_headless_runs_and_one_shots() -> None:
+    fake = Agentsview(page=2)
+    with source_over(fake) as source:
+        found = source.active_sessions(SINCE)
+    assert [s.id for s in found] == [s["id"] for s in load("sessions.json")["sessions"]]
+    assert len(found) == 4
+    assert len(fake.requests) == 2
+    first = fake.requests[0].url.params
+    assert first["active_since"] == "2026-11-19T07:00:00Z"
+    assert (first["include_children"], first["include_one_shot"]) == ("true", "true")
+    assert fake.requests[1].url.params["cursor"] == "2"
+
+
+def test_active_sessions_sends_its_time_in_utc() -> None:
+    fake = Agentsview(page=10)
+    with source_over(fake, page=10) as source:
+        source.active_sessions(datetime.fromisoformat("2026-11-19T09:00:00+02:00"))
+    assert fake.requests[0].url.params["active_since"] == "2026-11-19T07:00:00Z"
+
+
+def test_a_naive_time_is_refused() -> None:
+    with source_over(Agentsview(page=2)) as source, pytest.raises(ValueError, match="naive"):
+        source.active_sessions(datetime(2026, 11, 19, 7, 0))
+
+
+def test_each_agents_session_reads_as_agentsview_files_it() -> None:
+    with source_over(Agentsview(page=2)) as source:
+        claude, codex, copilot = (source.session(ids(agent)) for agent in AGENTS)
+    assert not claude.id.startswith("claude:")
+    assert (claude.entrypoint, claude.relationship_type) == ("sdk-cli", "subagent")
+    assert codex.id.startswith("codex:")
+    assert (codex.session_kind, codex.termination_status) == ("non-interactive", "awaiting_user")
+    assert copilot.cwd is None
+    assert copilot.project == "spikeproj"
+    assert claude.cwd == "/home/user/code/spikeproj"
+    assert claude.started_at is not None
+    assert claude.started_at.tzinfo is not None
+
+
+def test_a_session_id_with_a_colon_reaches_its_session() -> None:
+    fake = Agentsview(page=2)
+    with source_over(fake) as source:
+        assert source.session(ids("codex")).agent == "codex"
+    assert fake.requests[0].url.raw_path.decode().startswith("/api/v1/sessions/codex%3A")
+
+
+# ── messages ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+def test_messages_page_through_to_the_last(agent: str) -> None:
+    with source_over(Agentsview(page=2)) as source:
+        got = source.messages(ids(agent), 0)
+    assert [m.ordinal for m in got] == [m["ordinal"] for m in load(f"{agent}/messages.json")["messages"]]
+
+
+def test_messages_start_at_the_ordinal_asked_for_across_gaps() -> None:
+    # Claude Code's ordinals skip the tool results: 0, 1, 3, 5, 7.
+    with source_over(Agentsview(page=2)) as source:
+        got = source.messages(ids("claude"), 2)
+    assert [m.ordinal for m in got] == [3, 5, 7]
+
+
+def test_a_failed_command_keeps_its_status_and_output() -> None:
+    with source_over(Agentsview(page=10), page=10) as source:
+        claude = [c for m in source.messages(ids("claude"), 0) for c in m.tool_calls]
+        copilot = [c for m in source.messages(ids("copilot"), 0) for c in m.tool_calls]
+    check = claude[0]
+    assert check.tool_name == "Bash"
+    assert check.input_json is not None
+    assert "python3 check.py" in check.input_json
+    assert [e.status for e in check.result_events] == ["errored"]
+    assert check.result_content is not None
+    assert check.result_content.startswith("Exit code 1")
+    # Claude Code leaves a success's status empty, which reads as none.
+    assert [e.status for e in claude[1].result_events] == [None]
+    edit = next(c for c in copilot if c.tool_name == "apply_patch")
+    assert [e.status for e in edit.result_events] == ["started", "errored"]
+    assert edit.result_content is None
+
+
+def test_a_messages_timestamp_reads_as_a_time() -> None:
+    with source_over(Agentsview(page=10), page=10) as source:
+        first = source.messages(ids("codex"), 0)[0]
+    assert first.role == "user"
+    assert first.timestamp is not None
+    assert first.timestamp.year == 2026
+
+
+def test_a_message_without_a_timestamp_has_none() -> None:
+    recorded = load("claude/messages.json")
+    recorded["messages"][0]["timestamp"] = ""  # how agentsview stores a Cursor CLI message it can't date
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=recorded | {"count": len(recorded["messages"])})
+
+    with source_over(handler, page=100) as source:
+        assert source.messages(ids("claude"), 0)[0].timestamp is None
+
+
+# ── watch ─────────────────────────────────────────────────────────────────
+
+
+async def ticks(source: AgentsviewSource, session_id: str) -> int:
+    return len([tick async for tick in source.watch(session_id)])
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+def test_watch_ticks_once_on_opening_and_once_per_change(agent: str) -> None:
+    stream = (FIXTURES / agent / "watch.sse").read_text()
+    events = [line.removeprefix("event: ") for line in stream.splitlines() if line.startswith("event: ")]
+    with source_over(Agentsview(page=2)) as source:
+        got = asyncio.run(ticks(source, ids(agent)))
+    assert got == events.count("session_ready") + events.count("session_updated")
+    assert got >= 2  # heartbeats and timing summaries are no change
+
+
+def test_a_watch_on_a_missing_session_fails() -> None:
+    with source_over(Agentsview(page=2)) as source, pytest.raises(CaptureError, match="HTTP 404"):
+        asyncio.run(ticks(source, "codex:missing"))
+
+
+# ── failures ──────────────────────────────────────────────────────────────
+
+
+def test_a_missing_session_fails_with_agentsviews_reason() -> None:
+    with source_over(Agentsview(page=2)) as source, pytest.raises(CaptureError, match=r"HTTP 404: .*not found"):
+        source.session("codex:missing")
+
+
+def test_agentsview_down_is_a_capture_error() -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    with source_over(refuse) as source, pytest.raises(CaptureError, match="ConnectError"):
+        source.active_sessions(SINCE)
+
+
+def test_an_answer_the_adapter_cant_read_is_a_capture_error() -> None:
+    def changed(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"sessions": [{"id": "x"}], "total": 1})
+
+    with source_over(changed) as source, pytest.raises(CaptureError, match="can't read"):
+        source.active_sessions(SINCE)
+
+
+def test_an_answer_that_isnt_json_is_a_capture_error() -> None:
+    def html(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>")
+
+    with source_over(html) as source, pytest.raises(CaptureError, match="not JSON"):
+        source.session(ids("codex"))

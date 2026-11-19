@@ -275,8 +275,8 @@ class CaptureSource(Protocol):
     def session(self, session_id: str) -> SessionMeta: ...
 ```
 
-Implemented over `GET /api/v1/sessions?include_one_shot=true` (the default list hides sessions with one user
-message), `GET /api/v1/sessions/{id}`, `GET /api/v1/sessions/{id}/messages?from=N`
+Implemented over `GET /api/v1/sessions?active_since=…&include_children=true&include_one_shot=true` (the default list
+hides headless runs, which are children, and sessions with one user message), `GET /api/v1/sessions/{id}`, `GET /api/v1/sessions/{id}/messages?from=N`
 and `GET /api/v1/sessions/{id}/watch` (SSE; emits a change signal, not content). A contract test runs the adapter
 against recorded responses validated with the pinned `openapi.yaml`. If agentsview fails for one agent, that agent
 gets its own `CaptureSource` (direct transcript reader) without touching the rest.
