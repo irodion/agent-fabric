@@ -34,7 +34,7 @@ dev = [
 [tool.uv]
 # The vet gate fails packages published less than 14 days ago (.github/vet/policy.yml); resolve against an older
 # snapshot of PyPI. Move this date forward when upgrading.
-exclude-newer = "2026-10-17T00:00:00Z"
+exclude-newer = "2026-11-05T00:00:00Z"
 
 [tool.ruff]
 line-length = 118
