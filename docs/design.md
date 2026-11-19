@@ -60,7 +60,7 @@ Switch freely between coding agents without losing the history of what was done 
         │ each agent writes its own files (~/.claude, ~/.codex, ~/.copilot, ~/.cursor)
         ▼
  ┌──────────────────────────────┐
- │ agentsview  127.0.0.1:8080   │  file watch + 1.5 s poll → SQLite archive (raw layer)
+ │ agentsview  127.0.0.1:8080   │  file watch + 2 min poll → SQLite archive (raw layer)
  │ REST /api/v1 · SSE · MCP     │
  └──────────────┬───────────────┘
                 │ adapter (REST + watch); Cursor CLI: own reader of ~/.cursor/chats (§4.1)
@@ -259,6 +259,23 @@ tmux as well as headless.
 - **Cost.** The first full sync of 6,391 sessions took 5 min 39 s on 2 vCPU and made a 497 MB archive; incremental
   syncs take about 1 s.
 
+**Live check (CLI agents, devbox, 2026-11-19).** agentsview v0.46.1 ran under the unit's confinement (read-only
+home, only its data dir writable) while Claude Code 2.1.328, Codex 0.166.0 and Copilot CLI 1.0.105 each ran a
+scripted headless session; the figures are in an untracked report. It settles phase 0 items 2–4 for these three:
+
+- **Lag.** Every message reached the API within 5.2 s of its own timestamp, and the session's `watch` fired about
+  1 s after that: inside the 10 s target. Interactive sessions write the same files.
+- **Streams.** `/api/v1/events` sends only `data_changed` with a scope, no session id, at most once per 10 s. It can
+  wake the tracker early but can't replace the session list. A session's `watch` sends its id on each change, with a
+  timing summary: a change signal, as the adapter assumes.
+- **Copilot CLI under a read-only home.** Copilot's `session-store.db` is in WAL mode. When no `-shm` file sits next
+  to it, SQLite can't open it read-only, agentsview fails the whole Copilot source, and no Copilot session is
+  archived: none of the devbox's four were. With a `-shm` present, as while Copilot runs, the session was archived
+  live. v0.45.0 archived Copilot's session in the October check. So Copilot capture works only while that file
+  happens to exist (§8, §11).
+- **Cross-agent search.** Codex, with `agentsview mcp --profile memory` as an MCP server and no shell, found a Claude
+  Code session by a word in its prompt and reported its first command and exit code correctly.
+
 **Query path.** `agentsview mcp` talks to the daemon over HTTP, and if none answers it starts one itself, outside
 the sandbox. Register it with `--server http://127.0.0.1:<port>` (§4.1) so it fails instead. MCP servers are started
 by the agent app rather than in the agent's shell sandbox, so they reach loopback. A CLI call from a sandboxed shell
@@ -288,8 +305,8 @@ project from `cwd` (§4.4). Still to work out from synthetic sessions: message o
 guarantee), timestamps (the blobs have none, so the watcher stamps each message when it first sees it), and whether
 `blobEncryptionKey` means some blobs are encrypted (none of the JSON ones were).
 
-Verify in spike: what `/api/v1/events` emits (could replace session-list polling), and end-to-end lag for Cursor
-IDE (agentsview re-reads some `state.vscdb` changes only on a scheduled reconcile).
+Verify in spike: end-to-end lag for Cursor IDE (agentsview re-reads some `state.vscdb` changes only on a scheduled
+reconcile).
 
 ### 4.2 Normalized event model
 
@@ -297,7 +314,7 @@ Borrowed from OpenHands/Pi: typed, append-only, addressed by `(session_id, ordin
 
 | Field | Source (agentsview) |
 |---|---|
-| `session_id` | `DbSession.id` (prefixed, e.g. `cursor-ide:…`) |
+| `session_id` | `DbSession.id` (prefixed, e.g. `codex:…`, except Claude Code's bare ids) |
 | `agent`, `project`, `cwd`, `git_branch`, `parent_session_id` | `DbSession` |
 | `ordinal`, `ts`, `role`, `model` | `DbMessage` |
 | `text`, `thinking` | `content`, `thinking_text` |
@@ -314,8 +331,12 @@ Codex 0.162 runs every tool through one code-mode tool, `exec`, whose input is a
 Bash. The Codex mapping takes `kind` and `command` from the calls inside the script, and a result that starts with
 `Script failed` counts as failed.
 
-Failed calls keep the output agentsview stores. In v0.45.0 it sets `errored` for Claude Code and Copilot CLI, but
-not for Codex or Cursor, so failure also comes from the exit code and the error patterns. Agents often append
+Failed calls keep the output agentsview stores. v0.46.1 sets `errored` for a failed Claude Code command and a failed
+Copilot edit, but a Copilot or Codex command that exits non-zero is `completed`, and Cursor sets none, so failure
+also comes from the exit code and the error patterns. Each agent puts the exit code somewhere else: Claude Code
+starts the result with `Exit code N`, Copilot ends it with `completed with exit code N`, and Codex puts it in the
+JSON of each command's output chunk. Claude Code and Copilot fold a tool's result into the message that called it,
+so their ordinals have gaps. Agents often append
 `; echo EXIT:$?` to a command (Copilot and Cursor both did in the capture check), so the shell's own exit code is 0;
 the error patterns still catch the failing test. Copilot stores a failed call's status but not its error text, so
 the adapter takes that text from the session's `events.jsonl` (`tool.execution_complete`, `error`). The digest
@@ -332,15 +353,17 @@ return the full output from the local archive.
 - **Why a timeout:** no agent gives a reliable session-end signal (§2), so "finished" means "quiet for N
   minutes". The value is low-stakes: too short and a paused session finalizes and later reopens (one extra commit
   to the same file); too long and its digest arrives late. Config value, default 30 min.
-- `tracker` lists sessions updated in the last 24 h every 10 s, with `include_children=true` because agentsview files
-  headless runs as children (§4.1), and opens a `watch` for each ACTIVE one.
+- `tracker` lists sessions active in the last 24 h (`active_since`) every 10 s, and sooner when `/api/v1/events`
+  says something changed, with `include_children=true` because agentsview files headless runs as children (§4.1),
+  and opens a `watch` for each ACTIVE one.
 - **Headless runs** (`claude -p` and SDK runs, `codex exec`, `copilot -p`, `cursor-agent -p`) get a local digest
   only, indexed for `kb` and never committed, unless the project is also on the `[publish] headless` list (§4.5).
   Scripts and benchmarks make them in bulk: 1,324 of the 1,359 Claude Code sessions on the devbox are headless, most
   from one benchmark project. Detection: `entrypoint = sdk-cli` (Claude Code) and `session_kind = non-interactive`
   (Codex). Copilot and Cursor show no marker yet (§4.1), so their `-p` runs count as interactive until one is found.
-- **Turn end** (heuristic, verify in spike): last message is assistant text with no pending tool call, and no
-  change for 5 s.
+- **Turn end** (heuristic): last message is assistant text with no pending tool call, and no change for 5 s. It
+  held in the headless runs of the live check (§4.1), where the agent exited within 2 s of that message;
+  interactive sessions are still to check. Codex alone also sets `termination_status`.
 - **Finalize**: write the digest, commit it. A reopened session rewrites the same digest file on its next
   finalization (new commit). The digest is a pure function of the session's messages + git snapshots, so
   regeneration is byte-stable.
@@ -1260,6 +1283,7 @@ shfmt, actionlint, zizmor; ruff, mypy and pytest on Python 3.13 and 3.14).
 | agentsview upgrade changes API | adapter errors | pinned version; contract tests gate upgrades |
 | sandbox blocks a read agentsview needs | an agent's sessions missing | `agentsview doctor` and per-agent session counts in `kb doctor`; widen only that path |
 | agentsview can't write `~/.cursor/chats` | every Cursor CLI session fails to sync | Cursor CLI's own `CaptureSource` (§4.1); never give agentsview write access to agent data |
+| Copilot's session store has no `-shm` file under a read-only home | no Copilot session syncs | open (§11); `kb doctor` to count Copilot sessions against `~/.copilot/session-state/` |
 | Codex compresses old rollouts to `.jsonl.zst` | v0.45.0 can't read them; sessions not yet synced are missed | pinned v0.46.1 reads them (§4.1) |
 | Claude Code deletes its tool-result files | archived output can be lost on a re-parse in v0.45.0 | pinned v0.46.1 keeps it |
 | headless runs in bulk (benchmarks, scripts) | wiki flooded with digests nobody reads | local-only unless the project opts in (§4.3) |
@@ -1312,8 +1336,9 @@ sessions' recordings stay in `spike/recordings/` for the phase 1 fixtures, scrub
 Exit: go/no-go on agentsview per agent; chosen GPU backend.
 
 The CLI agents come first (§2). Items 1 and 7 for them ran on the devbox on 2026-10-31 (capture check, §4.1): go for
-Claude Code, Codex and Copilot CLI; no-go for Cursor CLI, which gets its own reader in phase 1. Item 2 (watch lag) and
-item 3 (cross-agent search) are still to do for the CLIs. Items 1–3 and 7 for the IDE agents move to phase 3.
+Claude Code, Codex and Copilot CLI; no-go for Cursor CLI, which gets its own reader in phase 1. Items 2 (lag), 3 (cross-agent search) and 4
+(recordings, `/api/v1/events`, turn end) ran for Claude Code, Codex and Copilot CLI on 2026-11-19 (live check, §4.1):
+lag and search pass, and Copilot capture depends on a file it doesn't always leave. Items 1–3 and 7 for the IDE agents move to phase 3.
 
 **Phase 1 — digests and query.** First `kb note`, `kb inbox`, the `kb-note` skill and its hooks (§4.10): they need
 neither agentsview nor fabricd, so a one-week trial in one or two projects runs while the rest is built. Notes-only
@@ -1414,6 +1439,15 @@ agents' CLIs can be chosen per workspace once each passes §4.7's check; `kb set
 way to set up, and `install.sh` only installs `kb` and starts it; every workspace's settings stay in `~/.config`, out of
 reach of an agent working in a root (§4.11). Decided 2026-11-18: `claude` is a backend, and `copilot` and `cursor`
 aren't, on the versions checked (§4.7).
+
+Open (2026-11-19):
+
+- How Copilot CLI gets captured, since agentsview fails it under a read-only home unless the store's `-shm` file
+  exists (§4.1). The unit can't create that file without write access to Copilot's folder, which §8 rules out. A fix
+  upstream (open the store read-only in a way WAL allows, or skip it and keep the session files) or Copilot's own
+  `CaptureSource` over `~/.copilot/session-state/`, as for Cursor CLI.
+- Copilot sessions have no `cwd` in agentsview, which the digest's git snapshots need (§4.4); the session's own
+  `workspace.yaml` holds it, with the git root and branch.
 
 Open (2026-11-18):
 
