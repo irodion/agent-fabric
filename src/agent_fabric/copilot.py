@@ -117,7 +117,9 @@ class CopilotSource:
         # Copilot appends while it runs: a last line without its newline is still being written.
         complete = raw[: raw.rfind(b"\n") + 1]
         builder = _Builder(PREFIX + folder)
-        for number, line in enumerate(complete.splitlines(), 1):
+        # One event per "\n", as notes.py splits: bytes.splitlines() would also cut on "\r", which valid JSON never
+        # leaves raw, so this reads no file differently; it only says what a JSON Lines file is.
+        for number, line in enumerate(complete.split(b"\n")[:-1], 1):
             try:
                 event = json.loads(line)
             except ValueError:
