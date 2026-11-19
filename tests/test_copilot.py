@@ -80,6 +80,23 @@ def test_copilot_home_moves_the_sessions(home: Path, tmp_path: Path) -> None:
     assert [s.id for s in found] == [ID]
 
 
+def test_copilot_home_given_with_a_tilde_moves_the_sessions(home: Path) -> None:
+    (home / ".copilot").rename(home / "copilot-alt")
+    found = CopilotSource({"HOME": str(home), "COPILOT_HOME": "~/copilot-alt"}).active_sessions(LONG_AGO)
+    assert [s.id for s in found] == [ID]
+
+
+def test_a_session_removed_mid_listing_is_skipped_quietly(
+    home: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def gone(self: CopilotSource, folder: str) -> object:
+        raise CaptureError("gone") from FileNotFoundError(folder)
+
+    monkeypatch.setattr(CopilotSource, "_read", gone)
+    assert source(home).active_sessions(LONG_AGO) == []
+    assert "skipping" not in caplog.text
+
+
 def test_a_session_that_cant_be_read_is_skipped_alone(home: Path, caplog: pytest.LogCaptureFixture) -> None:
     other = home / ".copilot" / "session-state" / "11111111-2222-3333-4444-555555555555"
     other.mkdir()
@@ -206,6 +223,20 @@ def test_an_event_of_an_unknown_shape_spoils_nothing_else(home: Path, odd: dict[
     append(home, reply("after"))
     assert source(home).messages(ID, 0).messages[-1].content == "after"
     assert [s.id for s in source(home).active_sessions(LONG_AGO)] == [ID]
+
+
+def test_an_event_with_a_bad_timestamp_spoils_nothing_else(home: Path) -> None:
+    append(home, reply("dated") | {"timestamp": "not a time"})
+    read = source(home).messages(ID, 7).messages
+    assert [(m.content, m.timestamp) for m in read] == [("dated", None)]
+
+
+def test_a_call_that_ends_with_an_error_and_no_success_flag_failed(home: Path) -> None:
+    request = {"toolCallId": "call_e", "name": "bash", "arguments": {"command": "rm x"}}
+    end = {"type": "tool.execution_complete", "data": {"toolCallId": "call_e", "error": {"message": "denied"}}}
+    append(home, reply("", calls=[request]), end)
+    call = source(home).messages(ID, 7).messages[0].tool_calls[0]
+    assert ([e.status for e in call.result_events], call.result_content) == (["errored"], "denied")
 
 
 def test_a_skills_text_isnt_a_prompt(home: Path) -> None:
