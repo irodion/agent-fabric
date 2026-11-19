@@ -71,6 +71,7 @@ class ToolCall(_Model):
     input_json: str | None = None
     result_content: str | None = None  # in full, except Claude Code's Read and Glob results (§4.1)
     result_events: tuple[ToolResultEvent, ...] = ()
+    exit_code: int | None = None  # a shell command's, where the agent records it apart: Copilot CLI's own reader
 
 
 class Message(_Model):
@@ -89,7 +90,7 @@ class SessionMeta(_Model):
     id: str  # `codex:…`, `copilot:…`; Claude Code's are bare
     agent: str
     project: str
-    cwd: str | None = None  # None for Copilot CLI (§11)
+    cwd: str | None = None  # agentsview leaves Copilot CLI's empty; its own reader fills it (§4.1)
     git_branch: str | None = None
     parent_session_id: str | None = None
     relationship_type: str | None = None  # `subagent` for Claude Code's and Codex's headless runs too (§4.3)
