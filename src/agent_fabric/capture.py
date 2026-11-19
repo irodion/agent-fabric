@@ -102,8 +102,6 @@ class CaptureSource(Protocol):
 
 class _Messages(_Model):
     messages: tuple[Message, ...]
-    count: int
-    last_ordinal: int | None = None
 
 
 class _Sessions(_Model):
@@ -151,7 +149,8 @@ class AgentsviewSource:
         while True:
             page = _parse(_Sessions, self._get("/api/v1/sessions", params))
             found.extend(page.sessions)
-            if not page.next_cursor or len(page.sessions) < self._page:
+            # Only the cursor says whether more follow: agentsview caps `limit` (500 in v0.46.1) without saying so.
+            if not page.next_cursor or not page.sessions:
                 return found
             params["cursor"] = page.next_cursor
 
@@ -165,10 +164,13 @@ class AgentsviewSource:
         path = f"/api/v1/sessions/{_id(session_id)}/messages"
         while True:
             page = _parse(_Messages, self._get(path, {"from": from_ordinal, "limit": self._page}))
-            yield from page.messages
-            if page.count < self._page or page.last_ordinal is None:
+            # agentsview caps `limit` (1000 in v0.46.1) without saying so, and a page has no "more follow": read on
+            # until a page comes back empty.
+            later = [message for message in page.messages if message.ordinal >= from_ordinal]
+            if not later:
                 return
-            from_ordinal = page.last_ordinal + 1
+            yield from later
+            from_ordinal = later[-1].ordinal + 1
 
     async def watch(self, session_id: str) -> AsyncIterator[None]:
         timeout = httpx.Timeout(TIMEOUT, read=WATCH_READ_TIMEOUT)
