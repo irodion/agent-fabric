@@ -6,6 +6,7 @@ rest are made-up calls in the shapes the devbox's archive holds."""
 
 import json
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -172,6 +173,9 @@ def test_a_command_that_also_runs_something_can_fail_on_its_words(command: str) 
         ("cd repo && git show HEAD:x.py", True),
         ("cat > notes.txt <<EOF\nerror: x\nEOF", False),
         ("ls\npytest", False),
+        ("cat log.txt;\npytest", False),
+        ("cat log.txt\n\npytest", False),
+        ("cat < log.txt", True),
         ('echo "unclosed', False),
     ],
 )
@@ -459,6 +463,14 @@ def test_a_regex_or_a_division_hides_no_call(before: str) -> None:
     script = f'{before}\ntext(await tools.exec_command({{cmd:"false"}}));'
     (action,) = one("codex", call("exec", "Bash", script, script_result("Script completed", chunk(1)), "completed"))
     assert (action.tool, action.command, action.exit_code) == ("exec_command", "false", 1)
+
+
+def test_a_long_script_scans_in_linear_time() -> None:
+    script = "const a = 1;\n" * 4000 + 'text(await tools.exec_command({cmd:"ls"}));'  # about 50 KB
+    started = time.perf_counter()
+    (action,) = one("codex", call("exec", "Bash", script, script_result("Script completed", chunk(0)), "completed"))
+    assert action.command == "ls"
+    assert time.perf_counter() - started < 1.0
 
 
 # ── any other agent ───────────────────────────────────────────────────────
