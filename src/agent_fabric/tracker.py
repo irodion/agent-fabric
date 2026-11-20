@@ -22,6 +22,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, NoReturn
 
+import httpx
+
 from agent_fabric.capture import CaptureError, CaptureSource, Message, SessionMeta, ToolCall
 from agent_fabric.gitinfo import git_project
 from agent_fabric.paths import state_db
@@ -51,7 +53,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     tail TEXT NOT NULL,           -- a hash of what the last read found from the cursor on
     last_ordinal INTEGER NOT NULL,
     ends_turn INTEGER NOT NULL,
-    turn_ended_at INTEGER,        -- the last ordinal a turn_end was given for
+    answer TEXT,                  -- a hash of the last message not a system one, which names the turn it ends
+    turn_ended TEXT,              -- the answer the last turn_end was given for
     changed_at TEXT NOT NULL,     -- when the tracker last saw the messages change
     active_at TEXT NOT NULL       -- the session's last activity, from its own timestamps where it has them
 );
@@ -99,7 +102,8 @@ class Tracked:
     tail: str
     last_ordinal: int
     ends_turn: bool
-    turn_ended_at: int | None
+    answer: str | None
+    turn_ended: str | None
     changed_at: datetime
     active_at: datetime
 
@@ -142,6 +146,7 @@ class Tracker:
     def poll(self, now: datetime) -> list[Change]:
         """List each feed's sessions, read the new and the changed, and settle every active one."""
         changes: list[Change] = []
+        tried: set[str] = set()  # read, or tried, in this poll
         for feed in self._feeds.values():
             try:
                 listed = feed.source.active_sessions(now - self._window)
@@ -165,15 +170,20 @@ class Tracker:
                 unfinished = row is not None and row.cursor <= row.last_ordinal
                 if row is not None and row.listing == _listing(meta) and row.id in self._read_here and not unfinished:
                     continue
+                tried.add(meta.id)
                 changes += self._read_or_skip(feed, meta, row, now)
         for row in self.sessions("active"):
             # A feed that can't be asked has said nothing of its sessions: they aren't quiet, only unheard.
             owner = self._feeds.get(row.feed)
             if owner is None or owner.name in self.offline:
                 continue
-            if row.id not in self._read_here:
+            if row.id not in self._read_here and row.id not in tried:
                 # Active when the tracker stopped, and no longer listed: it may have gone on in the meantime.
                 changes += self._read_or_skip(owner, None, row, now)
+            if row.id in self._unread and now - row.active_at >= self._window:
+                # Unreadable for longer than a listing looks back: whatever it did is out of reach, so settle it on
+                # what was read, rather than keep it active and asked for ever.
+                self._unread.discard(row.id)
             changes += self.settle(row.id, now)
         return changes
 
@@ -220,6 +230,12 @@ class Tracker:
         try:
             changes = self._read(feed, meta, row, now)
         except CaptureError as error:
+            if row is not None and _gone(error):
+                # Removed from its source: nothing more will come, so it settles on what was read.
+                log.info("%s session %s is gone: %s", feed.name, session_id, error)
+                self._unread.discard(session_id)
+                self._read_here.add(session_id)
+                return []
             # One session that can't be read mustn't stop the others, and isn't settled on what was read before it
             # changed: the next poll or tick tries again.
             log.warning("can't read %s session %s: %s", feed.name, session_id, error)
@@ -275,7 +291,9 @@ class Tracker:
             tail=tail,
             last_ordinal=messages[-1].ordinal if messages else known.last_ordinal if known else -1,
             ends_turn=_or(_ends_turn(messages), known.ends_turn if known else False),
-            turn_ended_at=known.turn_ended_at if known else None,  # a re-parse can number a new turn as an old one
+            answer=_answer(messages) or (known.answer if known else None),
+            # Kept through a re-parse: the answer's hash, not its ordinal, says whether it's the turn already ended.
+            turn_ended=row.turn_ended if row else None,
             changed_at=now if changed else row.changed_at if row else now,
             active_at=active_at,
         )
@@ -295,9 +313,10 @@ class Tracker:
                     (row.id,),
                 )
                 return [self._record(row, "finalized", now)]
-        if row.ends_turn and row.turn_ended_at != row.last_ordinal and now - row.changed_at >= self._turn_quiet:
+        # A system message after the answer, such as a hook's, moves the last ordinal but not the answer.
+        if row.ends_turn and row.answer != row.turn_ended and now - row.changed_at >= self._turn_quiet:
             with self._db:
-                self._db.execute("UPDATE sessions SET turn_ended_at = ? WHERE id = ?", (row.last_ordinal, row.id))
+                self._db.execute("UPDATE sessions SET turn_ended = answer WHERE id = ?", (row.id,))
                 return [self._record(row, "turn_end", now)]
         return []
 
@@ -319,56 +338,83 @@ async def run(
     turn_quiet: float = TURN_QUIET.total_seconds(),
 ) -> NoReturn:
     """Poll every `poll` seconds, and follow each active session's watch in between, checking for a turn end
-    `turn_quiet` seconds after its last tick. The sources are read in a worker thread, one call at a time."""
-    lock = asyncio.Lock()
-    watches: dict[str, asyncio.Task[None]] = {}
-    checks: dict[str, asyncio.Task[None]] = {}
+    `turn_quiet` seconds after its last tick. The tracker, and so its database, is used in a worker thread, one call
+    at a time."""
+    await _Runner(tracker, emit, clock, turn_quiet).run(poll)
 
-    async def call(step: Callable[[datetime], list[Change]]) -> None:
-        async with lock:
-            job = asyncio.ensure_future(asyncio.to_thread(step, clock()))
+
+class _Runner:
+    def __init__(
+        self, tracker: Tracker, emit: Callable[[Change], None], clock: Callable[[], datetime], turn_quiet: float
+    ) -> None:
+        self._tracker = tracker
+        self._emit = emit
+        self._clock = clock
+        self._turn_quiet = turn_quiet
+        self._lock = asyncio.Lock()
+        self._watches: dict[str, asyncio.Task[None]] = {}
+        self._checks: dict[str, asyncio.Task[None]] = {}
+
+    async def run(self, poll: float) -> NoReturn:
+        try:
+            while True:
+                try:
+                    await self._call(self._tracker.poll)
+                    active = await self._locked(lambda: {row.id for row in self._tracker.sessions("active")})
+                except Exception:
+                    log.exception("tracker poll failed")
+                    active = set(self._watches)
+                for session_id in active:
+                    if session_id not in self._watches or self._watches[session_id].done():
+                        self._watches[session_id] = asyncio.create_task(self._follow(session_id))
+                for session_id in set(self._watches) - active:
+                    self._watches.pop(session_id).cancel()
+                    if (check := self._checks.pop(session_id, None)) is not None:
+                        check.cancel()
+                await asyncio.sleep(poll)
+        finally:
+            # Stopped: nothing it started may go on reading or writing.
+            tasks = [*self._watches.values(), *self._checks.values()]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _locked[R](self, step: Callable[[], R]) -> R:
+        async with self._lock:
+            job = asyncio.ensure_future(asyncio.to_thread(step))
             try:
-                changes = await asyncio.shield(job)
+                return await asyncio.shield(job)
             except asyncio.CancelledError:
                 # A worker thread can't be stopped: let it finish before the lock lets another use the database.
                 await asyncio.wait([job])
                 raise
-        for change in changes:
-            emit(change)
 
-    async def check_later(session_id: str) -> None:
-        await asyncio.sleep(turn_quiet)
-        await call(lambda now: tracker.settle(session_id, now))
+    async def _call(self, step: Callable[[datetime], list[Change]]) -> None:
+        now = self._clock()
+        for change in await self._locked(lambda: step(now)):
+            self._emit(change)
 
-    async def follow(session_id: str) -> None:
+    async def _follow(self, session_id: str) -> None:
         try:
-            async for _ in tracker.watch(session_id):
-                await call(lambda now: tracker.tick(session_id, now))
-                if (earlier := checks.get(session_id)) is not None:
+            async for _ in await self._locked(lambda: self._tracker.watch(session_id)):
+                await self._call(lambda now: self._tracker.tick(session_id, now))
+                if (earlier := self._checks.get(session_id)) is not None:
                     earlier.cancel()
-                checks[session_id] = asyncio.create_task(check_later(session_id))
+                self._checks[session_id] = asyncio.create_task(self._check_later(session_id))
         except (CaptureError, KeyError) as error:
             log.warning("watch on %s ended: %s", session_id, error)  # the next poll opens it again
+        except Exception:
+            log.exception("watch on %s failed", session_id)
 
-    try:
-        while True:
-            try:
-                await call(tracker.poll)
-            except Exception:
-                log.exception("tracker poll failed")
-            active = {row.id for row in tracker.sessions("active")}
-            for session_id in active:
-                if session_id not in watches or watches[session_id].done():
-                    watches[session_id] = asyncio.create_task(follow(session_id))
-            for session_id in set(watches) - active:
-                watches.pop(session_id).cancel()
-            await asyncio.sleep(poll)
-    finally:
-        # Stopped: nothing it started may go on reading or writing.
-        tasks = [*watches.values(), *checks.values()]
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+    async def _check_later(self, session_id: str) -> None:
+        try:
+            await asyncio.sleep(self._turn_quiet)
+            await self._call(lambda now: self._tracker.settle(session_id, now))
+        except Exception:
+            log.exception("turn end check on %s failed", session_id)  # the next poll settles it
+        finally:
+            if self._checks.get(session_id) is asyncio.current_task():
+                del self._checks[session_id]
 
 
 TEXT_FIELDS = tuple(
@@ -378,7 +424,7 @@ TEXT_FIELDS = tuple(
 
 def _store(db: sqlite3.Connection, row: Tracked) -> None:
     db.execute(
-        "INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             row.id,
             row.feed,
@@ -394,7 +440,8 @@ def _store(db: sqlite3.Connection, row: Tracked) -> None:
             row.tail,
             row.last_ordinal,
             row.ends_turn,
-            row.turn_ended_at,
+            row.answer,
+            row.turn_ended,
             row.changed_at.isoformat(),
             row.active_at.isoformat(),
         ),
@@ -409,6 +456,11 @@ def _tracked(row: sqlite3.Row) -> Tracked:
         changed_at=datetime.fromisoformat(row["changed_at"]),
         active_at=datetime.fromisoformat(row["active_at"]),
     )
+
+
+def _gone(error: CaptureError) -> bool:
+    """agentsview's 404, or a session folder Copilot CLI's reader no longer finds."""
+    return error.status == httpx.codes.NOT_FOUND or isinstance(error.__cause__, FileNotFoundError)
 
 
 def _meta(meta: SessionMeta | None) -> SessionMeta:
@@ -469,6 +521,11 @@ def _ends_turn(messages: Sequence[Message]) -> bool | None:
     if not said:
         return None
     return said[-1].role == "assistant" and not said[-1].tool_calls and bool(said[-1].content)
+
+
+def _answer(messages: Sequence[Message]) -> str | None:
+    said = [message for message in messages if not message.is_system]
+    return _hash(said[-1:]) if said else None
 
 
 def _or(value: bool | None, otherwise: bool) -> bool:

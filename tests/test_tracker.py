@@ -18,7 +18,7 @@ import pytest
 
 from agent_fabric.capture import AgentsviewSource, CaptureError, Message, SessionMeta, Transcript
 from agent_fabric.copilot import CopilotSource
-from agent_fabric.tracker import Change, Feed, Tracker, connect, run
+from agent_fabric.tracker import SCHEMA, Change, Feed, Tracker, connect, run
 
 FIXTURES = Path(__file__).parent / "fixtures"
 T0 = datetime(2026, 11, 20, 9, 0, tzinfo=UTC)
@@ -36,6 +36,7 @@ class Source:
         self.down: str | None = None
         self.unreadable: set[str] = set()
         self.reads: list[tuple[str, int]] = []
+        self.attempts = 0
         self.ticks: dict[str, asyncio.Queue[None]] = {}
 
     def add(self, sid: str, agent: str = "claude", **fields: Any) -> None:
@@ -57,6 +58,9 @@ class Source:
         return self.metas[session_id]
 
     def messages(self, session_id: str, from_ordinal: int) -> Transcript:
+        self.attempts += 1
+        if session_id not in self.texts:
+            raise CaptureError(f"agentsview: HTTP 404: no session {session_id}", 404)
         if self.down or session_id in self.unreadable:
             raise CaptureError(self.down or "unreadable")
         self.reads.append((session_id, from_ordinal))
@@ -212,6 +216,30 @@ def test_a_system_message_after_the_answer_keeps_the_turn_end(db: sqlite3.Connec
     source.say("s1", "user", "<hook output>", T0 + SECOND, is_system=True)
     t.poll(T0 + SECOND)
     assert kinds(t.poll(T0 + 10 * SECOND)) == [("turn_end", "s1")]
+
+
+def test_a_system_message_after_a_turns_end_doesnt_end_it_again(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1")
+    turn(source, "s1", T0)
+    t = tracker(db, feed(source))
+    t.poll(T0)
+    assert kinds(t.poll(T0 + 10 * SECOND)) == [("turn_end", "s1")]
+    source.say("s1", "user", "<hook output>", T0 + 20 * SECOND, is_system=True)
+    t.poll(T0 + 20 * SECOND)
+    assert t.poll(T0 + 30 * SECOND) == []
+
+
+def test_a_reparse_of_the_same_messages_doesnt_end_the_turn_again(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1")
+    turn(source, "s1", T0)
+    t = tracker(db, feed(source))
+    t.poll(T0)
+    assert kinds(t.poll(T0 + 10 * SECOND)) == [("turn_end", "s1")]
+    source.revisions["s1"] = "2"
+    source.metas["s1"] = source.metas["s1"].model_copy(update={"transcript_revision": "2"})
+    t.poll(T0 + MINUTE)
+    assert t.poll(T0 + 2 * MINUTE) == []
+    assert source.reads[-1] == ("s1", 0)
 
 
 def test_a_session_unchanged_in_its_listing_isnt_read_again(db: sqlite3.Connection, source: Source) -> None:
@@ -473,6 +501,43 @@ def test_a_restart_reads_each_listed_session_again_before_settling_it(tmp_path: 
     assert source.reads == [("s1", 0), ("s1", 1)]
 
 
+def test_a_session_removed_from_its_source_finalizes_once_quiet(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1")
+    turn(source, "s1", T0)
+    t = tracker(db, feed(source))
+    t.poll(T0)
+    t.tick("s1", T0 + MINUTE)
+    del source.metas["s1"], source.texts["s1"]
+    t.tick("s1", T0 + 2 * MINUTE)
+    assert t.poll(T0 + 3 * MINUTE) == []
+    assert kinds(t.poll(T0 + 31 * MINUTE)) == [("finalized", "s1")]
+    assert source.attempts == 3  # asked once: a gone session isn't asked again
+
+
+def test_a_session_unreadable_for_longer_than_a_listing_looks_back_finalizes(
+    db: sqlite3.Connection, source: Source
+) -> None:
+    source.add("s1")
+    turn(source, "s1", T0)
+    t = tracker(db, feed(source))
+    t.poll(T0)
+    source.unreadable.add("s1")
+    t.tick("s1", T0 + MINUTE)
+    assert t.poll(T0 + 60 * MINUTE) == []
+    assert kinds(t.poll(T0 + 25 * 60 * MINUTE)) == [("finalized", "s1")]
+
+
+def test_a_session_whose_read_fails_is_asked_once_a_poll(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1")
+    turn(source, "s1", T0)
+    t = tracker(db, feed(source))
+    t.poll(T0)
+    source.unreadable.add("s1")
+    source.say("s1", "user", "more", T0 + MINUTE)
+    t.poll(T0 + MINUTE)
+    assert source.attempts == 2
+
+
 def test_a_restart_resumes_from_the_saved_cursor(tmp_path: Path, source: Source) -> None:
     source.add("s1")
     turn(source, "s1", T0)
@@ -557,6 +622,81 @@ def test_a_stopped_run_leaves_nothing_running(db: sqlite3.Connection, source: So
         assert asyncio.all_tasks() == {asyncio.current_task()}
 
     asyncio.run(scenario())
+
+
+class OneThread(sqlite3.Connection):
+    """A connection that records the threads that use it, and fails a use that overlaps another."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.threads: set[int] = set()
+        self.busy = threading.Lock()
+
+    def execute(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        if not self.busy.acquire(blocking=False):
+            raise AssertionError("two threads use the database at once")
+        try:
+            self.threads.add(threading.get_ident())
+            return super().execute(*args, **kwargs)
+        finally:
+            self.busy.release()
+
+
+def test_run_uses_the_database_only_from_its_worker_threads(tmp_path: Path, source: Source) -> None:
+    db = sqlite3.connect(tmp_path / "state.db", factory=OneThread, check_same_thread=False)
+    db.row_factory = sqlite3.Row
+    db.executescript(SCHEMA)
+    source.add("s1")
+    source.say("s1", "user", "build", T0)
+    t = tracker(db, feed(source))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(run(t, clock=lambda: T0, poll=0.01, turn_quiet=0.01))
+        while len(source.reads) < 2:
+            await asyncio.sleep(0.01)
+        for _ in range(5):
+            source.ticks["s1"].put_nowait(None)
+            await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert db.threads
+    assert threading.get_ident() not in db.threads
+
+
+class BrokenWatch(Source):
+    """A source whose watch fails with what isn't a capture error."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.opened: list[str] = []
+
+    async def watch(self, session_id: str) -> AsyncIterator[None]:
+        self.opened.append(session_id)
+        raise RuntimeError("stream broke")
+        yield None
+
+
+def test_a_watch_that_fails_is_logged_and_opened_again(
+    db: sqlite3.Connection, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = BrokenWatch()
+    source.add("s1")
+    source.say("s1", "user", "build", T0)
+    t = tracker(db, feed(source))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(run(t, clock=lambda: T0, poll=0.01))
+        while len(source.opened) < 2:
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert "watch on s1 failed" in caplog.text
 
 
 class SlowSource(Source):
