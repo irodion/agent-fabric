@@ -509,6 +509,21 @@ def test_a_session_unreadable_for_longer_than_a_listing_looks_back_finalizes(
     assert kinds(t.poll(T0 + 25 * 60 * MINUTE)) == ENDS
 
 
+def test_a_session_listed_as_active_isnt_settled_while_it_cant_be_read(
+    db: sqlite3.Connection, source: Source
+) -> None:
+    source.add("s1")
+    turn(source, "s1", T0)
+    t = tracker(db, feed(source))
+    t.poll(T0)  # then the tracker stops for a day
+    later = T0 + 25 * 60 * MINUTE
+    source.say("s1", "user", "more", later)
+    source.unreadable.add("s1")
+    assert t.poll(later + MINUTE) == []  # its listing says it worked a minute ago
+    assert t.poll(later + 60 * MINUTE) == []
+    assert kinds(t.poll(later + 25 * 60 * MINUTE)) == ENDS
+
+
 def test_a_session_removed_from_its_source_finalizes_once_quiet_unwatched(
     db: sqlite3.Connection, source: Source
 ) -> None:
