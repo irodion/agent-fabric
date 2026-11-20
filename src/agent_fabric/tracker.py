@@ -142,6 +142,10 @@ class Tracker:
         # result can fold into a message while the tracker is down, or while a read fails, without changing the
         # listing, and a watch only opens on a session still active.
         self._read_here: set[str] = set()
+        # Listed sessions their source then said it doesn't have, by listing: asked again when the listing changes.
+        self._missing: dict[str, str] = {}
+        # When to read a finalized session with a call not yet finished: the longer it has been still, the less often.
+        self._next_read: dict[str, datetime] = {}
 
     def poll(self, now: datetime) -> list[Change]:
         """List each feed's sessions, read the new and the changed, and settle every active one."""
@@ -160,18 +164,7 @@ class Tracker:
                 continue
             if self.offline.pop(feed.name, None) is not None:
                 log.info("capture back: %s", feed.name)
-            for meta in listed:
-                # agentsview's own runs and others it recognises as automated make no digest (§4.2, §8).
-                if meta.agent not in feed.agents or meta.is_automated:
-                    continue
-                row = self.session(meta.id)
-                # A session with a call not yet finished is read every poll, finalized or not: its result folds into
-                # the call's message without changing the listing, and only an active session's watch would say.
-                unfinished = row is not None and row.cursor <= row.last_ordinal
-                if row is not None and row.listing == _listing(meta) and row.id in self._read_here and not unfinished:
-                    continue
-                tried.add(meta.id)
-                changes += self._read_or_skip(feed, meta, row, now)
+            changes += self._read_listed(feed, listed, tried, now)
         for row in self.sessions("active"):
             # A feed that can't be asked has said nothing of its sessions: they aren't quiet, only unheard.
             owner = self._feeds.get(row.feed)
@@ -185,6 +178,32 @@ class Tracker:
                 # what was read, rather than keep it active and asked for ever.
                 self._unread.discard(row.id)
             changes += self.settle(row.id, now)
+        return changes
+
+    def _read_listed(self, feed: Feed, listed: list[SessionMeta], tried: set[str], now: datetime) -> list[Change]:
+        """Read the listed sessions that are new, or may have changed since they were last read."""
+        changes: list[Change] = []
+        for meta in listed:
+            # agentsview's own runs and others it recognises as automated make no digest (§4.2, §8).
+            if meta.agent not in feed.agents or meta.is_automated:
+                continue
+            row = self.session(meta.id)
+            # A session with a call not yet finished is read again though its listing is the same: its result folds
+            # into the call's message without changing the listing, and only an active session's watch would say.
+            # An active one every poll; a finalized one less often the longer it has been still, as an agent killed
+            # mid-call leaves one that never finishes.
+            unfinished = row is not None and row.cursor <= row.last_ordinal
+            if row is not None and row.listing == _listing(meta) and row.id in self._read_here:
+                if not unfinished:
+                    continue
+                if row.state == "finalized" and now < self._next_read.get(row.id, now):
+                    continue
+            if row is None and self._missing.get(meta.id) == _listing(meta):
+                continue
+            tried.add(meta.id)
+            changes += self._read_or_skip(feed, meta, row, now)
+            if row is not None and row.state == "finalized" and (read := self.session(row.id)) is not None:
+                self._read_later(read, now)
         return changes
 
     def tick(self, session_id: str, now: datetime) -> list[Change]:
@@ -230,6 +249,11 @@ class Tracker:
         try:
             changes = self._read(feed, meta, row, now)
         except CaptureError as error:
+            if row is None and meta is not None and _gone(error):
+                # Removed between the listing and the read: nothing to track.
+                log.debug("%s session %s is listed but gone: %s", feed.name, session_id, error)
+                self._missing[session_id] = _listing(meta)
+                return []
             if row is not None and _gone(error):
                 # Removed from its source: nothing more will come, so it settles on what was read.
                 log.info("%s session %s is gone: %s", feed.name, session_id, error)
@@ -243,6 +267,7 @@ class Tracker:
             self._read_here.discard(session_id)
             return []
         self._unread.discard(session_id)
+        self._missing.pop(session_id, None)
         self._read_here.add(session_id)
         return changes
 
@@ -306,19 +331,28 @@ class Tracker:
         return []
 
     def _settle(self, row: Tracked, now: datetime) -> list[Change]:
-        if now - row.active_at >= self._idle:
-            with self._db:
+        idle = now - row.active_at >= self._idle
+        changes = []
+        with self._db:
+            # A system message after the answer, such as a hook's, moves the last ordinal but not the answer. A
+            # session idle long enough to finalize is quiet too: its last turn ends first, as after a restart.
+            unended = row.ends_turn and row.answer != row.turn_ended
+            if unended and (idle or now - row.changed_at >= self._turn_quiet):
+                self._db.execute("UPDATE sessions SET turn_ended = answer WHERE id = ?", (row.id,))
+                changes.append(self._record(row, "turn_end", now))
+            if idle:
                 self._db.execute(
                     "UPDATE sessions SET state = 'finalized', finalizations = finalizations + 1 WHERE id = ?",
                     (row.id,),
                 )
-                return [self._record(row, "finalized", now)]
-        # A system message after the answer, such as a hook's, moves the last ordinal but not the answer.
-        if row.ends_turn and row.answer != row.turn_ended and now - row.changed_at >= self._turn_quiet:
-            with self._db:
-                self._db.execute("UPDATE sessions SET turn_ended = answer WHERE id = ?", (row.id,))
-                return [self._record(row, "turn_end", now)]
-        return []
+                changes.append(self._record(row, "finalized", now))
+                self._read_later(row, now)
+        return changes
+
+    def _read_later(self, row: Tracked, now: datetime) -> None:
+        """When to read a finalized session again for its unfinished call: a tenth of the time it has been still."""
+        if row.cursor <= row.last_ordinal:
+            self._next_read[row.id] = now + max(timedelta(seconds=POLL), (now - row.changed_at) / 10)
 
     def _record(self, row: Tracked, kind: Kind, now: datetime) -> Change:
         change = Change(kind, row.id, row.last_ordinal, now)
@@ -379,19 +413,28 @@ class _Runner:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _locked[R](self, step: Callable[[], R]) -> R:
+    async def _locked[R](self, step: Callable[[], R], then: Callable[[R], None] = lambda result: None) -> R:
+        """Run `step` in a worker thread under the lock, then `then` on its result, even if cancelled meanwhile."""
         async with self._lock:
             job = asyncio.ensure_future(asyncio.to_thread(step))
             try:
-                return await asyncio.shield(job)
+                result = await asyncio.shield(job)
             except asyncio.CancelledError:
-                # A worker thread can't be stopped: let it finish before the lock lets another use the database.
+                # A worker thread can't be stopped: let it finish before the lock lets another use the database, and
+                # pass on what it did, which is recorded already.
                 await asyncio.wait([job])
+                if not job.cancelled() and job.exception() is None:
+                    then(job.result())
                 raise
+            then(result)
+            return result
 
     async def _call(self, step: Callable[[datetime], list[Change]]) -> None:
-        now = self._clock()
-        for change in await self._locked(lambda: step(now)):
+        # The clock is read under the lock, so that one step's time never comes before the last one's.
+        await self._locked(lambda: step(self._clock()), then=self._emit_all)
+
+    def _emit_all(self, changes: list[Change]) -> None:
+        for change in changes:
             self._emit(change)
 
     async def _follow(self, session_id: str) -> None:
@@ -524,8 +567,9 @@ def _ends_turn(messages: Sequence[Message]) -> bool | None:
 
 
 def _answer(messages: Sequence[Message]) -> str | None:
+    """The last message not a system one, by what it says and when, not where: a re-parse can renumber it."""
     said = [message for message in messages if not message.is_system]
-    return _hash(said[-1:]) if said else None
+    return hashlib.sha256(said[-1].model_dump_json(exclude={"ordinal"}).encode()).hexdigest() if said else None
 
 
 def _or(value: bool | None, otherwise: bool) -> bool:

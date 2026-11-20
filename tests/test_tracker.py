@@ -150,10 +150,11 @@ def test_new_activity_reopens_a_finalized_session_which_finalizes_again(
     turn(source, "s1", T0)
     t = tracker(db, feed(source))
     t.poll(T0 + 3 * SECOND)
-    assert kinds(t.poll(T0 + 40 * MINUTE)) == [("finalized", "s1")]
+    # Never quiet for 5 s between polls: each turn ends as the session finalizes.
+    assert kinds(t.poll(T0 + 40 * MINUTE)) == [("turn_end", "s1"), ("finalized", "s1")]
     turn(source, "s1", T0 + 50 * MINUTE)
     assert kinds(t.poll(T0 + 51 * MINUTE)) == [("reopened", "s1")]
-    assert kinds(t.poll(T0 + 90 * MINUTE)) == [("finalized", "s1")]
+    assert kinds(t.poll(T0 + 90 * MINUTE)) == [("turn_end", "s1"), ("finalized", "s1")]
     row = t.session("s1")
     assert row is not None
     assert (row.finalizations, row.last_ordinal) == (2, 5)
@@ -164,6 +165,7 @@ def test_a_session_first_seen_long_quiet_finalizes_at_once(db: sqlite3.Connectio
     turn(source, "s1", T0)
     assert kinds(tracker(db, feed(source)).poll(T0 + 3 * MINUTE + 30 * MINUTE)) == [
         ("started", "s1"),
+        ("turn_end", "s1"),
         ("finalized", "s1"),
     ]
 
@@ -240,6 +242,26 @@ def test_a_reparse_of_the_same_messages_doesnt_end_the_turn_again(db: sqlite3.Co
     t.poll(T0 + MINUTE)
     assert t.poll(T0 + 2 * MINUTE) == []
     assert source.reads[-1] == ("s1", 0)
+
+
+def test_a_reparse_that_renumbers_the_answer_doesnt_end_its_turn_again(
+    db: sqlite3.Connection, source: Source
+) -> None:
+    source.add("s1")
+    turn(source, "s1", T0)
+    t = tracker(db, feed(source))
+    t.poll(T0)
+    assert kinds(t.poll(T0 + 10 * SECOND)) == [("turn_end", "s1")]
+    # Re-parsed with the tool result numbered apart: the same answer is now ordinal 3.
+    answer = source.texts["s1"][2]
+    source.texts["s1"][2:] = [
+        message("s1", 2, "user", None, T0 + SECOND, is_system=True),
+        answer.model_copy(update={"ordinal": 3}),
+    ]
+    source.revisions["s1"] = "2"
+    source.metas["s1"] = source.metas["s1"].model_copy(update={"transcript_revision": "2", "message_count": 4})
+    t.poll(T0 + MINUTE)
+    assert t.poll(T0 + 2 * MINUTE) == []
 
 
 def test_a_session_unchanged_in_its_listing_isnt_read_again(db: sqlite3.Connection, source: Source) -> None:
@@ -426,7 +448,7 @@ def test_a_feed_that_fails_is_offline_and_its_sessions_dont_finalize(
     assert t.offline == {"fake": "agentsview: connection refused"}
     assert caplog.text.count("capture offline") == 1
     source.down = None
-    assert kinds(t.poll(T0 + 42 * MINUTE)) == [("finalized", "s1")]
+    assert kinds(t.poll(T0 + 42 * MINUTE)) == [("turn_end", "s1"), ("finalized", "s1")]
     assert t.offline == {}
 
 
@@ -524,7 +546,7 @@ def test_a_session_unreadable_for_longer_than_a_listing_looks_back_finalizes(
     source.unreadable.add("s1")
     t.tick("s1", T0 + MINUTE)
     assert t.poll(T0 + 60 * MINUTE) == []
-    assert kinds(t.poll(T0 + 25 * 60 * MINUTE)) == [("finalized", "s1")]
+    assert kinds(t.poll(T0 + 25 * 60 * MINUTE)) == [("turn_end", "s1"), ("finalized", "s1")]
 
 
 def test_a_session_whose_read_fails_is_asked_once_a_poll(db: sqlite3.Connection, source: Source) -> None:
@@ -536,6 +558,35 @@ def test_a_session_whose_read_fails_is_asked_once_a_poll(db: sqlite3.Connection,
     source.say("s1", "user", "more", T0 + MINUTE)
     t.poll(T0 + MINUTE)
     assert source.attempts == 2
+
+
+def test_a_listed_session_its_source_doesnt_have_is_left_until_listed_again(
+    db: sqlite3.Connection, source: Source, caplog: pytest.LogCaptureFixture
+) -> None:
+    source.metas["s1"] = meta("s1", message_count=1)  # listed, its messages gone
+    t = tracker(db, feed(source))
+    assert t.poll(T0) == []
+    assert t.poll(T0 + 10 * SECOND) == []
+    assert source.attempts == 1
+    assert "can't read" not in caplog.text
+    source.add("s1")
+    source.say("s1", "user", "hi", T0 + MINUTE)
+    assert kinds(t.poll(T0 + MINUTE)) == [("started", "s1")]
+
+
+def test_a_finalized_session_stuck_on_a_call_is_read_less_often(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1")
+    source.say("s1", "user", "build", T0)
+    source.say("s1", "assistant", None, T0, tool_calls=[shell(None, "running")])
+    t = tracker(db, feed(source))
+    t.poll(T0)
+    t.poll(T0 + 40 * MINUTE)  # finalized; still for 40 min, so read again in 4
+    before = len(source.reads)
+    for seconds in range(10, 240, 10):
+        t.poll(T0 + 40 * MINUTE + seconds * SECOND)
+    assert len(source.reads) == before
+    t.poll(T0 + 44 * MINUTE)
+    assert len(source.reads) == before + 1
 
 
 def test_a_restart_resumes_from_the_saved_cursor(tmp_path: Path, source: Source) -> None:
@@ -558,7 +609,8 @@ def test_a_restart_reads_an_active_session_no_longer_listed_before_finalizing_it
     tracker(connect(tmp_path / "state.db"), feed(source)).poll(T0)
     turn(source, "s1", T0 + 60 * MINUTE)  # went on while the tracker was down, and then quiet for over a day
     again = tracker(connect(tmp_path / "state.db"), feed(source))
-    assert kinds(again.poll(T0 + 30 * 60 * MINUTE)) == [("finalized", "s1")]
+    # Its last turn ended while the tracker was down, and gets its turn end with the finalization.
+    assert kinds(again.poll(T0 + 30 * 60 * MINUTE)) == [("turn_end", "s1"), ("finalized", "s1")]
     row = again.session("s1")
     assert row is not None
     assert (row.last_ordinal, row.active_at) == (5, T0 + 60 * MINUTE + 2 * SECOND)
@@ -697,6 +749,48 @@ def test_a_watch_that_fails_is_logged_and_opened_again(
 
     asyncio.run(scenario())
     assert "watch on s1 failed" in caplog.text
+
+
+def test_a_stopped_run_still_passes_on_what_the_step_under_way_did(db: sqlite3.Connection) -> None:
+    source = SlowSource()
+    source.add("s1")
+    source.say("s1", "user", "build", T0)
+    t = tracker(db, feed(source))
+    seen: list[Change] = []
+
+    async def scenario() -> None:
+        task = asyncio.create_task(run(t, emit=seen.append, clock=lambda: T0, poll=3600))
+        while not source.reading.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        source.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert kinds(seen) == [("started", "s1")]
+
+
+def test_run_reads_the_clock_under_the_lock(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1")
+    source.say("s1", "user", "build", T0)
+    t = tracker(db, feed(source))
+    threads: set[int] = set()
+
+    def clock() -> datetime:
+        threads.add(threading.get_ident())
+        return T0
+
+    async def scenario() -> None:
+        task = asyncio.create_task(run(t, clock=clock, poll=0.01))
+        while len(threads) < 1 or len(source.reads) < 2:
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert threading.get_ident() not in threads
 
 
 class SlowSource(Source):
