@@ -375,9 +375,19 @@ text of a failed call, which agentsview drops (§4.1). The digest stores an exce
 - **Why a timeout:** no agent gives a reliable session-end signal (§2), so "finished" means "quiet for N
   minutes". The value is low-stakes: too short and a paused session finalizes and later reopens (one extra commit
   to the same file); too long and its digest arrives late. Config value, default 30 min.
-- `tracker` lists sessions active in the last 24 h (`active_since`) every 10 s, and sooner when `/api/v1/events`
-  says something changed, with `include_children=true` because agentsview files headless runs as children (§4.1),
-  and opens a `watch` for each ACTIVE one.
+- `tracker` lists sessions active in the last 24 h (`active_since`) every 10 s, with `include_children=true`
+  because agentsview files headless runs as children (§4.1), and opens a `watch` for each ACTIVE one. It reads a
+  session only when it is new, its listing changed (message count, last time, transcript revision) or its watch
+  ticked: a tool's result folds into the message that called it without changing the listing. For the same reason
+  it reads every listed session once after a start, after its source comes back, and after a read of it failed,
+  and it reads a session with a tool call not yet finished on every poll, finalized or not, until the result comes. `/api/v1/events`
+  isn't used: it coalesces to one event per 10 s and names no session (§4.1), so it says no more than the poll.
+- Each agent is read through one source: agentsview for Claude Code and Codex, Copilot CLI's own reader for Copilot
+  (§4.1), so a session agentsview also lists is read from one place. Sessions with `is_automated` are left out (§8).
+- **Quiet** is measured from the session's own timestamps (its messages' and its tool results'), and from when the
+  tracker saw a change only where the change carries none. So a session that went on while fabricd was down
+  finalizes from its real last activity, not from the restart. While a source can't be asked, its sessions don't
+  finalize: they aren't quiet, only unheard.
 - **Headless runs** (`claude -p` and SDK runs, `codex exec`, `copilot -p`, `cursor-agent -p`) get a local digest
   only, indexed for `kb` and never committed, unless the project is also on the `[publish] headless` list (§4.5).
   Scripts and benchmarks make them in bulk: 1,324 of the 1,359 Claude Code sessions on the devbox are headless, most
@@ -389,7 +399,11 @@ text of a failed call, which agentsview drops (§4.1). The digest stores an exce
 - **Finalize**: write the digest, commit it. A reopened session rewrites the same digest file on its next
   finalization (new commit). The digest is a pure function of the session's messages + git snapshots, so
   regeneration is byte-stable.
-- Per-session cursor (`last_ordinal`) is persisted in `state.db`, so restarts resume without reprocessing.
+- Per-session cursor is persisted in `state.db`, so restarts resume without reprocessing. It stands past the last
+  message, or at the first message with a tool call not yet finished, whose result will fold into it. A new
+  transcript revision means agentsview re-parsed the session, and the next read starts over.
+- The tracker appends `started`, `turn_end`, `finalized` and `reopened` to a table in `state.db`, numbered, so the
+  digester and the panel each read on from their own place and a restart loses none.
 
 ### 4.4 Digest
 
@@ -1368,7 +1382,7 @@ neither agentsview nor fabricd, so a one-week trial in one or two projects runs 
 `kb ingest` and `kb lint` on the `codex` backend follow, for the same reason (§4.7). They are built and first ran on a
 real model on 2026-11-12; their daily timer followed (§5), and `kb lint`'s summary check comes with `kb prune`. Then
 CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.1 (2026-11-19, §4.1); adapter,
-normalizer, tracker, digester with allow list/redaction/gate/commit, for the CLI agents: agentsview for Claude Code,
+normalizer and tracker (built); digester with allow list/redaction/gate/commit, for the CLI agents: agentsview for Claude Code,
 Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI + `kb mcp`; a prototype session
 for the panel layout, then the panel with rules only (incl. open loops and carry-over).
 

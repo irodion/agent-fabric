@@ -5,7 +5,7 @@
 `docs/design.md` plans a memory shared across coding agents: session digests, a live panel, a wiki, an MCP server.
 Three parts are built: agent notes (`kb note`, `inbox`, `doctor`, `hook` and the `kb-note` skill), notes into the wiki
 (`kb ingest`, `kb lint`), and the CI that builds and vets agentsview. The agentsview adapter, the first piece of
-capture, is built too, with Copilot CLI's own reader. The rest of the design, including `fabricd` and the other `kb` commands, is still a plan (§9
+capture, is built too, with Copilot CLI's own reader, the normalizer and the tracker. The rest of the design, including `fabricd` and the other `kb` commands, is still a plan (§9
 has the phases).
 
 The design holds decisions, their reasons and dated findings from real agent runs. Details live in code and tests,
@@ -108,6 +108,10 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   an action with a kind, a command, an exit code and whether it failed. A table per agent (`ACTIONS`) says where it
   keeps its command and exit code; Codex's code-mode scripts split into one action per call inside. The tests run the
   recorded sessions through it, Copilot's through both sources.
+- **Tracking.** `tracker.Tracker` follows sessions through their sources (§4.3): `poll` lists and reads the changed,
+  `tick` reads one whose watch fired, and both settle turn ends and finalizations against the clock they're given.
+  Its rows and the changes it notices live in `state.db`; `tracker.run` drives it, with the sources read in a worker
+  thread. Nothing starts it yet: fabricd will.
 
 These hold across the code:
 
