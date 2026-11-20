@@ -387,13 +387,16 @@ text of a failed call, which agentsview drops (§4.1). The digest stores an exce
   used: it coalesces to one event per 10 s and names no session (§4.1), so it says no more than the poll.
 - Each agent is read through one source: agentsview for Claude Code and Codex, Copilot CLI's own reader for Copilot
   (§4.1), so a session agentsview also lists is read from one place. Sessions with `is_automated` are left out (§8).
-- **Quiet** is measured from the session's own timestamps (its messages' and its tool results'), and from when the
-  tracker saw a change only where the change carries none. So a session that went on while fabricd was down
-  finalizes from its real last activity, not from the restart. A transcript that reads the same without its
-  ordinals hasn't changed, so a re-parse is no activity. While a source can't be asked, its sessions don't
-  finalize: they aren't quiet, only unheard. Nor does a session whose read failed, until it's past the 24 h a
-  listing looks back. One its source no longer has (a 404, a removed folder), or whose source is no longer
-  configured, finalizes once quiet on what was read, unwatched.
+- **Quiet** is measured from the session's own timestamps (its messages' and its tool results'), so a session that
+  went on while fabricd was down finalizes from its real last activity, not from the restart. Only a newer time is
+  activity: a re-parse, or a field added to how a message reads, reopens nothing. A session with no times at all
+  (Cursor CLI's in agentsview) counts a change from when the tracker saw it. While a source can't be asked, its
+  sessions don't finalize: they aren't quiet, only unheard.
+- Each session's row keeps whether its last read failed or its source no longer has it (a 404, a removed folder),
+  so a restart knows too. A failed read is tried again every poll, and the session isn't settled on what was read
+  before, until it's past the 24 h a listing looks back. A gone session, like any other, is read again only when
+  its listing changes, and meanwhile finalizes once quiet, unwatched, as does one whose source is no longer
+  configured. An active session that drops out of the listing is read once more, for what it did before going quiet.
 - **Headless runs** (`claude -p` and SDK runs, `codex exec`, `copilot -p`, `cursor-agent -p`) get a local digest
   only, indexed for `kb` and never committed, unless the project is also on the `[publish] headless` list (§4.5).
   Scripts and benchmarks make them in bulk: 1,324 of the 1,359 Claude Code sessions on the devbox are headless, most
