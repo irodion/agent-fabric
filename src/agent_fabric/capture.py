@@ -38,6 +38,11 @@ class CaptureError(Exception):
         super().__init__(message)
         self.status = status  # agentsview's HTTP status, when it answered with an error
 
+    @property
+    def gone(self) -> bool:
+        """The session isn't there any more: agentsview's 404, or a session folder a reader no longer finds."""
+        return self.status == httpx.codes.NOT_FOUND or isinstance(self.__cause__, FileNotFoundError)
+
 
 class _Model(BaseModel):
     # agentsview adds fields between versions; the contract tests catch what the adapter reads changing.

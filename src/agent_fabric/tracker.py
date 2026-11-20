@@ -26,8 +26,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, NoReturn
 
-import httpx
-
 from agent_fabric.capture import CaptureError, CaptureSource, Message, SessionMeta
 from agent_fabric.gitinfo import git_project
 from agent_fabric.paths import state_db
@@ -256,7 +254,7 @@ class Tracker:
         try:
             return self._read(feed, session_id, meta, now, listing)
         except CaptureError as error:
-            if _gone(error):
+            if error.gone:
                 log.info("%s session %s is gone: %s", feed.name, session_id, error)
                 if self.session(session_id) is None:
                     self._missing[session_id] = listing or ""
@@ -280,7 +278,7 @@ class Tracker:
         active_at = row.active_at
         if listed_at is not None and row.state == "active":
             # Not for a finalized one: a read that succeeds later reopens it by its newer time.
-            active_at = max(active_at, listed_at if listed_at.tzinfo else listed_at.replace(tzinfo=UTC))
+            active_at = max(active_at, _utc(listed_at))
         with self._db:
             self._db.execute(
                 "UPDATE sessions SET status = ?, listing = COALESCE(?, listing), active_at = ? WHERE id = ?",
@@ -297,7 +295,8 @@ class Tracker:
         latest = _latest(messages)
         # The session's own times, as they are: capped at now, the same times read again would look newer.
         if row is None:
-            active_at = latest or _first(meta).ended_at or now
+            listed_at = _first(meta).ended_at
+            active_at = latest or (_utc(listed_at) if listed_at else now)
         elif latest is None:
             # A session with no times at all, such as Cursor CLI's in agentsview: a change happened about now.
             active_at = now if changed else row.active_at
@@ -462,11 +461,6 @@ def _tracked(row: sqlite3.Row) -> Tracked:
     )
 
 
-def _gone(error: CaptureError) -> bool:
-    """agentsview's 404, or a session folder Copilot CLI's reader no longer finds."""
-    return error.status == httpx.codes.NOT_FOUND or isinstance(error.__cause__, FileNotFoundError)
-
-
 def _first(meta: SessionMeta | None) -> SessionMeta:
     assert meta is not None, "a session is first read from its listing"
     return meta
@@ -505,7 +499,7 @@ def _answer(messages: Sequence[Message]) -> str | None:
 def _latest(messages: Iterable[Message]) -> datetime | None:
     """The latest time in the messages, theirs and their tool results'; one without a zone counts as UTC."""
     stamps = [
-        stamp if stamp.tzinfo else stamp.replace(tzinfo=UTC)
+        _utc(stamp)
         for message in messages
         for stamp in (
             message.timestamp,
@@ -514,6 +508,11 @@ def _latest(messages: Iterable[Message]) -> datetime | None:
         if stamp is not None
     ]
     return max(stamps) if stamps else None
+
+
+def _utc(stamp: datetime) -> datetime:
+    """A time without a zone counts as UTC, so it compares with the clock's."""
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=UTC)
 
 
 def _hash(messages: Iterable[Message]) -> str:

@@ -68,7 +68,8 @@ class Source:
     def active_sessions(self, since: datetime) -> list[SessionMeta]:
         if self.down:
             raise CaptureError(self.down)
-        return [m for m in self.metas.values() if m.ended_at is None or m.ended_at >= since]
+        # agentsview filters on its side, whatever zone a time was written in.
+        return [m for m in self.metas.values() if m.ended_at is None or m.ended_at.replace(tzinfo=UTC) >= since]
 
     def session(self, session_id: str) -> SessionMeta:
         return self.metas[session_id]
@@ -522,6 +523,15 @@ def test_a_session_listed_as_active_isnt_settled_while_it_cant_be_read(
     assert t.poll(later + MINUTE) == []  # its listing says it worked a minute ago
     assert t.poll(later + 60 * MINUTE) == []
     assert kinds(t.poll(later + 25 * 60 * MINUTE)) == ENDS
+
+
+def test_a_listing_time_without_a_zone_counts_as_utc(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1", ended_at=T0.replace(tzinfo=None))  # its messages have no times of their own
+    source.say("s1", "user", "hi", None)
+    source.changed("s1", ended_at=T0.replace(tzinfo=None))
+    t = tracker(db, feed(source))
+    assert kinds(t.poll(T0)) == [("started", "s1")]
+    assert kinds(t.poll(T0 + 31 * MINUTE)) == [("finalized", "s1")]
 
 
 def test_a_session_removed_from_its_source_finalizes_once_quiet_unwatched(
