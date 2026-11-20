@@ -268,14 +268,23 @@ class Tracker:
         except Exception:
             # Whatever one session holds mustn't stop the others.
             log.exception("can't read %s session %s", feed.name, session_id)
-        self._mark(session_id, "unread", None)  # read again next poll, and not settled on what came before
+        # Read again next poll, and not settled on what came before. The listing's time is the session's own, so
+        # an active one isn't settled until a listing would no longer show that either.
+        self._mark(session_id, "unread", None, meta.ended_at if meta else None)
         return []
 
-    def _mark(self, session_id: str, status: str, listing: str | None) -> None:
+    def _mark(self, session_id: str, status: str, listing: str | None, listed_at: datetime | None = None) -> None:
+        row = self.session(session_id)
+        if row is None:
+            return
+        active_at = row.active_at
+        if listed_at is not None and row.state == "active":
+            # Not for a finalized one: a read that succeeds later reopens it by its newer time.
+            active_at = max(active_at, listed_at if listed_at.tzinfo else listed_at.replace(tzinfo=UTC))
         with self._db:
             self._db.execute(
-                "UPDATE sessions SET status = ?, listing = COALESCE(?, listing) WHERE id = ?",
-                (status, listing, session_id),
+                "UPDATE sessions SET status = ?, listing = COALESCE(?, listing), active_at = ? WHERE id = ?",
+                (status, listing, active_at.isoformat(), session_id),
             )
 
     def _read(

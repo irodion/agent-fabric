@@ -394,7 +394,7 @@ text of a failed call, which agentsview drops (§4.1). The digest stores an exce
   sessions don't finalize: they aren't quiet, only unheard.
 - Each session's row keeps whether its last read failed or its source no longer has it (a 404, a removed folder),
   so a restart knows too. A failed read is tried again every poll, and the session isn't settled on what was read
-  before, until it's past the 24 h a listing looks back. A gone session, like any other, is read again only when
+  before, until its last activity, the listing's time included, is past the 24 h a listing looks back. A gone session, like any other, is read again only when
   its listing changes, and meanwhile finalizes once quiet, unwatched, as does one whose source is no longer
   configured. An active session that drops out of the listing is read once more, for what it did before going quiet.
 - **Headless runs** (`claude -p` and SDK runs, `codex exec`, `copilot -p`, `cursor-agent -p`) get a local digest
