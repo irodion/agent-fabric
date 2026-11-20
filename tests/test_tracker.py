@@ -1,7 +1,8 @@
 """Seam: the tracker over capture sources, with a fixed clock (docs/design.md §4.3).
 
-Most tests drive a made-up source whose sessions they change between polls; the last ones run the live check's
-recorded sessions (2026-11-19) through agentsview's adapter and Copilot CLI's own reader."""
+Most tests drive a made-up source whose sessions they change between polls, raising its transcript revision on every
+change as agentsview does; the last ones run the live check's recorded sessions (2026-11-19) through agentsview's
+adapter and Copilot CLI's own reader."""
 
 import asyncio
 import json
@@ -32,22 +33,37 @@ class Source:
     def __init__(self) -> None:
         self.metas: dict[str, SessionMeta] = {}
         self.texts: dict[str, list[Message]] = {}
-        self.revisions: dict[str, str] = {}
         self.down: str | None = None
         self.unreadable: set[str] = set()
-        self.reads: list[tuple[str, int]] = []
+        self.broken: set[str] = set()  # fail with what isn't a capture error
+        self.reads: list[str] = []
         self.attempts = 0
         self.ticks: dict[str, asyncio.Queue[None]] = {}
 
     def add(self, sid: str, agent: str = "claude", **fields: Any) -> None:
-        self.metas[sid] = meta(sid, agent, **fields)
+        self.metas[sid] = meta(sid, agent, **({"transcript_revision": "0"} | fields))
         self.texts[sid] = []
-        self.revisions[sid] = "1"
 
     def say(self, sid: str, role: str, content: str | None, at: datetime | None, **fields: Any) -> None:
         ordinal = self.texts[sid][-1].ordinal + 1 if self.texts[sid] else 0
         self.texts[sid].append(message(sid, ordinal, role, content, at, **fields))
-        self.metas[sid] = self.metas[sid].model_copy(update={"message_count": len(self.texts[sid]), "ended_at": at})
+        self.changed(sid, ended_at=at)
+
+    def fold(self, sid: str, ordinal: int, **fields: Any) -> None:
+        """Change a message already there, as a tool's result folding into its call does."""
+        at = next(i for i, m in enumerate(self.texts[sid]) if m.ordinal == ordinal)
+        self.texts[sid][at] = Message.model_validate(self.texts[sid][at].model_dump() | fields)
+        self.changed(sid)
+
+    def reparse(self, sid: str, messages: list[Message]) -> None:
+        self.texts[sid] = messages
+        self.changed(sid)
+
+    def changed(self, sid: str, **fields: Any) -> None:
+        old = self.metas[sid]
+        revision = str(int(old.transcript_revision or 0) + 1)
+        update = {"message_count": len(self.texts[sid]), "transcript_revision": revision} | fields
+        self.metas[sid] = old.model_copy(update=update)
 
     def active_sessions(self, since: datetime) -> list[SessionMeta]:
         if self.down:
@@ -61,11 +77,13 @@ class Source:
         self.attempts += 1
         if session_id not in self.texts:
             raise CaptureError(f"agentsview: HTTP 404: no session {session_id}", 404)
+        if session_id in self.broken:
+            raise TypeError("can't compare offset-naive and offset-aware datetimes")
         if self.down or session_id in self.unreadable:
             raise CaptureError(self.down or "unreadable")
-        self.reads.append((session_id, from_ordinal))
+        self.reads.append(session_id)
         later = tuple(m for m in self.texts[session_id] if m.ordinal >= from_ordinal)
-        return Transcript(self.revisions[session_id] if later else None, later)
+        return Transcript(self.metas[session_id].transcript_revision if later else None, later)
 
     async def watch(self, session_id: str) -> AsyncIterator[None]:
         queue = self.ticks.setdefault(session_id, asyncio.Queue())
@@ -117,11 +135,14 @@ def kinds(changes: list[Change]) -> list[tuple[str, str]]:
     return [(change.kind, change.session_id) for change in changes]
 
 
-def turn(source: Source, sid: str, at: datetime) -> None:
+def turn(source: Source, sid: str, at: datetime, prompt: str = "run make", answer: str = "Done.") -> None:
     """A prompt, a command, and the agent's answer."""
-    source.say(sid, "user", "run make", at)
+    source.say(sid, "user", prompt, at)
     source.say(sid, "assistant", None, at + SECOND, tool_calls=[shell("ok", "completed")])
-    source.say(sid, "assistant", "Done.", at + 2 * SECOND)
+    source.say(sid, "assistant", answer, at + 2 * SECOND)
+
+
+ENDS = [("turn_end", "s1"), ("finalized", "s1")]
 
 
 # ── the lifecycle ─────────────────────────────────────────────────────────
@@ -151,10 +172,10 @@ def test_new_activity_reopens_a_finalized_session_which_finalizes_again(
     t = tracker(db, feed(source))
     t.poll(T0 + 3 * SECOND)
     # Never quiet for 5 s between polls: each turn ends as the session finalizes.
-    assert kinds(t.poll(T0 + 40 * MINUTE)) == [("turn_end", "s1"), ("finalized", "s1")]
+    assert kinds(t.poll(T0 + 40 * MINUTE)) == ENDS
     turn(source, "s1", T0 + 50 * MINUTE)
     assert kinds(t.poll(T0 + 51 * MINUTE)) == [("reopened", "s1")]
-    assert kinds(t.poll(T0 + 90 * MINUTE)) == [("turn_end", "s1"), ("finalized", "s1")]
+    assert kinds(t.poll(T0 + 90 * MINUTE)) == ENDS
     row = t.session("s1")
     assert row is not None
     assert (row.finalizations, row.last_ordinal) == (2, 5)
@@ -163,14 +184,10 @@ def test_new_activity_reopens_a_finalized_session_which_finalizes_again(
 def test_a_session_first_seen_long_quiet_finalizes_at_once(db: sqlite3.Connection, source: Source) -> None:
     source.add("s1")
     turn(source, "s1", T0)
-    assert kinds(tracker(db, feed(source)).poll(T0 + 3 * MINUTE + 30 * MINUTE)) == [
-        ("started", "s1"),
-        ("turn_end", "s1"),
-        ("finalized", "s1"),
-    ]
+    assert kinds(tracker(db, feed(source)).poll(T0 + 33 * MINUTE)) == [("started", "s1"), *ENDS]
 
 
-def test_a_turn_isnt_over_while_a_call_waits_for_its_result(db: sqlite3.Connection, source: Source) -> None:
+def test_a_turn_isnt_over_while_the_agent_calls_a_tool(db: sqlite3.Connection, source: Source) -> None:
     source.add("s1")
     source.say("s1", "user", "build", T0)
     source.say("s1", "assistant", "Building.", T0, tool_calls=[shell(None, "running")])
@@ -179,35 +196,29 @@ def test_a_turn_isnt_over_while_a_call_waits_for_its_result(db: sqlite3.Connecti
     assert t.poll(T0 + MINUTE) == []
 
 
-def test_a_call_still_running_is_read_again_until_its_result_folds_in(db: sqlite3.Connection, source: Source) -> None:
+def test_a_result_that_folds_in_is_read_from_the_listing_alone(db: sqlite3.Connection, source: Source) -> None:
     source.add("s1")
     source.say("s1", "user", "build", T0)
     source.say("s1", "assistant", None, T0, tool_calls=[shell(None, "running")])
     t = tracker(db, feed(source))
     t.poll(T0)
-    # The result folds into the message that made the call, which only its watch would tell.
-    source.texts["s1"][1] = message("s1", 1, "assistant", None, T0, tool_calls=[shell("ok", "completed")])
-    source.say("s1", "assistant", "Built.", T0 + MINUTE)
-    t.tick("s1", T0 + MINUTE)
-    assert source.reads == [("s1", 0), ("s1", 1)]
-    assert kinds(t.poll(T0 + MINUTE + 5 * SECOND)) == [("turn_end", "s1")]
+    t.poll(T0 + 10 * SECOND)
+    source.fold("s1", 1, tool_calls=[shell("ok", "completed")])
+    t.poll(T0 + 20 * SECOND)
+    assert source.reads == ["s1", "s1"]
     row = t.session("s1")
     assert row is not None
-    assert row.cursor == 3
+    assert row.changed_at == T0 + 20 * SECOND
 
 
-def test_a_command_that_printed_nothing_has_finished(db: sqlite3.Connection, source: Source) -> None:
+def test_a_call_that_never_finished_doesnt_hold_later_turns(db: sqlite3.Connection, source: Source) -> None:
     source.add("s1")
-    source.say("s1", "user", "touch it", T0)
-    quiet = shell(None) | {"result_events": [{"status": "", "content": "", "timestamp": T0.isoformat()}]}
-    source.say("s1", "assistant", None, T0, tool_calls=[quiet])
-    source.say("s1", "assistant", "Touched.", T0)
+    source.say("s1", "user", "build", T0)
+    source.say("s1", "assistant", None, T0, tool_calls=[shell(None)])  # interrupted: no result, ever
+    turn(source, "s1", T0 + MINUTE)
     t = tracker(db, feed(source))
-    t.poll(T0)
-    assert kinds(t.poll(T0 + 10 * SECOND)) == [("turn_end", "s1")]
-    row = t.session("s1")
-    assert row is not None
-    assert row.cursor == 3
+    t.poll(T0 + MINUTE)
+    assert kinds(t.poll(T0 + 2 * MINUTE)) == [("turn_end", "s1")]
 
 
 def test_a_system_message_after_the_answer_keeps_the_turn_end(db: sqlite3.Connection, source: Source) -> None:
@@ -231,19 +242,6 @@ def test_a_system_message_after_a_turns_end_doesnt_end_it_again(db: sqlite3.Conn
     assert t.poll(T0 + 30 * SECOND) == []
 
 
-def test_a_reparse_of_the_same_messages_doesnt_end_the_turn_again(db: sqlite3.Connection, source: Source) -> None:
-    source.add("s1")
-    turn(source, "s1", T0)
-    t = tracker(db, feed(source))
-    t.poll(T0)
-    assert kinds(t.poll(T0 + 10 * SECOND)) == [("turn_end", "s1")]
-    source.revisions["s1"] = "2"
-    source.metas["s1"] = source.metas["s1"].model_copy(update={"transcript_revision": "2"})
-    t.poll(T0 + MINUTE)
-    assert t.poll(T0 + 2 * MINUTE) == []
-    assert source.reads[-1] == ("s1", 0)
-
-
 def test_a_reparse_that_renumbers_the_answer_doesnt_end_its_turn_again(
     db: sqlite3.Connection, source: Source
 ) -> None:
@@ -253,58 +251,11 @@ def test_a_reparse_that_renumbers_the_answer_doesnt_end_its_turn_again(
     t.poll(T0)
     assert kinds(t.poll(T0 + 10 * SECOND)) == [("turn_end", "s1")]
     # Re-parsed with the tool result numbered apart: the same answer is now ordinal 3.
-    answer = source.texts["s1"][2]
-    source.texts["s1"][2:] = [
-        message("s1", 2, "user", None, T0 + SECOND, is_system=True),
-        answer.model_copy(update={"ordinal": 3}),
-    ]
-    source.revisions["s1"] = "2"
-    source.metas["s1"] = source.metas["s1"].model_copy(update={"transcript_revision": "2", "message_count": 4})
+    first, call, answer = source.texts["s1"]
+    hidden = message("s1", 2, "user", None, T0 + SECOND, is_system=True)
+    source.reparse("s1", [first, call, hidden, answer.model_copy(update={"ordinal": 3})])
     t.poll(T0 + MINUTE)
     assert t.poll(T0 + 2 * MINUTE) == []
-
-
-def test_a_session_unchanged_in_its_listing_isnt_read_again(db: sqlite3.Connection, source: Source) -> None:
-    source.add("s1")
-    turn(source, "s1", T0)
-    t = tracker(db, feed(source))
-    t.poll(T0)
-    t.poll(T0 + 10 * SECOND)
-    t.poll(T0 + 20 * SECOND)
-    assert source.reads == [("s1", 0)]
-    source.say("s1", "user", "more", T0 + 30 * SECOND)
-    t.poll(T0 + 30 * SECOND)
-    assert source.reads == [("s1", 0), ("s1", 3)]
-
-
-def test_a_reparsed_session_is_read_again_from_the_start(db: sqlite3.Connection, source: Source) -> None:
-    source.add("s1")
-    turn(source, "s1", T0)
-    t = tracker(db, feed(source))
-    t.poll(T0)
-    source.say("s1", "user", "more", T0 + MINUTE)
-    source.revisions["s1"] = "2"
-    t.poll(T0 + MINUTE)
-    assert source.reads == [("s1", 0), ("s1", 3), ("s1", 0)]
-
-
-def test_a_reparse_into_fewer_messages_starts_over_from_the_listings_revision(
-    db: sqlite3.Connection, source: Source
-) -> None:
-    source.add("s1")
-    turn(source, "s1", T0)
-    t = tracker(db, feed(source))
-    t.poll(T0)
-    # A read from the old cursor finds nothing, and so no revision: only the listing says it changed.
-    del source.texts["s1"][1:]
-    source.revisions["s1"] = "2"
-    source.metas["s1"] = source.metas["s1"].model_copy(update={"message_count": 1, "transcript_revision": "2"})
-    t.poll(T0 + MINUTE)
-    assert source.reads == [("s1", 0), ("s1", 0)]
-    row = t.session("s1")
-    assert row is not None
-    assert (row.last_ordinal, row.ends_turn, row.cursor, row.revision) == (0, False, 1, "2")
-    assert t.poll(T0 + 2 * MINUTE) == []  # no turn end for messages that are gone
 
 
 def test_a_reparse_that_numbers_a_new_turn_as_an_old_one_still_ends_it(
@@ -315,49 +266,49 @@ def test_a_reparse_that_numbers_a_new_turn_as_an_old_one_still_ends_it(
     t = tracker(db, feed(source))
     t.poll(T0)
     t.poll(T0 + 10 * SECOND)  # turn end at ordinal 2
-    # Re-parsed into one prompt and a new answer, numbered 0 to 2 again.
-    source.texts["s1"] = []
-    source.say("s1", "user", "again", T0 + MINUTE)
-    source.say("s1", "assistant", "Thinking.", T0 + MINUTE)
-    source.say("s1", "assistant", "Done again.", T0 + MINUTE)
-    source.revisions["s1"] = "2"
-    source.metas["s1"] = source.metas["s1"].model_copy(update={"transcript_revision": "2"})
+    source.reparse("s1", [])
+    turn(source, "s1", T0 + MINUTE, prompt="again", answer="Done again.")
     t.poll(T0 + MINUTE)
     assert kinds(t.poll(T0 + MINUTE + 10 * SECOND)) == [("turn_end", "s1")]
 
 
-def test_a_session_that_couldnt_be_read_isnt_settled_on_what_was_read_before(
-    db: sqlite3.Connection, source: Source
-) -> None:
+def test_two_turns_answered_alike_with_no_times_each_end(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1", "cursor")
+    t = tracker(db, feed(source, "cursor"))
+    source.say("s1", "user", "fix it", None)
+    source.say("s1", "assistant", "Done.", None)
+    t.poll(T0)
+    assert kinds(t.poll(T0 + 10 * SECOND)) == [("turn_end", "s1")]
+    source.say("s1", "user", "and the other", None)
+    source.say("s1", "assistant", "Done.", None)
+    t.poll(T0 + MINUTE)
+    assert kinds(t.poll(T0 + MINUTE + 10 * SECOND)) == [("turn_end", "s1")]
+
+
+def test_a_session_unchanged_in_its_listing_isnt_read_again(db: sqlite3.Connection, source: Source) -> None:
     source.add("s1")
     turn(source, "s1", T0)
     t = tracker(db, feed(source))
     t.poll(T0)
-    source.say("s1", "user", "more", T0 + 29 * MINUTE)
-    source.unreadable.add("s1")
-    assert t.poll(T0 + 31 * MINUTE) == []
-    assert t.tick("s1", T0 + 32 * MINUTE) == []
-    source.unreadable.clear()
-    t.tick("s1", T0 + 33 * MINUTE)
-    row = t.session("s1")
-    assert row is not None
-    assert (row.state, row.active_at) == ("active", T0 + 29 * MINUTE)
+    t.poll(T0 + 10 * SECOND)
+    t.poll(T0 + 20 * SECOND)
+    assert source.reads == ["s1"]
+    source.say("s1", "user", "more", T0 + 30 * SECOND)
+    t.poll(T0 + 30 * SECOND)
+    assert source.reads == ["s1", "s1"]
 
 
-def test_a_result_with_no_time_of_its_own_counts_from_when_it_was_seen(
-    db: sqlite3.Connection, source: Source
-) -> None:
+def test_a_reparse_that_changes_nothing_is_no_activity(db: sqlite3.Connection, source: Source) -> None:
     source.add("s1")
-    source.say("s1", "user", "build", T0)
-    source.say("s1", "assistant", None, T0, tool_calls=[shell(None, "running")])
+    turn(source, "s1", T0)
     t = tracker(db, feed(source))
     t.poll(T0)
-    # A 40-minute build: its result folds into the call's message, which keeps the call's time.
-    source.texts["s1"][1] = message("s1", 1, "assistant", None, T0, tool_calls=[shell("ok", "completed")])
-    assert t.tick("s1", T0 + 40 * MINUTE) == []
+    t.poll(T0 + 40 * MINUTE)
+    source.reparse("s1", list(source.texts["s1"]))
+    assert t.poll(T0 + 41 * MINUTE) == []
     row = t.session("s1")
     assert row is not None
-    assert (row.state, row.active_at) == ("active", T0 + 40 * MINUTE)
+    assert row.state == "finalized"
 
 
 def test_activity_comes_from_the_sessions_own_timestamps(db: sqlite3.Connection, source: Source) -> None:
@@ -374,15 +325,31 @@ def test_activity_comes_from_the_sessions_own_timestamps(db: sqlite3.Connection,
     assert row.active_at == T0 + 20 * MINUTE + 2 * SECOND
 
 
-def test_a_change_with_no_timestamp_counts_from_when_it_was_seen(db: sqlite3.Connection, source: Source) -> None:
+def test_a_change_with_no_time_of_its_own_counts_from_when_it_was_seen(
+    db: sqlite3.Connection, source: Source
+) -> None:
     source.add("s1")
-    source.say("s1", "user", "hi", None)
+    source.say("s1", "user", "build", T0)
+    source.say("s1", "assistant", None, T0, tool_calls=[shell(None, "running")])
     t = tracker(db, feed(source))
     t.poll(T0)
-    source.say("s1", "assistant", "Hello.", None)
-    t.poll(T0 + 20 * MINUTE)
-    assert kinds(t.poll(T0 + 45 * MINUTE)) == [("turn_end", "s1")]
-    assert kinds(t.poll(T0 + 50 * MINUTE)) == [("finalized", "s1")]
+    # A 40-minute build: its result folds into the call's message, which keeps the call's time.
+    source.fold("s1", 1, tool_calls=[shell("ok", "completed")])
+    assert t.tick("s1", T0 + 40 * MINUTE) == []
+    row = t.session("s1")
+    assert row is not None
+    assert (row.state, row.active_at) == ("active", T0 + 40 * MINUTE)
+
+
+def test_a_time_without_a_zone_counts_as_utc(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1")
+    source.say("s1", "user", "hi", datetime(2026, 11, 20, 9, 0))  # a source can give a time without a zone
+    source.metas["s1"] = source.metas["s1"].model_copy(update={"ended_at": T0})
+    t = tracker(db, feed(source))
+    t.poll(T0 + MINUTE)
+    row = t.session("s1")
+    assert row is not None
+    assert row.active_at == T0
 
 
 # ── which sessions ────────────────────────────────────────────────────────
@@ -412,7 +379,7 @@ def test_each_agent_is_read_through_its_own_feed(db: sqlite3.Connection) -> None
     t = tracker(db, feed(agentsview, "claude", name="agentsview"), feed(copilot, "copilot", name="copilot"))
     t.poll(T0)
     assert {row.id: row.feed for row in t.sessions()} == {"copilot:1": "copilot", "s1": "agentsview"}
-    assert agentsview.reads == [("s1", 0)]
+    assert agentsview.reads == ["s1"]
 
 
 def test_the_project_is_the_git_project_of_the_sessions_folder(
@@ -448,7 +415,7 @@ def test_a_feed_that_fails_is_offline_and_its_sessions_dont_finalize(
     assert t.offline == {"fake": "agentsview: connection refused"}
     assert caplog.text.count("capture offline") == 1
     source.down = None
-    assert kinds(t.poll(T0 + 42 * MINUTE)) == [("turn_end", "s1"), ("finalized", "s1")]
+    assert kinds(t.poll(T0 + 42 * MINUTE)) == ENDS
     assert t.offline == {}
 
 
@@ -459,81 +426,50 @@ def test_a_session_that_cant_be_read_doesnt_stop_the_others(db: sqlite3.Connecti
     t = tracker(db, feed(source))
     assert kinds(t.poll(T0)) == [("started", "good")]
     source.unreadable.clear()
-    source.say("bad", "user", "hi", T0)
     assert kinds(t.poll(T0 + SECOND)) == [("started", "bad")]
 
 
-def test_a_session_whose_watch_read_failed_is_read_again_by_the_next_poll(
+def test_any_error_in_one_session_leaves_the_others_and_the_next_poll(
+    db: sqlite3.Connection, source: Source, caplog: pytest.LogCaptureFixture
+) -> None:
+    source.add("bad")
+    source.add("good")
+    source.broken.add("bad")
+    t = tracker(db, feed(source))
+    assert kinds(t.poll(T0)) == [("started", "good")]
+    assert "TypeError" in caplog.text
+    source.broken.clear()
+    assert kinds(t.poll(T0 + SECOND)) == [("started", "bad")]
+
+
+def test_a_session_that_couldnt_be_read_isnt_settled_on_what_was_read_before(
     db: sqlite3.Connection, source: Source
 ) -> None:
-    source.add("s1")
-    source.say("s1", "user", "build", T0)
-    source.say("s1", "assistant", None, T0, tool_calls=[shell(None, "running")])
-    t = tracker(db, feed(source))
-    t.poll(T0)
-    source.texts["s1"][1] = message("s1", 1, "assistant", None, T0, tool_calls=[shell("ok", "completed")])
-    source.unreadable.add("s1")
-    t.tick("s1", T0 + MINUTE)
-    source.unreadable.clear()
-    t.poll(T0 + 2 * MINUTE)  # the listing hasn't changed: a result folded in
-    assert source.reads == [("s1", 0), ("s1", 1)]
-    row = t.session("s1")
-    assert row is not None
-    assert (row.cursor, row.active_at) == (2, T0 + 2 * MINUTE)
-
-
-def test_a_feed_back_from_an_outage_has_its_sessions_read_again(db: sqlite3.Connection, source: Source) -> None:
-    source.add("s1")
-    source.say("s1", "user", "build", T0)
-    source.say("s1", "assistant", "Building.", T0, tool_calls=[shell("started", "completed")])
-    t = tracker(db, feed(source))
-    t.poll(T0)
-    source.down = "connection refused"
-    t.poll(T0 + MINUTE)
-    source.texts["s1"][1] = message("s1", 1, "assistant", "Built.", T0)  # re-written, the listing the same
-    source.down = None
-    t.poll(T0 + 2 * MINUTE)
-    assert source.reads == [("s1", 0), ("s1", 2)]
-
-
-def test_a_finalized_session_with_a_call_unfinished_is_read_until_its_result_comes(
-    db: sqlite3.Connection, source: Source
-) -> None:
-    source.add("s1")
-    source.say("s1", "user", "build", T0)
-    source.say("s1", "assistant", None, T0, tool_calls=[shell(None, "running")])
-    t = tracker(db, feed(source))
-    t.poll(T0)
-    assert kinds(t.poll(T0 + 40 * MINUTE)) == [("finalized", "s1")]
-    source.texts["s1"][1] = message("s1", 1, "assistant", None, T0, tool_calls=[shell("ok", "completed")])
-    assert kinds(t.poll(T0 + 50 * MINUTE)) == [("reopened", "s1")]
-    t.poll(T0 + 51 * MINUTE)
-    assert source.reads == [("s1", 0), ("s1", 1), ("s1", 1)]  # finished: read again only when it changes
-
-
-def test_a_restart_reads_each_listed_session_again_before_settling_it(tmp_path: Path, source: Source) -> None:
-    source.add("s1")
-    source.say("s1", "user", "build", T0)
-    source.say("s1", "assistant", None, T0, tool_calls=[shell(None, "running")])
-    tracker(connect(tmp_path / "state.db"), feed(source)).poll(T0)
-    # While the tracker was down, the build's result folded in, which the listing doesn't show.
-    source.texts["s1"][1] = message("s1", 1, "assistant", None, T0, tool_calls=[shell("ok", "completed")])
-    again = tracker(connect(tmp_path / "state.db"), feed(source))
-    assert again.poll(T0 + 40 * MINUTE) == []
-    assert source.reads == [("s1", 0), ("s1", 1)]
-
-
-def test_a_session_removed_from_its_source_finalizes_once_quiet(db: sqlite3.Connection, source: Source) -> None:
     source.add("s1")
     turn(source, "s1", T0)
     t = tracker(db, feed(source))
     t.poll(T0)
-    t.tick("s1", T0 + MINUTE)
-    del source.metas["s1"], source.texts["s1"]
-    t.tick("s1", T0 + 2 * MINUTE)
-    assert t.poll(T0 + 3 * MINUTE) == []
-    assert kinds(t.poll(T0 + 31 * MINUTE)) == [("finalized", "s1")]
-    assert source.attempts == 3  # asked once: a gone session isn't asked again
+    source.say("s1", "user", "more", T0 + 29 * MINUTE)
+    source.unreadable.add("s1")
+    assert t.poll(T0 + 31 * MINUTE) == []
+    assert t.tick("s1", T0 + 32 * MINUTE) == []
+    source.unreadable.clear()
+    t.poll(T0 + 33 * MINUTE)  # its listing changed while it couldn't be read: read now
+    row = t.session("s1")
+    assert row is not None
+    assert (row.state, row.active_at) == ("active", T0 + 29 * MINUTE)
+
+
+def test_a_session_whose_read_fails_is_asked_once_a_poll(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1")
+    turn(source, "s1", T0)
+    t = tracker(db, feed(source))
+    t.poll(T0)
+    source.unreadable.add("s1")
+    source.say("s1", "user", "more", T0 + MINUTE)
+    t.poll(T0 + MINUTE)
+    t.poll(T0 + 2 * MINUTE)
+    assert source.attempts == 3
 
 
 def test_a_session_unreadable_for_longer_than_a_listing_looks_back_finalizes(
@@ -546,18 +482,22 @@ def test_a_session_unreadable_for_longer_than_a_listing_looks_back_finalizes(
     source.unreadable.add("s1")
     t.tick("s1", T0 + MINUTE)
     assert t.poll(T0 + 60 * MINUTE) == []
-    assert kinds(t.poll(T0 + 25 * 60 * MINUTE)) == [("turn_end", "s1"), ("finalized", "s1")]
+    assert kinds(t.poll(T0 + 25 * 60 * MINUTE)) == ENDS
 
 
-def test_a_session_whose_read_fails_is_asked_once_a_poll(db: sqlite3.Connection, source: Source) -> None:
+def test_a_session_removed_from_its_source_finalizes_once_quiet_unwatched(
+    db: sqlite3.Connection, source: Source
+) -> None:
     source.add("s1")
     turn(source, "s1", T0)
     t = tracker(db, feed(source))
     t.poll(T0)
-    source.unreadable.add("s1")
-    source.say("s1", "user", "more", T0 + MINUTE)
-    t.poll(T0 + MINUTE)
-    assert source.attempts == 2
+    del source.metas["s1"], source.texts["s1"]
+    assert t.poll(T0 + MINUTE) == [Change("turn_end", "s1", 2, T0 + MINUTE)]
+    assert t.watched() == set()
+    assert t.tick("s1", T0 + 2 * MINUTE) == []
+    assert kinds(t.poll(T0 + 31 * MINUTE)) == [("finalized", "s1")]
+    assert source.attempts == 2  # asked once after it went: a gone session isn't asked again
 
 
 def test_a_listed_session_its_source_doesnt_have_is_left_until_listed_again(
@@ -574,31 +514,26 @@ def test_a_listed_session_its_source_doesnt_have_is_left_until_listed_again(
     assert kinds(t.poll(T0 + MINUTE)) == [("started", "s1")]
 
 
-def test_a_finalized_session_stuck_on_a_call_is_read_less_often(db: sqlite3.Connection, source: Source) -> None:
-    source.add("s1")
-    source.say("s1", "user", "build", T0)
-    source.say("s1", "assistant", None, T0, tool_calls=[shell(None, "running")])
-    t = tracker(db, feed(source))
-    t.poll(T0)
-    t.poll(T0 + 40 * MINUTE)  # finalized; still for 40 min, so read again in 4
-    before = len(source.reads)
-    for seconds in range(10, 240, 10):
-        t.poll(T0 + 40 * MINUTE + seconds * SECOND)
-    assert len(source.reads) == before
-    t.poll(T0 + 44 * MINUTE)
-    assert len(source.reads) == before + 1
-
-
-def test_a_restart_resumes_from_the_saved_cursor(tmp_path: Path, source: Source) -> None:
+def test_a_session_whose_feed_was_removed_finalizes_unwatched(tmp_path: Path, source: Source) -> None:
     source.add("s1")
     turn(source, "s1", T0)
-    first = tracker(connect(tmp_path / "state.db"), feed(source))
-    first.poll(T0)
-    source.say("s1", "user", "more", T0 + MINUTE)
+    tracker(connect(tmp_path / "state.db"), feed(source, name="old")).poll(T0)
+    t = tracker(connect(tmp_path / "state.db"), feed(source, "codex", name="new"))
+    assert t.watched() == set()
+    assert kinds(t.poll(T0 + 40 * MINUTE)) == ENDS
+
+
+def test_a_restart_reads_what_changed_while_it_was_down(tmp_path: Path, source: Source) -> None:
+    source.add("s1")
+    turn(source, "s1", T0)
+    tracker(connect(tmp_path / "state.db"), feed(source)).poll(T0)
     again = tracker(connect(tmp_path / "state.db"), feed(source))
-    assert again.poll(T0 + MINUTE) == []
-    assert source.reads == [("s1", 0), ("s1", 3)]
-    assert [(n, c.kind) for n, c in again.changes()] == [(1, "started")]
+    assert kinds(again.poll(T0 + MINUTE)) == [("turn_end", "s1")]
+    assert source.reads == ["s1"]
+    source.say("s1", "user", "more", T0 + 2 * MINUTE)
+    again.poll(T0 + 2 * MINUTE)
+    assert source.reads == ["s1", "s1"]
+    assert [(n, c.kind) for n, c in again.changes()] == [(1, "started"), (2, "turn_end")]
 
 
 def test_a_restart_reads_an_active_session_no_longer_listed_before_finalizing_it(
@@ -610,7 +545,7 @@ def test_a_restart_reads_an_active_session_no_longer_listed_before_finalizing_it
     turn(source, "s1", T0 + 60 * MINUTE)  # went on while the tracker was down, and then quiet for over a day
     again = tracker(connect(tmp_path / "state.db"), feed(source))
     # Its last turn ended while the tracker was down, and gets its turn end with the finalization.
-    assert kinds(again.poll(T0 + 30 * 60 * MINUTE)) == [("turn_end", "s1"), ("finalized", "s1")]
+    assert kinds(again.poll(T0 + 30 * 60 * MINUTE)) == ENDS
     row = again.session("s1")
     assert row is not None
     assert (row.last_ordinal, row.active_at) == (5, T0 + 60 * MINUTE + 2 * SECOND)
