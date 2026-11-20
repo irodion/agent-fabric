@@ -15,6 +15,11 @@ def inbox_dir(env: Mapping[str, str]) -> Path:
     return _data_home(env) / "agent-fabric" / "inbox"
 
 
+def state_db(env: Mapping[str, str]) -> Path:
+    """fabricd's state: the tracker's sessions and changes, later loops and flags (docs/design.md §5)."""
+    return _data_home(env) / "agent-fabric" / "state.db"
+
+
 def wiki_dir(env: Mapping[str, str]) -> Path:
     """This machine's wiki repo (docs/design.md §4.6)."""
     return Path(env["HOME"]) / "wiki"
