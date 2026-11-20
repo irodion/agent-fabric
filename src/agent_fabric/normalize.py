@@ -255,10 +255,15 @@ def _codex(call: ToolCall) -> Iterator[Action]:
         # The code is in the call's own lines above `Output:`; below is the command's, which may say anything. The
         # oldest `shell` tool answered in JSON, the code in its `metadata`.
         metadata = (call.result_content or "").split("\nOutput:", 1)[0]
-        code, output = _json_answer(call.result_content)
+        answer = _json_answer(call.result_content)
+        if answer is None:
+            yield _action(call, command=command, exit_code=_code(CODEX_EXIT, metadata))
+            return
+        # A JSON answer gives its code in `metadata` or not at all: its `output` is the command's own text.
+        code, output = answer
         if output is not None:
             call = call.model_copy(update={"result_content": output})
-        yield _action(call, command=command, exit_code=code if code is not None else _code(CODEX_EXIT, metadata))
+        yield _action(call, command=command, exit_code=code)
         return
     yield from _codex_script(call)
 
@@ -320,14 +325,15 @@ def _codex_script(call: ToolCall) -> Iterator[Action]:
         yield _action(inner, command=command, exit_code=code, status=inner_status, patterns=paired)
 
 
-def _json_answer(content: str | None) -> tuple[int | None, str | None]:
-    """The exit code and output of the oldest `shell` tool's JSON answer: `{"output": …, "metadata": {…}}`."""
+def _json_answer(content: str | None) -> tuple[int | None, str | None] | None:
+    """The exit code and output of the oldest `shell` tool's JSON answer, `{"output": …, "metadata": {…}}`; None
+    for an answer in text."""
     try:
         answer = json.loads(content or "")
     except ValueError:
-        return None, None
+        return None
     if not isinstance(answer, dict) or not isinstance(answer.get("metadata"), dict):
-        return None, None
+        return None
     code = answer["metadata"].get("exit_code")
     output = answer.get("output")
     return (code if _is_int(code) else None), (output if isinstance(output, str) else None)
