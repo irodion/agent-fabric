@@ -274,7 +274,7 @@ class Tracker:
             cursor=next_cursor,
             tail=tail,
             last_ordinal=messages[-1].ordinal if messages else known.last_ordinal if known else -1,
-            ends_turn=_ends_turn(messages) if messages else known.ends_turn if known else False,
+            ends_turn=_or(_ends_turn(messages), known.ends_turn if known else False),
             turn_ended_at=known.turn_ended_at if known else None,  # a re-parse can number a new turn as an old one
             changed_at=now if changed else row.changed_at if row else now,
             active_at=active_at,
@@ -459,12 +459,20 @@ def _cursor(messages: Sequence[Message], cursor: int) -> int:
     return unfinished[0] if unfinished else messages[-1].ordinal + 1
 
 
-def _ends_turn(messages: Sequence[Message]) -> bool:
-    """§4.3's turn end, but for the quiet: the last message is the agent's text, and no call waits for its result."""
+def _ends_turn(messages: Sequence[Message]) -> bool | None:
+    """§4.3's turn end, but for the quiet: the last message is the agent's text, and no call waits for its result.
+    None when the messages say nothing of it: none read, or system messages alone, which follow what was read
+    before."""
     if any(_pending(call) for message in messages for call in message.tool_calls):
         return False
     said = [message for message in messages if not message.is_system]
-    return bool(said) and said[-1].role == "assistant" and not said[-1].tool_calls and bool(said[-1].content)
+    if not said:
+        return None
+    return said[-1].role == "assistant" and not said[-1].tool_calls and bool(said[-1].content)
+
+
+def _or(value: bool | None, otherwise: bool) -> bool:
+    return otherwise if value is None else value
 
 
 def _latest(messages: Iterable[Message], *, after: int) -> datetime | None:

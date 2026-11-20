@@ -204,6 +204,16 @@ def test_a_command_that_printed_nothing_has_finished(db: sqlite3.Connection, sou
     assert row.cursor == 3
 
 
+def test_a_system_message_after_the_answer_keeps_the_turn_end(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1")
+    turn(source, "s1", T0)
+    t = tracker(db, feed(source))
+    t.poll(T0)
+    source.say("s1", "user", "<hook output>", T0 + SECOND, is_system=True)
+    t.poll(T0 + SECOND)
+    assert kinds(t.poll(T0 + 10 * SECOND)) == [("turn_end", "s1")]
+
+
 def test_a_session_unchanged_in_its_listing_isnt_read_again(db: sqlite3.Connection, source: Source) -> None:
     source.add("s1")
     turn(source, "s1", T0)
