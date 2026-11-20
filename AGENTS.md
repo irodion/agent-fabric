@@ -108,8 +108,9 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   an action with a kind, a command, an exit code and whether it failed. A table per agent (`ACTIONS`) says where it
   keeps its command and exit code; Codex's code-mode scripts split into one action per call inside. The tests run the
   recorded sessions through it, Copilot's through both sources.
-- **Tracking.** `tracker.Tracker` follows sessions through their sources (§4.3): `poll` lists and reads the changed,
-  `tick` reads one whose watch fired, and both settle turn ends and finalizations against the clock they're given.
+- **Tracking.** `tracker.Tracker` follows sessions through their sources (§4.3): `poll` lists them and reads the
+  whole transcript of each whose listing changed, `tick` reads one whose watch fired, and both settle turn ends and
+  finalizations against the clock they're given. The listing stored with a session is what says to read it again.
   Its rows and the changes it notices live in `state.db`; `tracker.run` drives it, with the sources read in a worker
   thread. Nothing starts it yet: fabricd will.
 

@@ -377,37 +377,37 @@ text of a failed call, which agentsview drops (§4.1). The digest stores an exce
   to the same file); too long and its digest arrives late. Config value, default 30 min.
 - `tracker` lists sessions active in the last 24 h (`active_since`) every 10 s, with `include_children=true`
   because agentsview files headless runs as children (§4.1), and opens a `watch` for each ACTIVE one. It reads a
-  session only when it is new, its listing changed (message count, last time, transcript revision) or its watch
-  ticked: a tool's result folds into the message that called it without changing the listing. For the same reason
-  it reads every listed session once after a start, after its source comes back, and after a read of it failed,
-  and it reads a session with a tool call not yet finished again until the result comes: an active one every
-  poll, a finalized one every tenth of the time it has been still, since an agent killed mid-call leaves a call
-  that never finishes. `/api/v1/events`
-  isn't used: it coalesces to one event per 10 s and names no session (§4.1), so it says no more than the poll.
+  session's whole transcript when it is new, its listing changed, or its watch ticked, and keeps no cursor. The
+  listing shows every change: agentsview v0.46.1 raises a session's `transcript_revision` on every write to its
+  messages, a tool's result folding into the call's message included, and Copilot CLI's reader moves `ended_at`
+  with every event. So the listing stored with a session says when to read it again, after a restart or an outage
+  too, and a watch only says it sooner. A whole read costs a session's length each time it changes, which a local
+  request of 1,000 messages a page bears; a cursor into a transcript whose results fold back into old messages
+  and whose ordinals a re-parse can change took more rules than it saved (2026-11-20). `/api/v1/events` isn't
+  used: it coalesces to one event per 10 s and names no session (§4.1), so it says no more than the poll.
 - Each agent is read through one source: agentsview for Claude Code and Codex, Copilot CLI's own reader for Copilot
   (§4.1), so a session agentsview also lists is read from one place. Sessions with `is_automated` are left out (§8).
 - **Quiet** is measured from the session's own timestamps (its messages' and its tool results'), and from when the
   tracker saw a change only where the change carries none. So a session that went on while fabricd was down
-  finalizes from its real last activity, not from the restart. While a source can't be asked, its sessions don't
-  finalize: they aren't quiet, only unheard. Nor does a session whose read failed, until it's past the 24 h a listing looks
-  back; one its source no longer has (a 404, a removed folder) finalizes once quiet on what was read.
-- A turn end is keyed by the answer that ends it (what it says and when), not its ordinal, so a system message
-  after it (a hook's) or a re-parse, even one that renumbers it, doesn't end the turn again. A session that
-  finalizes with its last turn not yet ended gets that turn end first.
+  finalizes from its real last activity, not from the restart. A transcript that reads the same without its
+  ordinals hasn't changed, so a re-parse is no activity. While a source can't be asked, its sessions don't
+  finalize: they aren't quiet, only unheard. Nor does a session whose read failed, until it's past the 24 h a
+  listing looks back. One its source no longer has (a 404, a removed folder), or whose source is no longer
+  configured, finalizes once quiet on what was read, unwatched.
 - **Headless runs** (`claude -p` and SDK runs, `codex exec`, `copilot -p`, `cursor-agent -p`) get a local digest
   only, indexed for `kb` and never committed, unless the project is also on the `[publish] headless` list (§4.5).
   Scripts and benchmarks make them in bulk: 1,324 of the 1,359 Claude Code sessions on the devbox are headless, most
   from one benchmark project. Detection: `entrypoint = sdk-cli` (Claude Code) and `session_kind = non-interactive`
   (Codex). Copilot and Cursor show no marker yet (§4.1), so their `-p` runs count as interactive until one is found.
-- **Turn end** (heuristic): last message is assistant text with no pending tool call, and no change for 5 s. It
-  held in the headless runs of the live check (§4.1), where the agent exited within 2 s of that message;
-  interactive sessions are still to check. Codex alone also sets `termination_status`.
+- **Turn end** (heuristic): the last message that isn't a system one (a hook's output is) is assistant text with no
+  tool call, and no change for 5 s. It held in the headless runs of the live check (§4.1), where the agent exited
+  within 2 s of that message; interactive sessions are still to check. Codex alone also sets
+  `termination_status`. A turn end is keyed by the number of prompts before the answer and what the answer says,
+  not its ordinal: a re-parse can renumber it, and an agent can answer two prompts alike. A session that finalizes
+  with its last turn not yet ended gets that turn end first.
 - **Finalize**: write the digest, commit it. A reopened session rewrites the same digest file on its next
   finalization (new commit). The digest is a pure function of the session's messages + git snapshots, so
   regeneration is byte-stable.
-- Per-session cursor is persisted in `state.db`, so restarts resume without reprocessing. It stands past the last
-  message, or at the first message with a tool call not yet finished, whose result will fold into it. A new
-  transcript revision means agentsview re-parsed the session, and the next read starts over.
 - The tracker appends `started`, `turn_end`, `finalized` and `reopened` to a table in `state.db`, numbered, so the
   digester and the panel each read on from their own place and a restart loses none.
 
