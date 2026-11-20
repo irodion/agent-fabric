@@ -380,7 +380,9 @@ text of a failed call, which agentsview drops (§4.1). The digest stores an exce
   session only when it is new, its listing changed (message count, last time, transcript revision) or its watch
   ticked: a tool's result folds into the message that called it without changing the listing. For the same reason
   it reads every listed session once after a start, after its source comes back, and after a read of it failed,
-  and it reads a session with a tool call not yet finished on every poll, finalized or not, until the result comes. `/api/v1/events`
+  and it reads a session with a tool call not yet finished again until the result comes: an active one every
+  poll, a finalized one every tenth of the time it has been still, since an agent killed mid-call leaves a call
+  that never finishes. `/api/v1/events`
   isn't used: it coalesces to one event per 10 s and names no session (§4.1), so it says no more than the poll.
 - Each agent is read through one source: agentsview for Claude Code and Codex, Copilot CLI's own reader for Copilot
   (§4.1), so a session agentsview also lists is read from one place. Sessions with `is_automated` are left out (§8).
@@ -389,8 +391,9 @@ text of a failed call, which agentsview drops (§4.1). The digest stores an exce
   finalizes from its real last activity, not from the restart. While a source can't be asked, its sessions don't
   finalize: they aren't quiet, only unheard. Nor does a session whose read failed, until it's past the 24 h a listing looks
   back; one its source no longer has (a 404, a removed folder) finalizes once quiet on what was read.
-- A turn end is keyed by the answer that ends it, not its ordinal, so a system message after it (a hook's) or a
-  re-parse of the same messages doesn't end the turn again.
+- A turn end is keyed by the answer that ends it (what it says and when), not its ordinal, so a system message
+  after it (a hook's) or a re-parse, even one that renumbers it, doesn't end the turn again. A session that
+  finalizes with its last turn not yet ended gets that turn end first.
 - **Headless runs** (`claude -p` and SDK runs, `codex exec`, `copilot -p`, `cursor-agent -p`) get a local digest
   only, indexed for `kb` and never committed, unless the project is also on the `[publish] headless` list (§4.5).
   Scripts and benchmarks make them in bulk: 1,324 of the 1,359 Claude Code sessions on the devbox are headless, most
