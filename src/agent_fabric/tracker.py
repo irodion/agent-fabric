@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     headless INTEGER NOT NULL,
     state TEXT NOT NULL,          -- active | finalized
     finalizations INTEGER NOT NULL,
+    status TEXT NOT NULL,         -- ok | unread: its last read failed | gone: its source no longer has it
     listing TEXT NOT NULL,        -- what the listing said when it was last read: a change means read it again
     content TEXT NOT NULL,        -- a hash of the transcript as last read, without ordinals
     last_ordinal INTEGER NOT NULL,
@@ -97,6 +98,7 @@ class Tracked:
     headless: bool
     state: Literal["active", "finalized"]
     finalizations: int
+    status: Literal["ok", "unread", "gone"]
     listing: str
     content: str
     last_ordinal: int
@@ -139,9 +141,7 @@ class Tracker:
         self._turn_quiet = turn_quiet
         self._window = window
         self.offline: dict[str, str] = {}  # a feed's last error while it fails, for the panel's "capture offline"
-        self._unread: set[str] = set()  # sessions whose last read failed: what's known of them is out of date
-        self._gone: set[str] = set()  # sessions their source no longer has: nothing more will come
-        self._missing: dict[str, str] = {}  # listed, but gone when read: asked again only if the listing changes
+        self._missing: dict[str, str] = {}  # listed, but gone when first read: asked again if the listing changes
 
     def poll(self, now: datetime) -> list[Change]:
         """List each feed's sessions, read the new and the changed, and settle every active one."""
@@ -155,12 +155,9 @@ class Tracker:
             owner = self._feeds.get(row.feed)  # None: no longer configured, so it settles on what was read
             if owner is not None and owner.name in self.offline:
                 continue  # a feed that can't be asked has said nothing of its sessions: unheard, not quiet
-            if owner is not None and row.id not in listed and row.id not in self._gone | self._unread:
-                # Active when the tracker last looked, and no longer listed: read what it did before going quiet.
-                changes += self._read_or_skip(owner, row.id, None, now)
-            if row.id in self._unread and now - row.active_at >= self._window:
-                # Unreadable for longer than a listing looks back: settle it on what was read, not ask for ever.
-                self._unread.discard(row.id)
+            if owner is not None and row.id not in listed and row.listing != UNLISTED and row.status != "gone":
+                # Active when the tracker last looked, and no longer listed: read once what it did before going quiet.
+                changes += self._read_or_skip(owner, row.id, None, now, listing=UNLISTED)
             changes += self.settle(row.id, now)
         return changes
 
@@ -182,8 +179,11 @@ class Tracker:
                 continue
             listed.add(meta.id)
             row = self.session(meta.id)
-            if _listing(meta) != (row.listing if row else self._missing.get(meta.id)):
-                changes += self._read_or_skip(feed, meta.id, meta, now)
+            # A failed read is tried again every poll; a gone session, like any other, when its listing changes.
+            if _listing(meta) != (row.listing if row else self._missing.get(meta.id)) or (
+                row and row.status == "unread"
+            ):
+                changes += self._read_or_skip(feed, meta.id, meta, now, listing=_listing(meta))
             if meta.id in self._missing:
                 missing[meta.id] = self._missing[meta.id]
         return changes
@@ -192,14 +192,18 @@ class Tracker:
         """The session's watch says it changed: read it, and settle it."""
         row = self.session(session_id)
         feed = self._feeds.get(row.feed) if row else None
-        if row is None or feed is None or session_id in self._gone:
+        if row is None or feed is None or row.status == "gone":
             return []
-        return self._read_or_skip(feed, session_id, None, now) + self.settle(session_id, now)
+        return self._read_or_skip(feed, session_id, None, now, listing=None) + self.settle(session_id, now)
 
     def settle(self, session_id: str, now: datetime) -> list[Change]:
         """A turn end or finalization due by now, without reading: for `run`'s check once a change has gone quiet."""
         row = self.session(session_id)
-        if row is None or row.state != "active" or row.feed in self.offline or row.id in self._unread:
+        if row is None or row.state != "active" or row.feed in self.offline:
+            return []
+        if row.status == "unread" and now - row.active_at < self._window:
+            # Not settled on what was read before it changed, unless it has been unreadable for longer than a
+            # listing looks back: then whatever it did is out of reach.
             return []
         idle = now - row.active_at >= self._idle
         changes = []
@@ -218,7 +222,7 @@ class Tracker:
 
     def watched(self) -> set[str]:
         """The sessions worth a watch: active, on a feed the tracker has, and still in their source."""
-        return {row.id for row in self.sessions("active") if row.feed in self._feeds and row.id not in self._gone}
+        return {row.id for row in self.sessions("active") if row.feed in self._feeds and row.status != "gone"}
 
     def watch(self, session_id: str) -> AsyncIterator[None]:
         row = self.session(session_id)
@@ -245,46 +249,52 @@ class Tracker:
     def _quiet(self, row: Tracked, now: datetime) -> bool:
         return now - row.changed_at >= self._turn_quiet
 
-    def _read_or_skip(self, feed: Feed, session_id: str, meta: SessionMeta | None, now: datetime) -> list[Change]:
+    def _read_or_skip(
+        self, feed: Feed, session_id: str, meta: SessionMeta | None, now: datetime, *, listing: str | None
+    ) -> list[Change]:
+        """Read the session, and store `listing` with it (None: keep the stored one). A failure is stored too."""
         try:
-            changes = self._read(feed, session_id, meta, now)
+            return self._read(feed, session_id, meta, now, listing)
         except CaptureError as error:
             if _gone(error):
-                # Removed from its source: nothing more will come. A tracked one settles on what was read.
                 log.info("%s session %s is gone: %s", feed.name, session_id, error)
-                if meta is not None and self.session(session_id) is None:
-                    self._missing[session_id] = _listing(meta)
+                if self.session(session_id) is None:
+                    self._missing[session_id] = listing or ""
                 else:
-                    self._gone.add(session_id)
-                    self._unread.discard(session_id)
+                    # Nothing more will come: it settles on what was read, and is read again only if listed anew.
+                    self._mark(session_id, "gone", listing)
                 return []
             log.warning("can't read %s session %s: %s", feed.name, session_id, error)
         except Exception:
             # Whatever one session holds mustn't stop the others.
             log.exception("can't read %s session %s", feed.name, session_id)
-        else:
-            self._unread.discard(session_id)
-            self._gone.discard(session_id)
-            self._missing.pop(session_id, None)
-            return changes
-        # Not settled on what was read before it changed; its listing stays as it was, so the next poll asks again.
-        self._unread.add(session_id)
+        self._mark(session_id, "unread", None)  # read again next poll, and not settled on what came before
         return []
 
-    def _read(self, feed: Feed, session_id: str, meta: SessionMeta | None, now: datetime) -> list[Change]:
+    def _mark(self, session_id: str, status: str, listing: str | None) -> None:
+        with self._db:
+            self._db.execute(
+                "UPDATE sessions SET status = ?, listing = COALESCE(?, listing) WHERE id = ?",
+                (status, listing, session_id),
+            )
+
+    def _read(
+        self, feed: Feed, session_id: str, meta: SessionMeta | None, now: datetime, listing: str | None
+    ) -> list[Change]:
         row = self.session(session_id)
         messages = feed.source.messages(session_id, 0).messages
         content = _hash(messages)
         changed = row is None or content != row.content
         latest = _latest(messages)
+        # The session's own times, as they are: capped at now, the same times read again would look newer.
         if row is None:
-            active_at = min(latest or _first(meta).ended_at or now, now)
-        elif not changed:
-            active_at = row.active_at
+            active_at = latest or _first(meta).ended_at or now
+        elif latest is None:
+            # A session with no times at all, such as Cursor CLI's in agentsview: a change happened about now.
+            active_at = now if changed else row.active_at
         else:
-            # A change counts from its own time. One that carries none, such as a result Claude Code gives no time,
-            # happened about now; so does one whose times are all older, as when a re-parse changed how it reads.
-            active_at = min(latest, now) if latest and latest > row.active_at else now
+            # Only a newer time is activity: a re-parse, or a new field in how a message reads, isn't.
+            active_at = max(row.active_at, latest)
         new = Tracked(
             id=session_id,
             feed=feed.name,
@@ -294,7 +304,8 @@ class Tracker:
             headless=row.headless if row else _headless(_first(meta)),
             state="active" if row is None or active_at > row.active_at else row.state,
             finalizations=row.finalizations if row else 0,
-            listing=_listing(meta) if meta else row.listing if row else "",
+            status="ok",
+            listing=listing if listing is not None else row.listing if row else "",
             content=content,
             last_ordinal=messages[-1].ordinal if messages else -1,
             answer=_answer(messages),
@@ -452,6 +463,9 @@ def _first(meta: SessionMeta | None) -> SessionMeta:
     return meta
 
 
+UNLISTED = "unlisted"  # the listing stored with an active session read after it dropped out of the listing
+
+
 def _listing(meta: SessionMeta) -> str:
     return f"{meta.message_count}|{meta.ended_at}|{meta.transcript_revision}"
 
@@ -470,13 +484,13 @@ def _project(meta: SessionMeta) -> str:
 
 def _answer(messages: Sequence[Message]) -> str | None:
     """§4.3's turn end, but for the quiet: the last message not a system one is the agent's text, calling no tool.
-    It's named by how many prompts came before it and what it says: a re-parse can renumber it, and an agent can
-    answer two prompts alike."""
+    It's named by how many prompts came before it and its text: a re-parse can renumber it or change how a message
+    reads, and an agent can answer two prompts alike."""
     said = [message for message in messages if not message.is_system]
     if not said or said[-1].role != "assistant" or said[-1].tool_calls or not said[-1].content:
         return None
     prompts = sum(message.role == "user" for message in said)
-    return f"{prompts}:{_hash(said[-1:])}"
+    return f"{prompts}:{hashlib.sha256(said[-1].content.encode()).hexdigest()}"
 
 
 def _latest(messages: Iterable[Message]) -> datetime | None:

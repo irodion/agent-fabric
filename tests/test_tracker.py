@@ -325,20 +325,44 @@ def test_activity_comes_from_the_sessions_own_timestamps(db: sqlite3.Connection,
     assert row.active_at == T0 + 20 * MINUTE + 2 * SECOND
 
 
-def test_a_change_with_no_time_of_its_own_counts_from_when_it_was_seen(
-    db: sqlite3.Connection, source: Source
-) -> None:
+def test_a_result_that_folds_in_counts_from_its_own_time(db: sqlite3.Connection, source: Source) -> None:
     source.add("s1")
     source.say("s1", "user", "build", T0)
     source.say("s1", "assistant", None, T0, tool_calls=[shell(None, "running")])
     t = tracker(db, feed(source))
     t.poll(T0)
     # A 40-minute build: its result folds into the call's message, which keeps the call's time.
-    source.fold("s1", 1, tool_calls=[shell("ok", "completed")])
+    done = shell("ok") | {"result_events": [{"status": "completed", "timestamp": (T0 + 40 * MINUTE).isoformat()}]}
+    source.fold("s1", 1, tool_calls=[done])
     assert t.tick("s1", T0 + 40 * MINUTE) == []
     row = t.session("s1")
     assert row is not None
     assert (row.state, row.active_at) == ("active", T0 + 40 * MINUTE)
+
+
+def test_a_change_in_a_session_with_no_times_counts_from_when_it_was_seen(
+    db: sqlite3.Connection, source: Source
+) -> None:
+    source.add("s1", "cursor")
+    source.say("s1", "user", "fix it", None)
+    t = tracker(db, feed(source, "cursor"))
+    t.poll(T0)
+    source.say("s1", "assistant", "Fixed.", None)
+    t.poll(T0 + 20 * MINUTE)
+    assert kinds(t.poll(T0 + 45 * MINUTE)) == [("turn_end", "s1")]
+    assert kinds(t.poll(T0 + 50 * MINUTE)) == [("finalized", "s1")]
+
+
+def test_a_new_field_in_how_messages_read_reopens_nothing(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1")
+    turn(source, "s1", T0)
+    t = tracker(db, feed(source))
+    t.poll(T0 + 3 * SECOND)
+    t.poll(T0 + 40 * MINUTE)
+    # As after an agentsview upgrade, or a field added to the capture models: every message reads differently.
+    source.reparse("s1", [m.model_copy(update={"model": "claude-x"}) for m in source.texts["s1"]])
+    assert t.poll(T0 + 41 * MINUTE) == []
+    assert t.poll(T0 + 42 * MINUTE) == []
 
 
 def test_a_time_without_a_zone_counts_as_utc(db: sqlite3.Connection, source: Source) -> None:
@@ -512,6 +536,62 @@ def test_a_listed_session_its_source_doesnt_have_is_left_until_listed_again(
     source.add("s1")
     source.say("s1", "user", "hi", T0 + MINUTE)
     assert kinds(t.poll(T0 + MINUTE)) == [("started", "s1")]
+
+
+def test_a_watch_read_that_failed_is_tried_again_by_the_next_poll(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1")
+    source.say("s1", "user", "build", T0)
+    t = tracker(db, feed(source))
+    t.poll(T0)
+    source.say("s1", "assistant", "Built.", T0 + MINUTE)
+    t.poll(T0 + MINUTE)  # the listing is read, and stored
+    source.unreadable.add("s1")
+    t.tick("s1", T0 + MINUTE + SECOND)  # agentsview restarted: the watch's opening tick fails
+    source.unreadable.clear()
+    t.poll(T0 + 2 * MINUTE)  # the listing is the same
+    assert source.reads == ["s1", "s1", "s1"]
+    assert kinds(t.poll(T0 + 40 * MINUTE)) == [("finalized", "s1")]
+
+
+def test_a_tracked_session_still_listed_but_gone_is_read_only_when_listed_anew(
+    db: sqlite3.Connection, source: Source
+) -> None:
+    source.add("s1")
+    turn(source, "s1", T0)
+    t = tracker(db, feed(source))
+    t.poll(T0)
+    source.changed("s1")
+    del source.texts["s1"]  # its transcript gone, the listing not yet
+    t.poll(T0 + MINUTE)
+    t.poll(T0 + 2 * MINUTE)
+    t.poll(T0 + 3 * MINUTE)
+    assert source.attempts == 2
+    assert t.watched() == set()
+
+
+def test_an_active_session_no_longer_listed_is_read_once(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1")
+    source.say("s1", "user", "build", T0)
+    t = tracker(db, feed(source))
+    t.poll(T0)
+    source.metas["s1"] = source.metas["s1"].model_copy(update={"is_automated": True})  # no longer listed
+    t.poll(T0 + MINUTE)
+    t.poll(T0 + 2 * MINUTE)
+    t.poll(T0 + 3 * MINUTE)
+    assert source.reads == ["s1", "s1"]
+
+
+def test_a_gone_session_stays_gone_after_a_restart(tmp_path: Path, source: Source) -> None:
+    source.add("s1")
+    turn(source, "s1", T0)
+    first = tracker(connect(tmp_path / "state.db"), feed(source))
+    first.poll(T0)
+    del source.metas["s1"], source.texts["s1"]
+    first.poll(T0 + MINUTE)
+    again = tracker(connect(tmp_path / "state.db"), feed(source))
+    again.poll(T0 + 2 * MINUTE)
+    assert source.attempts == 2
+    assert again.watched() == set()
 
 
 def test_a_session_whose_feed_was_removed_finalizes_unwatched(tmp_path: Path, source: Source) -> None:
