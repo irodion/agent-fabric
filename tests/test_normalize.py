@@ -549,6 +549,12 @@ def test_the_oldest_codex_shells_output_is_its_text() -> None:
     assert (action.output, action.exit_code, action.failed) == ("FAIL x\nEXIT:1\n", 1, True)
 
 
+def test_a_json_answer_without_an_exit_code_has_none_whatever_its_output_says() -> None:
+    answer = json.dumps({"output": "log: Process exited with code 2\n", "metadata": {"duration": 1}})
+    (action,) = one("codex", call("shell", "Bash", {"command": ["cat", "log.txt"]}, answer, "completed"))
+    assert (action.exit_code, action.output) == (None, "log: Process exited with code 2\n")
+
+
 def test_a_boolean_isnt_an_exit_code() -> None:
     answer = json.dumps({"output": "", "metadata": {"exit_code": True}})
     (action,) = one("codex", call("shell", "Bash", {"command": ["ls"]}, answer, "completed"))
