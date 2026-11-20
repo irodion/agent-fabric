@@ -387,7 +387,10 @@ text of a failed call, which agentsview drops (§4.1). The digest stores an exce
 - **Quiet** is measured from the session's own timestamps (its messages' and its tool results'), and from when the
   tracker saw a change only where the change carries none. So a session that went on while fabricd was down
   finalizes from its real last activity, not from the restart. While a source can't be asked, its sessions don't
-  finalize: they aren't quiet, only unheard.
+  finalize: they aren't quiet, only unheard. Nor does a session whose read failed, until it's past the 24 h a listing looks
+  back; one its source no longer has (a 404, a removed folder) finalizes once quiet on what was read.
+- A turn end is keyed by the answer that ends it, not its ordinal, so a system message after it (a hook's) or a
+  re-parse of the same messages doesn't end the turn again.
 - **Headless runs** (`claude -p` and SDK runs, `codex exec`, `copilot -p`, `cursor-agent -p`) get a local digest
   only, indexed for `kb` and never committed, unless the project is also on the `[publish] headless` list (§4.5).
   Scripts and benchmarks make them in bulk: 1,324 of the 1,359 Claude Code sessions on the devbox are headless, most
