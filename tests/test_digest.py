@@ -798,3 +798,17 @@ def test_a_carriage_return_doesnt_end_the_quote() -> None:
     assert "\n## Commands\n" not in section(text, "Prompts")
     assert "> ## Commands\n> ok" in section(text, "Prompts")
     assert section(text, "Final message") == "> done\n> ## Errors\n"
+
+
+def test_a_coloured_runners_summary_and_errors_are_read() -> None:
+    out = (
+        "\x1b[31mFAILED\x1b[0m tests/test_a.py::test_x - assert 1 == 2\n"
+        "\x1b[31m========= \x1b[31m\x1b[1m1 failed\x1b[0m, \x1b[32m2 passed\x1b[0m"
+        "\x1b[31m in 0.12s\x1b[0m\x1b[31m ===\x1b[0m"
+    )
+    text = digest([bash(1, "scripts/run-tests", "Exit code 1\n" + out)])
+    assert (
+        section(text, "Tests")
+        == "- #1 pytest: failed (2 passed, 1 failed, 0 skipped); failing: tests/test_a.py::test_x\n"
+    )
+    assert "\x1b" not in section(text, "Commands")

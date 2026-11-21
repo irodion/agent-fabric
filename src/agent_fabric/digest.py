@@ -116,6 +116,8 @@ MARKERS = (
         ),
     ),
 )
+# A terminal's escapes, as a runner writes colours (`pytest --color=yes`, or under a PTY): CSI, OSC, and the rest.
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
 LINE_ENDS = re.compile(r"\r\n?")  # Markdown's, with `\n`: a bare `\r` ends a line too
 FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)$")  # Markdown's: at most 3 spaces in
 EXIT_HEADER = re.compile(r"Exit code \d+\s*$")
@@ -392,7 +394,7 @@ def _tests(ordinal: int, action: Action) -> Tests | None:
     is none, whatever the file says."""
     if shows_files(action.command):
         return None
-    out = action.output or ""
+    out = ANSI.sub("", action.output or "")
     found = _summary(out)
     kind, run = _run(action.command)
     if found is None and kind != "test":
@@ -584,7 +586,11 @@ def _final(said: Sequence[Message]) -> Message | None:
 
 def _first_error(output: str | None) -> str:
     # Not the `Exit code N` Claude Code starts a failed command's output with: the exit column has it.
-    lines = [line.strip() for line in (output or "").split("\n") if line.strip() and not EXIT_HEADER.match(line)]
+    lines = [
+        line.strip()
+        for line in ANSI.sub("", output or "").split("\n")
+        if line.strip() and not EXIT_HEADER.match(line)
+    ]
     found = next((line for line in lines if ERRORS.search(line)), lines[0] if lines else "")
     return found[:MAX_COMMAND]
 
