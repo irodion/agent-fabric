@@ -455,7 +455,7 @@ never cut, because it carries intent. Pasted blocks (logs, stack traces, code, d
 most of the bulk, most of the noise for the ingest LLM, and where accidental secrets and client code end up.
 
 **How it reads** (`digest.render`, 2026-11-21). Prompts and the final message are quoted (`> `), so no line of
-theirs reads as a section. A pasted block is one between a pair of fences, or one between blank lines, of more
+theirs reads as a section. The final message is the answer to the last prompt, none when that turn has none yet. A pasted block is one between a pair of fences, or one between blank lines, of more
 than 40 lines; many short typed paragraphs stay whole, and a fence with no pair is a typed line. A command's kind comes from what one of its commands starts with, outside quoted strings, after `&&`, `;`, a
 pipe or wrappers such as `uv run` or `timeout 60`, by the program's name without its folder: `cd x && uv run
 pytest` is a test, while `echo 'pytest'`, `cat pytest.ini` and `uv add pytest` aren't. A test run is one whose output
@@ -476,8 +476,10 @@ person at a terminal, which in porcelain commands changed paths and prefixes and
 and isn't a boundary: the agent already runs code in the same folder, so a repo's clean filters (git-lfs's) run as
 git runs them, and an LFS file reads as itself, not as its pointer. The session's commits are those committed since
 it was first seen, and the diff is measured from the parent of the earliest, or from HEAD: a rebase, pull or amend
-mid-session needs no base carried between snapshots, while a commit someone else made in that window and pulled in
-counts too. As
+mid-session needs no base carried between snapshots. The cost: a commit someone else made in that window and pulled
+in counts too, and so does an older unpushed commit that a rebase replays, since it gets a new date (2026-11-21
+review: kept, as anchoring on the first HEAD brought back the base's own cases). The digest lists the newest 500
+and counts the rest, and the diff is measured from the oldest all the same. As
 nothing refreshes the index, a file whose timestamp moved with no change shows in the plumbing's diff, and is left
 out by its empty diff. This is agent-agnostic. Caveat: edits I make by hand in the same tree during a session are attributed to it
 (labelled "working tree during session", not "agent wrote").

@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -416,7 +417,7 @@ def test_markers_name_their_file_whatever_diff_prefixes_the_user_set(repo: Path)
 
 
 def snapshot(**fields: Any) -> Snapshot:
-    empty = Snapshot(T0, "a" * 40, "a" * 40, "main", None, None, (), "", "", False, (), (), False)
+    empty = Snapshot(T0, "a" * 40, "a" * 40, "main", None, None, (), "", "", False, (), (), 0, False)
     return replace(empty, **fields)
 
 
@@ -577,3 +578,66 @@ def test_a_worktree_of_a_repo_whose_checkout_git_cant_name_has_none(repo: Path, 
     snap = take(linked, T0, T0)
     assert snap is not None
     assert (snap.worktree, snap.main) == (linked, None)  # git lists the store, not the checkout
+
+
+def test_a_start_with_no_zone_dates_the_file_as_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        naive = datetime(2026, 11, 21, 22, 0)
+        assert "/2026-11-21-claude-s1.md" in path(meta(), "p", naive)
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+def test_the_final_message_is_the_last_turns_or_none() -> None:
+    messages = [message(0, "user", "go"), message(1, "assistant", "Shall I proceed?"), message(2, "user", "yes")]
+    text = digest([*messages, bash(3, "make", "ok")])
+    assert section(text, "Final message") == ""
+    assert "ends_with_question: false" in front(text)["outcome"]
+
+
+def test_a_detached_head_names_no_branch() -> None:
+    text = digest([message(0, "user", "go")], [snapshot(branch=None)], git_branch="main")
+    assert front(text)["branch"] == "null"
+
+
+def test_a_cut_note_goes_above_the_commands_table() -> None:
+    messages = [message(0, "user", "go")] + [bash(i, f"cmd {i} " + "x" * 280, "ok") for i in range(1, 900)]
+    commands = section(digest(messages), "Commands").splitlines()
+    assert commands[0].startswith("[… ")
+    assert commands[1] == "| # | command | exit | kind | first error line |"
+
+
+def test_commits_past_the_listed_ones_are_counted_and_measured_from(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("agent_fabric.snapshot.MAX_COMMITS", 1)
+    start = git(repo, "rev-parse", "HEAD").strip()
+    for name in ("one", "two"):
+        (repo / f"{name}.py").write_text("")
+        git(repo, "add", ".")
+        git(repo, "commit", "-qm", name)
+    snap = take(repo, T0, T0)
+    assert snap is not None
+    assert (snap.base, snap.commits_unlisted, snap.files) == (start, 1, ("one.py", "two.py"))
+    assert [commit.split(" ", 1)[1] for commit in snap.commits] == ["two"]
+    assert section(digest([message(0, "user", "go")], [snap]), "Commits").startswith("1 earlier commits not shown.")
+
+
+@pytest.mark.parametrize(
+    "command", ["uv run --frozen pytest", "uv run -- pytest", "npx --yes jest", "timeout -k 5 60 pytest"]
+)
+def test_a_wrappers_flag_doesnt_hide_the_runner(command: str) -> None:
+    assert section(digest([bash(1, command, "Exit code 2\ncrashed")]), "Tests").startswith("- #1 ")
+
+
+def test_fences_pair_as_markdown_pairs_them() -> None:
+    typed = "\n\n".join(f"Point {i}." for i in range(30))
+    # A `~~~` inside a ``` block doesn't open a fence, so the last `~~~` closes nothing and the typed text stays.
+    mixed = "\n".join(["```markdown", "~~~", "a", "```", typed, "~~~"])
+    # A fence indented 4 spaces is code, not a fence.
+    indented = "\n".join(["    ```", typed, "    ```"])
+    for prompt in (mixed, indented):
+        assert "cut" not in section(digest([message(0, "user", prompt)]), "Prompts")
