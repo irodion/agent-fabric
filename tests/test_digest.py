@@ -775,3 +775,18 @@ def test_a_go_package_that_didnt_build_fails_the_run() -> None:
     out = "ok  \texample.test/good\t0.01s\nFAIL\texample.test/broken [build failed]\nFAIL\n"
     text = digest([bash(1, "go test ./... | tee test.log", out)])
     assert 'last_tests: "failed"' in front(text)["outcome"]
+
+
+def test_a_go_run_without_v_leaves_its_passes_unknown() -> None:
+    out = "ok  \texample.test/a\t0.12s\nok  \texample.test/b\t(cached)\n"
+    assert section(digest([bash(1, "go test ./...", out)]), "Tests") == "- #1 go test: passed (0 failed)\n"
+
+
+def test_a_snapshot_git_cant_read_is_none_not_clean(repo: Path) -> None:
+    (repo / ".gitattributes").write_text("*.py filter=broken\n")
+    before(repo, "add", ".gitattributes")
+    before(repo, "commit", "-qm", "attributes")
+    git(repo, "config", "filter.broken.clean", "false")
+    git(repo, "config", "filter.broken.required", "true")
+    (repo / "app.py").write_text("x = 2\n")
+    assert take(repo, T0, T0) is None

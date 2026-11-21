@@ -85,7 +85,7 @@ class Snapshot:
 
 def take(cwd: Path, at: datetime, since: datetime) -> Snapshot | None:
     """The folder's git state, with the commits made since `since` (the session's first sight); None outside a repo
-    with a commit.
+    with a commit, or when git can't read it (a clean filter that fails, a timeout): an empty read would look clean.
 
     Git runs from the repo's top folder, so a session in a subfolder gets the whole repo's changes, by their paths
     from the top."""
@@ -104,9 +104,11 @@ def take(cwd: Path, at: datetime, since: datetime) -> Snapshot | None:
         "--format=%P%x00%h %s",
         "HEAD",
     )
+    if made is None:
+        return None
     # All of them, oldest first, for the base; the digest names the newest MAX_COMMITS. Along first parents only,
     # so a merge, as `git pull` makes, is one commit, and not the commits it brought in.
-    commits = [line.split("\0", 1) for line in (made or "").split("\n") if "\0" in line][::-1]
+    commits = [line.split("\0", 1) for line in made.split("\n") if "\0" in line][::-1]
     base = head
     if commits and (parents := commits[0][0].split()):
         base = parents[0]
@@ -116,10 +118,15 @@ def take(cwd: Path, at: datetime, since: datetime) -> Snapshot | None:
     dirs = (_git(top, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir") or "").split("\n")
     linked = len(dirs) >= 2 and dirs[0] != dirs[1]
     branch = _git(top, "symbolic-ref", "--quiet", "--short", "HEAD")
-    diff, diff_cut = _read(top, MAX_DIFF, "diff-index", *DIFF, base) or ("", False)
-    changed = _numstat(_git(top, "diff-index", *NUMSTAT, base))
-    since_head = changed if base == head else _numstat(_git(top, "diff-index", *NUMSTAT, "HEAD"))
-    untracked = tuple(_split(_git(top, "ls-files", "-z", "--others", "--exclude-standard")))
+    read = _read(top, MAX_DIFF, "diff-index", *DIFF, base)
+    counted = _git(top, "diff-index", *NUMSTAT, base)
+    counted_since_head = counted if base == head else _git(top, "diff-index", *NUMSTAT, "HEAD")
+    listed = _git(top, "ls-files", "-z", "--others", "--exclude-standard")
+    if not base or read is None or counted is None or counted_since_head is None or listed is None:
+        return None
+    diff, diff_cut = read
+    changed, since_head = _numstat(counted), _numstat(counted_since_head)
+    untracked = tuple(_split(listed))
     return Snapshot(
         at=at,
         base=base,

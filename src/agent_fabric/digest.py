@@ -423,11 +423,13 @@ def _summary(out: str) -> tuple[str, dict[str, int], list[str]] | None:
         runs = GO_TESTS.findall(out)
         failing = [name for state, name in runs if state == "FAIL"]
         packages_failed = any(state == "FAIL" for state in GO_PACKAGES.findall(out))
-        counts = {
-            "passed": sum(state == "PASS" for state, _ in runs),
-            "failed": max(len(failing), int(packages_failed)),
-            "skipped": sum(state == "SKIP" for state, _ in runs),
-        }
+        # A failing test prints its `--- FAIL` line either way, a passing or skipped one only under `-v`: without
+        # those lines, how many passed or were skipped is unknown, not 0.
+        counts = {"failed": max(len(failing), int(packages_failed))}
+        if any(state != "FAIL" for state, _ in runs):
+            counts |= {
+                state: sum(s == key for s, _ in runs) for state, key in (("passed", "PASS"), ("skipped", "SKIP"))
+            }
         return "go test", counts, failing
     if summaries := VITEST_SUMMARY.findall(out):
         return "vitest", _counts(summaries[-1]), VITEST_FAILED.findall(out)
