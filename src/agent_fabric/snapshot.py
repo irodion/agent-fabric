@@ -72,6 +72,7 @@ class Snapshot:
     diff_cut: bool
     untracked: tuple[str, ...]
     commits: tuple[str, ...]  # `<short sha> <subject>` committed since the session was first seen, oldest first
+    commits_unlisted: int  # made since then too, but older than the MAX_COMMITS listed
     uncommitted: bool  # the working tree differs from HEAD, or has untracked files
 
 
@@ -85,17 +86,18 @@ def take(cwd: Path, at: datetime, since: datetime) -> Snapshot | None:
     if found is None or len(lines := found.split("\n")) < 2:
         return None
     top, head = Path(lines[0]), lines[1]
-    stamp = since.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    since = since.astimezone(UTC) if since.tzinfo else since.replace(tzinfo=UTC)
+    stamp = since.strftime("%Y-%m-%dT%H:%M:%SZ")
     made = _git(
         top,
         "rev-list",
         "--no-commit-header",
-        f"--max-count={MAX_COMMITS}",
         f"--since={stamp}",
         "--format=%P%x00%h %s",
         "HEAD",
     )
-    commits = [line.split("\0", 1) for line in (made or "").split("\n") if "\0" in line][::-1]  # oldest first
+    # All of them, oldest first, for the base; the digest names the newest MAX_COMMITS.
+    commits = [line.split("\0", 1) for line in (made or "").split("\n") if "\0" in line][::-1]
     base = head
     if commits:
         parents = commits[0][0].split()
@@ -119,7 +121,8 @@ def take(cwd: Path, at: datetime, since: datetime) -> Snapshot | None:
         diff=diff[:MAX_DIFF],
         diff_cut=len(diff) > MAX_DIFF,
         untracked=untracked,
-        commits=tuple(subject for _, subject in commits),
+        commits=tuple(subject for _, subject in commits[-MAX_COMMITS:]),
+        commits_unlisted=max(len(commits) - MAX_COMMITS, 0),
         uncommitted=bool(untracked or since_head),
     )
 

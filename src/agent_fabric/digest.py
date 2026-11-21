@@ -72,6 +72,7 @@ COMMAND_KINDS = (
 QUOTED = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
 SEPARATORS = re.compile(r"&&|\|\||[;|&(){}\n]")
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*")
+VALUED = frozenset({"--with", "--with-editable", "--from", "--package", "--python", "--cache-dir", "--directory"})
 # What runs the command after it, past its own options: `uv run --frozen pytest`, `timeout 60 pytest`.
 WRAPPERS = re.compile(
     r"(?:uv (?:tool )?run|uvx|npx|bunx|pnpm (?:exec|dlx)|npm exec|yarn (?:dlx|exec)|poetry run|pdm run|hatch run"
@@ -96,7 +97,7 @@ MARKERS = (
         ),
     ),
 )
-FENCE = re.compile(r"\s*(`{3,}|~{3,})(?!.*\1)")  # an opening or closing fence, alone
+FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)$")  # Markdown's: at most 3 spaces in
 EXIT_HEADER = re.compile(r"Exit code \d+\s*$")
 HUNK = re.compile(r"^@@ -\S+ \+(\d+)(?:,\d+)? @@")
 
@@ -152,7 +153,7 @@ class _Section:
 
 def path(meta: SessionMeta, project: str, start: datetime) -> str:
     """`raw/sessions/<project>/<yyyy>/<mm>/<yyyy-mm-dd>-<agent>-<shortid>.md`, inside the wiki or the local folder."""
-    when = start.astimezone(UTC)
+    when = _utc(start)
     folder = "/".join(_segment(part) for part in project.split("/") if part.strip("./"))
     short = _segment(meta.id.rsplit(":", 1)[-1][:8])
     return f"raw/sessions/{folder or 'unknown'}/{when:%Y/%m}/{when:%Y-%m-%d}-{_segment(meta.agent)}-{short}.md"
@@ -184,7 +185,7 @@ def render(
         "agent": meta.agent,
         "project": project,
         "cwd": meta.cwd,
-        "branch": (last.branch if last else None) or meta.git_branch,
+        "branch": last.branch if last else meta.git_branch,  # a snapshot's None is a detached HEAD
         "worktree": _worktree(first),
         "head": {"start": last.base[:7], "end": last.head[:7]} if last else None,
         "time": {"start": _when(start), "end": _when(end), "active_min": _active_minutes(stamps)},
@@ -218,7 +219,7 @@ def render(
         _changes(first, last),
         _Section(
             "Commits",
-            (),
+            (f"{last.commits_unlisted} earlier commits not shown.",) if last and last.commits_unlisted else (),
             tuple(f"- {commit}" for commit in last.commits) if last else (),
             "[… {n} earlier commits cut]",
         ),
@@ -258,8 +259,7 @@ def _collapse(text: str, pointer: str) -> str:
 def _blocks(lines: list[str]) -> Iterable[list[str]]:
     """A fenced block whole, from a fence to the next one; otherwise lines between blank lines. A line that opens and
     closes a fence (```x```) is no fence, and nor is a last fence with none to close it."""
-    fences = [i for i, line in enumerate(lines) if FENCE.match(line)]
-    closing = dict(zip(fences[::2], fences[1::2], strict=False))
+    closing = _fences(lines)
     block: list[str] = []
     index = 0
     while index < len(lines):
@@ -279,6 +279,24 @@ def _blocks(lines: list[str]) -> Iterable[list[str]]:
         index += 1
     if block:
         yield block
+
+
+def _fences(lines: list[str]) -> dict[int, int]:
+    """Each opening fence's line and its closing one's, as Markdown pairs them: closed by the same character, at
+    least as many, with nothing after; a backtick fence's info has no backtick (```x``` is inline code)."""
+    pairs: dict[int, int] = {}
+    opened: tuple[int, str] | None = None
+    for index, line in enumerate(lines):
+        if not (match := FENCE.match(line)):
+            continue
+        fence, rest = match[1], match[2]
+        if opened is None:
+            if not (fence[0] == "`" and "`" in rest):
+                opened = (index, fence)
+        elif fence[0] == opened[1][0] and len(fence) >= len(opened[1]) and not rest.strip():
+            pairs[opened[0]] = index
+            opened = None
+    return pairs
 
 
 def _commands(session_id: str, shells: list[tuple[int, Action]]) -> _Section:
@@ -321,12 +339,15 @@ def _run(command: str | None) -> tuple[str, str]:
 
 
 def _past_options(words: list[str]) -> list[str]:
-    """A wrapper's words from the program it runs: past its options, a timeout's duration and `X=1`. A long option
-    with no `=` may take the next word as its value (`--with pytest`), so that word goes too."""
+    """A wrapper's words from the program it runs: past its options, a timeout's duration and `X=1`. The common
+    options that take the next word as their value (`--with pytest`) take it with them; any other is a flag
+    (`--frozen pytest`). `--` ends the options."""
     index = 0
     while index < len(words):
         word = words[index]
-        if word.startswith("--") and "=" not in word:
+        if word == "--":
+            return words[index + 1 :]
+        if word in VALUED:
             index += 2
         elif word.startswith("-") or ASSIGNMENT.fullmatch(word) or word[:1].isdigit():
             index += 1
@@ -489,9 +510,10 @@ def _fit(sections: list[_Section], room: int, session_id: str) -> str:
     def body() -> str:
         out = []
         for section in sections:
-            lines = list(section.head)
-            if cut[section.title]:
-                lines.append(section.cut.format(n=cut[section.title], session=session_id))
+            notice = [section.cut.format(n=cut[section.title], session=session_id)] if cut[section.title] else []
+            # Above a table, which a line without a pipe would join as a row; else after the section's head.
+            table = bool(section.head) and section.head[0].startswith("|")
+            lines = [*notice, *section.head] if table else [*section.head, *notice]
             lines += entries[section.title]
             out.append(f"## {section.title}\n" + ("\n".join(lines) + "\n" if lines else ""))
         return "\n".join(out)
@@ -512,11 +534,14 @@ def _fit(sections: list[_Section], room: int, session_id: str) -> str:
 
 
 def _final(said: Sequence[Message]) -> Message | None:
-    """The agent's last answer: text, calling no tool."""
-    return next(
-        (m for m in reversed(said) if m.role == "assistant" and m.content and not m.tool_calls),
-        None,
-    )
+    """The agent's answer to the last prompt: text, calling no tool. None when that turn has none yet, so that an
+    earlier turn's answer isn't taken for the last."""
+    for message in reversed(said):
+        if message.role == "user":
+            return None
+        if message.role == "assistant" and message.content and not message.tool_calls:
+            return message
+    return None
 
 
 def _first_error(output: str | None) -> str:
