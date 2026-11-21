@@ -72,7 +72,26 @@ COMMAND_KINDS = (
 QUOTED = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
 SEPARATORS = re.compile(r"&&|\|\||[;|&(){}\n]")
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*")
-VALUED = frozenset({"--with", "--with-editable", "--from", "--package", "--python", "--cache-dir", "--directory"})
+# Each wrapper's options that take the next word as their value (`--with pytest`, `-s KILL`); any other is a flag
+# (`--frozen pytest`, `time -p`). By wrapper, as one letter can mean either: `-p` is a flag to `time`, not to `npx`.
+UV_VALUED = frozenset(
+    {"--with", "--with-editable", "--with-requirements", "--from", "--package", "--python", "-p", "--cache-dir"}
+    | {"--directory", "--project", "--env-file", "--index", "--default-index", "--extra", "--group", "--only-group"}
+)
+NODE_VALUED = frozenset({"--package", "-p", "--call", "-c"})
+VALUED = {
+    "uv": UV_VALUED,
+    "uvx": UV_VALUED,
+    "npx": NODE_VALUED,
+    "npm": NODE_VALUED,
+    "pnpm": NODE_VALUED,
+    "yarn": NODE_VALUED,
+    "bunx": NODE_VALUED,
+    "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
+    "env": frozenset({"-u", "--unset", "-C", "--chdir"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "poetry": frozenset({"-C", "--directory", "-P", "--project"}),
+}
 # What runs the command after it, past its own options: `uv run --frozen pytest`, `timeout 60 pytest`.
 WRAPPERS = re.compile(
     r"(?:uv (?:tool )?run|uvx|npx|bunx|pnpm (?:exec|dlx)|npm exec|yarn (?:dlx|exec)|poetry run|pdm run|hatch run"
@@ -337,7 +356,7 @@ def _run(command: str | None) -> tuple[str, str]:
                 break
             words = [words[0].rsplit("/", 1)[-1], *words[1:]]  # `.venv/bin/pytest` runs pytest
             if wrapper := WRAPPERS.match(" ".join(words)):
-                words = _past_options(words[len(wrapper[0].split()) :])
+                words = _past_options(words[len(wrapper[0].split()) :], VALUED.get(words[0], frozenset()))
                 continue
             text = " ".join(words)
             if kind := next((k for k, pattern in COMMAND_KINDS if pattern.match(text)), None):
@@ -346,30 +365,21 @@ def _run(command: str | None) -> tuple[str, str]:
     return next((item for item in found if item[0] == "test"), found[0] if found else ("other", ""))
 
 
-def _past_options(words: list[str]) -> list[str]:
-    """A wrapper's words from the program it runs: past its options, a timeout's duration and `X=1`. The common
-    options that take the next word as their value (`--with pytest`) take it with them; any other is a flag
-    (`--frozen pytest`). `--` ends the options. Where that leaves a word that names no program kb knows, as an
-    option's value does (`timeout -s KILL 60 pytest`, `env -u VAR pytest`), the first later word that does is the
-    program."""
+def _past_options(words: list[str], valued: frozenset[str]) -> list[str]:
+    """A wrapper's words from the program it runs: past its options, a timeout's duration and `X=1`. An option in
+    `valued` takes the next word with it; `--` ends the options."""
     index = 0
     while index < len(words):
         word = words[index]
         if word == "--":
             return words[index + 1 :]
-        if word in VALUED:
+        if word in valued:
             index += 2
         elif word.startswith("-") or ASSIGNMENT.fullmatch(word) or word[:1].isdigit():
             index += 1
         else:
             break
-    known = (start for start in range(index, len(words)) if _known(words[start:]))
-    return words[next(known, index) :]
-
-
-def _known(words: list[str]) -> bool:
-    text = " ".join([words[0].rsplit("/", 1)[-1], *words[1:]])
-    return bool(WRAPPERS.match(text)) or any(pattern.match(text) for _, pattern in COMMAND_KINDS)
+    return words[index:]
 
 
 def _tests(ordinal: int, action: Action) -> Tests | None:
@@ -560,14 +570,12 @@ def _fit(sections: list[_Section], room: int, session_id: str) -> str:
 
 
 def _final(said: Sequence[Message]) -> Message | None:
-    """The agent's answer to the last prompt: text, calling no tool. None when that turn has none yet, so that an
-    earlier turn's answer isn't taken for the last."""
-    for message in reversed(said):
-        if message.role == "user":
-            return None
-        if message.role == "assistant" and message.content and not message.tool_calls:
-            return message
-    return None
+    """The agent's answer to the last prompt: its turn's closing text, calling no tool, as the tracker's turn end
+    takes it. None when the turn ends otherwise, on a tool call or a prompt: not an earlier turn's answer, nor what
+    the agent said before the calls that followed."""
+    closing = [message for message in said if message.content or message.tool_calls or message.role != "assistant"]
+    last = closing[-1] if closing else None
+    return last if last and last.role == "assistant" and last.content and not last.tool_calls else None
 
 
 def _first_error(output: str | None) -> str:
