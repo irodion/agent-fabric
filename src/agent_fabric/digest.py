@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 
 from agent_fabric.capture import Message, SessionMeta
 from agent_fabric.normalize import ERRORS, Action, events, shows_files
-from agent_fabric.snapshot import Snapshot, parse
+from agent_fabric.snapshot import MAX_DIFF, Snapshot, parse
 
 SCHEMA = "fabric.digest/1"
 HARD_CAP = 200_000  # bytes; sections are cut to fit, the front matter never
@@ -508,7 +508,10 @@ def _changes(first: Snapshot | None, last: Snapshot | None) -> _Section:
     if lines:
         shown = "\n".join(lines[:DIFF_LINES])
         more = len(lines) - DIFF_LINES
-        note = f"\n[… {more} more lines of the diff cut]" if more > 0 or last.diff_cut else ""
+        # Past MAX_DIFF git was stopped, so what's beyond is unknown, and needn't be lines.
+        past = f"the rest past its first {MAX_DIFF:,} bytes" if last.diff_cut else ""
+        cut = [f"{more} more lines" if more > 0 else "", past]
+        note = f"\n[… {' and '.join(part for part in cut if part)} of the diff cut]" if any(cut) else ""
         entries = (_fenced(shown, "diff") + note,)
     if not last.stat and not last.untracked:
         head.append("No changes.")

@@ -812,3 +812,10 @@ def test_a_coloured_runners_summary_and_errors_are_read() -> None:
         == "- #1 pytest: failed (2 passed, 1 failed, 0 skipped); failing: tests/test_a.py::test_x\n"
     )
     assert "\x1b" not in section(text, "Commands")
+
+
+def test_a_diff_git_stopped_early_says_so_not_a_line_count() -> None:
+    snap = snapshot(stat=" a.min.js | +1 -0\n 1 files changed", diff="@@ -0,0 +1 @@\n+" + "x" * 500, diff_cut=True)
+    changes = section(digest([message(0, "user", "go")], [snap]), "Changes")
+    assert "[… the rest past its first 2,000,000 bytes of the diff cut]" in changes
+    assert "-1" not in changes.split("```")[-1]
