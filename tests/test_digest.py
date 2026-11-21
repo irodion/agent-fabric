@@ -275,8 +275,17 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     git(folder, "init", "-q", "-b", "main")
     (folder / "app.py").write_text("x = 1\n")
     git(folder, "add", ".")
-    git(folder, "commit", "-q", "-m", "start")
+    before(folder, "commit", "-q", "-m", "start")
     return folder
+
+
+def before(folder: Path, *args: str) -> str:
+    """git, at a time before the session was first seen (T0): what was there already."""
+    when = {"GIT_AUTHOR_DATE": "2026-11-19T00:00:00Z", "GIT_COMMITTER_DATE": "2026-11-19T00:00:00Z"}
+    done = subprocess.run(
+        ["git", *args], cwd=folder, env=os.environ | when, capture_output=True, text=True, check=True
+    )
+    return done.stdout
 
 
 def git(folder: Path, *args: str) -> str:
@@ -284,18 +293,18 @@ def git(folder: Path, *args: str) -> str:
 
 
 def test_a_snapshot_outside_git_is_none(tmp_path: Path) -> None:
-    assert take(tmp_path, T0) is None
+    assert take(tmp_path, T0, T0) is None
 
 
 def test_snapshots_give_the_sessions_changes_commits_and_markers(repo: Path) -> None:
-    first = take(repo, T0)
+    first = take(repo, T0, T0)
     assert first is not None
     assert (first.uncommitted, first.files, first.commits) == (False, (), ())
     (repo / "app.py").write_text("x = 1\ny = 2  # noqa: E501\n")
     git(repo, "commit", "-qam", "add y")
     (repo / "app.py").write_text("x = 1\ny = 2  # noqa: E501\n# TODO: z\n")
     (repo / "new.py").write_text("print('hi')\n")
-    last = take(repo, T0 + MINUTE, base=first.base)
+    last = take(repo, T0 + MINUTE, T0)
     assert last is not None
     assert (last.base, last.branch, last.uncommitted) == (first.head, "main", True)
     assert last.files == ("app.py", "new.py")
@@ -317,21 +326,33 @@ def test_snapshots_give_the_sessions_changes_commits_and_markers(repo: Path) -> 
 def test_a_snapshot_of_a_linked_worktree_names_its_main_checkout(repo: Path, tmp_path: Path) -> None:
     linked = tmp_path / "wt"
     git(repo, "worktree", "add", "-q", str(linked))
-    snap = take(linked, T0)
+    snap = take(linked, T0, T0)
     assert snap is not None
     assert (snap.worktree, snap.main) == (linked, repo)
     text = digest([message(0, "user", "go")], [snap], cwd=str(linked))
     assert front(text)["worktree"] == f'{{path: "{linked}", main: "{repo}"}}'
     (linked / "pkg").mkdir()
-    inside = take(linked / "pkg", T0)
+    inside = take(linked / "pkg", T0, T0)
     assert inside is not None
     assert inside.worktree == linked
 
 
-def test_a_base_rewritten_away_measures_from_the_head(repo: Path) -> None:
-    snap = take(repo, T0, base="0" * 40)
+def test_a_rebase_during_the_session_keeps_its_commits_and_not_upstreams(repo: Path) -> None:
+    before(repo, "switch", "-q", "-c", "feature")
+    (repo / "feature.py").write_text("f = 1\n")
+    before(repo, "add", ".")
+    before(repo, "commit", "-qm", "feature")
+    before(repo, "switch", "-q", "main")
+    (repo / "upstream.py").write_text("u = 1\n")
+    before(repo, "add", ".")
+    before(repo, "commit", "-qm", "upstream")
+    before(repo, "switch", "-q", "feature")
+    git(repo, "rebase", "-q", "main")  # during the session
+    snap = take(repo, T0, T0)
     assert snap is not None
-    assert snap.base == snap.head
+    assert [commit.split(" ", 1)[1] for commit in snap.commits] == ["feature"]
+    assert snap.files == ("feature.py",)
+    assert snap.base == git(repo, "rev-parse", "main").strip()
 
 
 def test_a_snapshot_reads_its_own_folder_whatever_repo_a_hook_named(
@@ -341,7 +362,7 @@ def test_a_snapshot_reads_its_own_folder_whatever_repo_a_hook_named(
     other.mkdir()
     git(other, "init", "-q")
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
-    snap = take(repo, T0)
+    snap = take(repo, T0, T0)
     assert snap is not None
     assert snap.branch == "main"
 
@@ -362,27 +383,24 @@ def test_a_session_in_a_subfolder_gets_the_whole_repos_changes_by_their_paths_fr
     (repo / "sub" / "t.py").write_text("a = 2\n")
     (repo / "sub" / "new.py").write_text("")
     (repo / "top.py").write_text("")
-    snap = take(repo / "sub", T0)
+    snap = take(repo / "sub", T0, T0)
     assert snap is not None
     assert snap.files == ("sub/new.py", "sub/t.py", "top.py")
     assert snap.untracked == ("sub/new.py", "top.py")
 
 
-def test_a_snapshot_runs_no_converter_or_filter_the_repo_names(repo: Path, tmp_path: Path) -> None:
+def test_a_snapshot_runs_no_text_converter_the_repo_names(repo: Path, tmp_path: Path) -> None:
     ran = tmp_path / "ran"
     tool = tmp_path / "tool.sh"
     tool.write_text(f'#!/bin/sh\ntouch {ran}\ncat "$@"\n')
     tool.chmod(0o755)
-    (repo / ".gitattributes").write_text("*.bin diff=hex filter=boom\n")
+    (repo / ".gitattributes").write_text("*.bin diff=hex\n")
     git(repo, "config", "diff.hex.textconv", str(tool))
-    git(repo, "config", "filter.boom.clean", str(tool))
-    git(repo, "config", "filter.boom.required", "true")
     (repo / "a.bin").write_text("one\n")
     git(repo, "add", ".")
     git(repo, "commit", "-qm", "bin")
-    ran.unlink()
     (repo / "a.bin").write_text("two\n")
-    snap = take(repo, T0)
+    snap = take(repo, T0, T0)
     assert snap is not None
     assert "a.bin" in snap.files
     assert not ran.exists()
@@ -390,10 +408,9 @@ def test_a_snapshot_runs_no_converter_or_filter_the_repo_names(repo: Path, tmp_p
 
 def test_markers_name_their_file_whatever_diff_prefixes_the_user_set(repo: Path) -> None:
     git(repo, "config", "diff.mnemonicPrefix", "true")
-    first = take(repo, T0)
     (repo / "app.py").write_text("x = 1  # TODO\n")
     git(repo, "config", "diff.noprefix", "true")
-    last = take(repo, T0, base=first.base if first else None)
+    last = take(repo, T0, T0)
     assert last is not None
     assert "`app.py:1`" in section(digest([message(0, "user", "go")], [last]), "Markers")
 
@@ -443,7 +460,6 @@ def test_a_snapshot_checks_no_signature_whatever_the_config_says(repo: Path, tmp
     tool = tmp_path / "gpg.sh"
     tool.write_text(f"#!/bin/sh\ntouch {ran}\n")
     tool.chmod(0o755)
-    base = git(repo, "rev-parse", "HEAD").strip()
     (repo / "app.py").write_text("x = 2\n")
     git(repo, "commit", "-qam", "signed")
     signature = "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQ==\n -----END PGP SIGNATURE-----\n"
@@ -459,7 +475,7 @@ def test_a_snapshot_checks_no_signature_whatever_the_config_says(repo: Path, tmp
     git(repo, "update-ref", "HEAD", signed)
     git(repo, "config", "log.showSignature", "true")
     git(repo, "config", "gpg.program", str(tool))
-    snap = take(repo, T0, base=base)
+    snap = take(repo, T0, T0)
     assert snap is not None
     assert [commit.split(" ", 1)[1] for commit in snap.commits] == ["signed"]
     assert not ran.exists()
@@ -467,14 +483,14 @@ def test_a_snapshot_checks_no_signature_whatever_the_config_says(repo: Path, tmp
 
 def test_a_file_only_touched_isnt_changed(repo: Path) -> None:
     os.utime(repo / "app.py", (1, 1))
-    snap = take(repo, T0)
+    snap = take(repo, T0, T0)
     assert snap is not None
     assert (snap.files, snap.stat, snap.uncommitted) == ((), "", False)
 
 
 def test_an_added_line_that_looks_like_a_file_header_is_still_a_line(repo: Path) -> None:
     (repo / "app.py").write_text("x = 1\n++ TODO fix\ny = 2  # FIXME\n")
-    snap = take(repo, T0)
+    snap = take(repo, T0, T0)
     assert snap is not None
     markers = section(digest([message(0, "user", "go")], [snap]), "Markers")
     assert markers == "- todo · `app.py:2` · `++ TODO fix`\n- todo · `app.py:3` · `y = 2  # FIXME`\n"
@@ -484,10 +500,9 @@ def test_a_path_git_would_quote_comes_out_as_it_is(repo: Path) -> None:
     (repo / 'q"x.py').write_text("a = 1\n")
     git(repo, "add", ".")
     git(repo, "commit", "-qm", "quoted")
-    first = take(repo, T0)
     (repo / 'q"x.py').write_text("a = 1  # TODO\n")
     (repo / "tab\there.txt").write_text("")
-    last = take(repo, T0, base=first.base if first else None)
+    last = take(repo, T0, T0)
     assert last is not None
     assert last.files == ('q"x.py', "tab\there.txt")
     assert '`q"x.py:1`' in section(digest([message(0, "user", "go")], [last]), "Markers")
@@ -498,7 +513,7 @@ def test_a_worktree_of_a_bare_repo_has_no_main_checkout(repo: Path, tmp_path: Pa
     git(tmp_path, "clone", "-q", "--bare", str(repo), str(bare))
     linked = tmp_path / "wt-bare"
     git(bare, "worktree", "add", "-q", str(linked))
-    snap = take(linked, T0)
+    snap = take(linked, T0, T0)
     assert snap is not None
     assert (snap.worktree, snap.main) == (linked, None)
 
@@ -507,3 +522,58 @@ def test_a_final_message_cut_to_fit_points_to_its_message() -> None:
     answer = message(3, "assistant", "z" * (HARD_CAP + 10))
     text = digest([message(0, "user", "go"), answer])
     assert section(text, "Final message") == "[the final message cut to fit: kb show s1#3]\n"
+
+
+def test_a_changed_file_with_a_space_in_its_name_keeps_its_name(repo: Path) -> None:
+    (repo / "a b.txt").write_text("one\n")
+    before(repo, "add", ".")
+    before(repo, "commit", "-qm", "spaced")
+    (repo / "a b.txt").write_text("two\n")
+    snap = take(repo, T0, T0)
+    assert snap is not None
+    assert snap.files == ("a b.txt",)
+
+
+def test_a_carriage_return_inside_an_added_line_stays_in_it(repo: Path) -> None:
+    (repo / "app.py").write_bytes(b"x = 1\nfoo\rbar  # TODO\n")
+    snap = take(repo, T0, T0)
+    assert snap is not None
+    assert snap.stat.startswith(" app.py | +1 -0")
+    assert "- todo · `app.py:2`" in section(digest([message(0, "user", "go")], [snap]), "Markers")
+
+
+def test_inline_code_or_an_unclosed_fence_cuts_no_typed_text() -> None:
+    paragraphs = "\n\n".join(f"Point {i}." for i in range(30))
+    for opening in ("```x``` is inline code", "```"):
+        assert "cut" not in section(digest([message(0, "user", f"{opening}\n{paragraphs}")]), "Prompts")
+
+
+def test_typed_lines_right_above_a_pasted_fence_stay() -> None:
+    typed = "\n".join(f"typed {i}" for i in range(15))
+    log = "\n".join(f"log {i}" for i in range(50))
+    text = section(digest([message(0, "user", f"{typed}\n```log\n{log}\n```")]), "Prompts")
+    assert "> typed 14\n> ```log" in text
+    assert "lines of a pasted block cut" in text
+
+
+@pytest.mark.parametrize(
+    "command", ["time -p pytest", ".venv/bin/pytest -q", "uv run timeout 60 pytest", "python3.13 -m pytest"]
+)
+def test_a_runner_behind_a_path_a_version_or_two_wrappers_is_a_test_run(command: str) -> None:
+    assert section(digest([bash(1, command, "Exit code 2\ncollection error")]), "Tests") == "- #1 pytest: failed\n"
+
+
+def test_a_runners_summary_makes_a_test_run_however_it_was_started() -> None:
+    text = digest([bash(1, "./scripts/check.sh", "3 passed in 0.50s\n"), bash(2, "cat ci.log", "9 failed in 1.0s\n")])
+    assert section(text, "Tests") == "- #1 pytest: passed (3 passed, 0 failed, 0 skipped)\n"
+    assert front(text)["outcome"].startswith('{last_tests: "passed",')
+
+
+def test_a_worktree_of_a_repo_whose_checkout_git_cant_name_has_none(repo: Path, tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    git(tmp_path, "clone", "-q", f"--separate-git-dir={tmp_path / 'store.git'}", str(repo), str(checkout))
+    linked = tmp_path / "wt-separate"
+    git(checkout, "worktree", "add", "-q", str(linked))
+    snap = take(linked, T0, T0)
+    assert snap is not None
+    assert (snap.worktree, snap.main) == (linked, None)  # git lists the store, not the checkout

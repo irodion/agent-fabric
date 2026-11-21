@@ -2,12 +2,13 @@
 
 Read-only: git runs with `--no-optional-locks`, so not even a refreshed index is written to the user's repo. Only
 plumbing commands run (`diff-index`, `rev-list`, `ls-files`), which leave out the settings meant for a person at a
-terminal: colours, prefixes, external diffs, text converters, signature checks, quoting. What could still run a
-program of the repo's, a filesystem monitor, a clean filter or a submodule's status, is turned off. That keeps a
-snapshot quick and free of side effects; it isn't a boundary, since the agent already runs code in the same folder.
+terminal: colours, prefixes, external diffs, text converters, signature checks, quoting. The filesystem monitor and
+submodules' status are off too. That keeps a snapshot quick and free of side effects; it isn't a boundary, since the
+agent already runs code in the same folder, so a repo's clean filters (git-lfs's) still run as git runs them.
 
-A snapshot is taken when a session is first seen and at each of its turn ends; the first one's HEAD is the base the
-later ones are measured from, so a digest's changes are the working tree's, start to end, whoever made them.
+The session's commits are those committed since it was first seen, and its changes are measured from the parent of
+the earliest of them, or from HEAD: so a rebase, pull or amend during the session needs no base carried between
+snapshots. A snapshot is taken when a session is first seen and at each of its turn ends.
 """
 
 import os
@@ -15,11 +16,12 @@ import re
 import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 TIMEOUT = 20.0
 MAX_DIFF = 2_000_000  # characters kept of a diff; a generated file can make one of any size
+MAX_COMMITS = 500
 SAFE = ("-c", "core.quotepath=off", "-c", "core.fsmonitor=false")
 DIFF = ("--no-color", "--no-renames", "--ignore-submodules=dirty", "-p", "--unified=0")
 # What would point git at another repo than the folder's, as a hook's caller sets (`git rev-parse --local-env-vars`).
@@ -59,7 +61,7 @@ class FileDiff:
 @dataclass(frozen=True)
 class Snapshot:
     at: datetime
-    base: str  # the HEAD when the session was first seen
+    base: str  # what the changes are measured from: the parent of the session's first commit, or HEAD
     head: str
     branch: str | None  # None on a detached HEAD
     worktree: Path | None  # the folder, when it's a linked worktree
@@ -69,55 +71,67 @@ class Snapshot:
     diff: str  # the same, `--unified=0`, cut at MAX_DIFF
     diff_cut: bool
     untracked: tuple[str, ...]
-    commits: tuple[str, ...]  # `<short sha> <subject>` made since base, oldest first
+    commits: tuple[str, ...]  # `<short sha> <subject>` committed since the session was first seen, oldest first
     uncommitted: bool  # the working tree differs from HEAD, or has untracked files
 
 
-def take(cwd: Path, at: datetime, base: str | None = None) -> Snapshot | None:
-    """The folder's git state, measured from `base` (the first snapshot's HEAD); None outside a repo with a commit.
+def take(cwd: Path, at: datetime, since: datetime) -> Snapshot | None:
+    """The folder's git state, with the commits made since `since` (the session's first sight); None outside a repo
+    with a commit.
 
     Git runs from the repo's top folder, so a session in a subfolder gets the whole repo's changes, by their paths
     from the top."""
-    found = _git(cwd, (), "rev-parse", "--show-toplevel", "HEAD")
-    if found is None or len(lines := found.splitlines()) < 2:
+    found = _git(cwd, "rev-parse", "--show-toplevel", "HEAD")
+    if found is None or len(lines := found.split("\n")) < 2:
         return None
     top, head = Path(lines[0]), lines[1]
-    # No filter's clean command runs on the working tree's files: set each filter the config names to nothing.
-    names = _git(top, (), "config", "--null", "--name-only", "--get-regexp", r"^filter\.") or ""
-    filters = sorted({name.split(".", 1)[1].rsplit(".", 1)[0] for name in names.split("\0") if name})
-    off = tuple(
-        arg
-        for name in filters
-        for key, value in (("clean", ""), ("process", ""), ("required", "false"))
-        for arg in ("-c", f"filter.{name}.{key}={value}")
+    stamp = since.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    made = _git(
+        top,
+        "rev-list",
+        "--no-commit-header",
+        f"--max-count={MAX_COMMITS}",
+        f"--since={stamp}",
+        "--format=%P%x00%h %s",
+        "HEAD",
     )
-    base = base or head
-    if _git(top, off, "cat-file", "-e", f"{base}^{{commit}}") is None:
-        base = head  # rewritten away since the first snapshot: measure from where the folder is now
-    dirs = (_git(top, off, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir") or "").splitlines()
+    commits = [line.split("\0", 1) for line in (made or "").split("\n") if "\0" in line][::-1]  # oldest first
+    base = head
+    if commits:
+        parents = commits[0][0].split()
+        base = parents[0] if parents else (_git(top, "hash-object", "-t", "tree", "/dev/null") or "").strip()
+    dirs = (_git(top, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir") or "").split("\n")
     linked = len(dirs) >= 2 and dirs[0] != dirs[1]
-    bare = (_git(top, off, "config", "--bool", "core.bare") or "").strip() == "true"
-    branch = _git(top, off, "symbolic-ref", "--quiet", "--short", "HEAD")
-    diff = _git(top, off, "diff-index", *DIFF, base) or ""
+    branch = _git(top, "symbolic-ref", "--quiet", "--short", "HEAD")
+    diff = _git(top, "diff-index", *DIFF, base) or ""
     changed = parse(diff)
-    since_head = changed if base == head else parse(_git(top, off, "diff-index", *DIFF, "HEAD") or "")
-    log = _git(top, off, "rev-list", "--reverse", "--no-commit-header", "--format=%h %s", f"{base}..HEAD") or ""
-    untracked = tuple(_split(_git(top, off, "ls-files", "-z", "--others", "--exclude-standard")))
+    since_head = changed if base == head else parse(_git(top, "diff-index", *DIFF, "HEAD") or "")
+    untracked = tuple(_split(_git(top, "ls-files", "-z", "--others", "--exclude-standard")))
     return Snapshot(
         at=at,
         base=base,
         head=head,
         branch=branch.strip() if branch else None,
         worktree=top if linked else None,
-        main=Path(dirs[1]).parent if linked and not bare else None,  # a bare repo is no checkout
+        main=_main(top) if linked else None,
         files=tuple(sorted({*(f.path for f in changed), *untracked})),
         stat=_stat(changed),
         diff=diff[:MAX_DIFF],
         diff_cut=len(diff) > MAX_DIFF,
         untracked=untracked,
-        commits=tuple(log.splitlines()),
+        commits=tuple(subject for _, subject in commits),
         uncommitted=bool(untracked or since_head),
     )
+
+
+def _main(top: Path) -> Path | None:
+    """The main checkout, the first `git worktree list` gives. None when that's no checkout: a bare repo, or the store
+    of one cloned with `--separate-git-dir`, which git lists as it has no record of the checkout."""
+    listed = (_git(top, "worktree", "list", "--porcelain", "-z") or "").split("\0")
+    if not listed[0].startswith("worktree ") or "bare" in listed[1:2]:
+        return None
+    main = Path(listed[0].removeprefix("worktree "))
+    return main if (main / ".git").exists() else None
 
 
 def parse(diff: str) -> list[FileDiff]:
@@ -140,9 +154,9 @@ def _files(diff: str) -> Iterator[_Found]:
                 yield _found(path, lines, changed)
             path, lines, changed, header = _git_header_path(line), [], False, True
         elif header and line.startswith("+++ ") and line != "+++ /dev/null":
-            path = _unquote(line[4:]).removeprefix("b/")
+            path = _unquote(line[4:].removesuffix("\t")).removeprefix("b/")  # a tab ends a name with a space
         elif header and line.startswith("--- ") and line != "--- /dev/null":
-            path = _unquote(line[4:]).removeprefix("a/")
+            path = _unquote(line[4:].removesuffix("\t")).removeprefix("a/")
         else:
             if CHANGE.match(line):
                 changed = True
@@ -204,19 +218,18 @@ def _split(out: str | None) -> list[str]:
     return [name for name in (out or "").split("\0") if name]
 
 
-def _git(cwd: Path, config: tuple[str, ...], *args: str) -> str | None:
-    """Its output as it is, or None when git fails or can't run."""
+def _git(cwd: Path, *args: str) -> str | None:
+    """Its output as it is, or None when git fails or can't run. Read as bytes, so a carriage return in a line or a
+    name stays in it rather than ending the line."""
     try:
         done = subprocess.run(
-            ["git", "--no-optional-locks", *SAFE, *config, *args],
+            ["git", "--no-optional-locks", *SAFE, *args],
             cwd=cwd,
             env={key: value for key, value in os.environ.items() if key not in REPO_VARIABLES},
             capture_output=True,
-            text=True,
-            errors="replace",
             check=False,
             timeout=TIMEOUT,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return done.stdout if done.returncode == 0 else None
+    return done.stdout.decode(errors="replace") if done.returncode == 0 else None
