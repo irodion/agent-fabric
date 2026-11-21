@@ -755,3 +755,17 @@ def test_a_huge_diff_is_read_only_to_its_cap_and_still_counted_whole(
     assert snap is not None
     assert (snap.diff_cut, len(snap.diff) <= 1000, snap.files) == (True, True, ("dump.sql",))
     assert "| +5000 -0" in snap.stat
+
+
+@pytest.mark.parametrize(
+    "command", ["uv run echo pytest", "uv run python scripts/check.py pytest", "env -u X ls pytest"]
+)
+def test_a_runners_name_as_an_argument_isnt_a_test_run(command: str) -> None:
+    assert section(digest([bash(1, command, "ok")]), "Tests") == ""
+
+
+def test_what_the_agent_said_before_its_last_calls_isnt_the_final_message() -> None:
+    messages = [message(0, "user", "go"), message(1, "assistant", "Shall I inspect?"), bash(2, "make", "ok")]
+    text = digest(messages)
+    assert section(text, "Final message") == ""
+    assert "ends_with_question: false" in front(text)["outcome"]
