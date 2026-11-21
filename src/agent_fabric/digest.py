@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 
 from agent_fabric.capture import Message, SessionMeta
 from agent_fabric.normalize import ERRORS, Action, events
-from agent_fabric.snapshot import Snapshot
+from agent_fabric.snapshot import Snapshot, parse
 
 SCHEMA = "fabric.digest/1"
 HARD_CAP = 200_000  # bytes; sections are cut to fit, the front matter never
@@ -74,7 +74,13 @@ ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*")
 # What runs the command after it: the runner is any later word of the segment.
 WRAPPERS = re.compile(
     r"(?:uv (?:tool )?run|uvx|npx|bunx|pnpm (?:exec|dlx)|npm exec|yarn (?:dlx|exec)|poetry run|pdm run|hatch run"
-    r"|pipenv run|rye run|python3? -m|timeout|time|env|nice|nohup|xvfb-run)" + END
+    r"|pipenv run|rye run|timeout|time|env|nice|nohup|xvfb-run)" + END
+)
+# A wrapper's options that take the next word as their value: `uv run --with pytest python x.py` runs python.
+VALUED = frozenset(
+    {"--with", "--with-editable", "--with-requirements", "--from", "--package", "-p", "--python", "--cache-dir"}
+    | {"--directory", "--project", "--env-file", "--index", "--extra", "--group", "-c", "--call", "-s", "--signal"}
+    | {"-k", "--kill-after", "-n", "--adjustment", "-u", "--unset", "-C", "--chdir"}
 )
 
 MARKERS = (
@@ -219,7 +225,12 @@ def render(
             "[… {n} earlier commits cut]",
         ),
         _Section("Markers", (), tuple(_markers(last.diff)) if last else (), "[… {n} earlier markers cut]"),
-        _Section("Final message", (), (_quoted(final.content),) if final and final.content else ()),
+        _Section(
+            "Final message",
+            (),
+            (_quoted(final.content),) if final and final.content else (),
+            "[the final message cut to fit: kb show {session}#" + str(final.ordinal if final else "") + "]",
+        ),
     ]
     head = "---\n" + "".join(f"{key}: {_yaml(value)}\n" for key, value in front.items()) + "---\n"
     return head + _fit(sections, HARD_CAP - len(head.encode()), meta.id)
@@ -290,16 +301,28 @@ def _run(command: str | None) -> tuple[str, str]:
         words = segment.split()
         while words and (ASSIGNMENT.fullmatch(words[0]) or words[0] in ("sudo", "command", "exec")):
             words = words[1:]
-        text = " ".join(words)
         starts = [0]
-        if WRAPPERS.match(text):
-            starts += [index for index in range(1, len(words)) if not words[index].startswith("-")]
+        if wrapper := WRAPPERS.match(" ".join(words)):
+            starts.append(_program(words, len(wrapper[0].split())))
         for index in starts:
             rest = " ".join(words[index:])
             for kind, pattern in COMMAND_KINDS:
                 if pattern.match(rest):
                     return kind, rest
     return "other", ""
+
+
+def _program(words: list[str], index: int) -> int:
+    """Where the program a wrapper runs starts: past its options and their values, a timeout's duration and `X=1`."""
+    while index < len(words):
+        word = words[index]
+        if word in VALUED:
+            index += 2
+        elif word.startswith("-") or ASSIGNMENT.fullmatch(word) or word[:1].isdigit():
+            index += 1
+        else:
+            break
+    return index
 
 
 def _tests(ordinal: int, action: Action) -> Tests | None:
@@ -423,20 +446,19 @@ def _changes(first: Snapshot | None, last: Snapshot | None) -> _Section:
 
 def _markers(diff: str) -> Iterable[str]:
     """TODO/FIXME/HACK, skipped tests and lint suppressions on lines the diff adds."""
-    file, line = "", 0
-    for text in diff.split("\n"):
-        if text.startswith("+++ "):
-            file = text[4:].removeprefix("b/")
-        elif match := HUNK.match(text):
-            line = int(match[1])
-        elif text.startswith("+"):
-            added = text[1:]
-            for kind, pattern in MARKERS:
-                if pattern.search(added):
-                    shown = added.strip()[:MAX_MARKER]
-                    yield f"- {kind} · `{_cell(file)}:{line}` · `{_cell(shown)}`"
-                    break
-            line += 1
+    for found in parse(diff):
+        line = 0
+        for text in found.lines:
+            if match := HUNK.match(text):
+                line = int(match[1])
+            elif text.startswith("+"):
+                added = text[1:]
+                for kind, pattern in MARKERS:
+                    if pattern.search(added):
+                        shown = added.strip()[:MAX_MARKER]
+                        yield f"- {kind} · `{_cell(found.path)}:{line}` · `{_cell(shown)}`"
+                        break
+                line += 1
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -519,10 +541,20 @@ def _when(stamp: datetime) -> str:
 
 
 def _yaml(value: object) -> str:
-    """YAML in flow style: JSON for every scalar and list, which YAML reads as it is, with bare keys for a map."""
+    r"""YAML in flow style: JSON for every scalar and list, which YAML reads as it is, with bare keys for a map.
+
+    Only printable ASCII is left as it is. JSON leaves DEL and C1 controls raw, which YAML forbids, and writes a
+    character past U+FFFF as two `\u` halves, which YAML reads as two broken characters; YAML's own `\U` is one."""
     if isinstance(value, dict):
         return "{" + ", ".join(f"{key}: {_yaml(item)}" for key, item in value.items()) + "}"
-    return json.dumps(value)  # ASCII: YAML forbids some control characters JSON would leave as they are
+    return "".join(_escape(char) for char in json.dumps(value, ensure_ascii=False))
+
+
+def _escape(char: str) -> str:
+    code = ord(char)
+    if code < 0x7F:
+        return char  # JSON has escaped the controls below 0x20 already
+    return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
 
 
 def _segment(text: str) -> str:

@@ -468,10 +468,14 @@ the rendering, and redaction's `/home/<user>` → `~` (§4.5) shortens them when
 from the diff, so a file the agent left untracked shows in Changes but its markers don't.
 
 **Git snapshots.** Diff-based fields come from the session's `cwd`, read-only: `git rev-parse HEAD`,
-`git diff <first HEAD> --unified=0` and `git ls-files --others --exclude-standard`, taken at first sight and at each
-turn end, from the repo's top folder so a session in a subfolder gets the whole repo's changes. Git runs with
-`--no-optional-locks`, and with no filesystem monitor, external diff, text converter or clean filter that the repo's
-config or `.gitattributes` names, so a snapshot runs nothing of the repo's. This is agent-agnostic. Caveat: edits I make by hand in the same tree during a session are attributed to it
+the diff from the first HEAD with `--unified=0` and the untracked files, taken at first sight and at each
+turn end, from the repo's top folder so a session in a subfolder gets the whole repo's changes. Only plumbing runs
+(`git diff-index -p`, `rev-list`, `ls-files -z`) with `--no-optional-locks`: it ignores the settings meant for a
+person at a terminal, which in porcelain commands changed paths and prefixes and ran converters and signature checks
+(2026-11-21 review). A filesystem monitor, clean filters and submodules' status are turned off too. That keeps a
+snapshot quick and free of side effects, and isn't a boundary: the agent already runs code in the same folder. As
+nothing refreshes the index, a file whose timestamp moved with no change shows in the plumbing's diff, and is left
+out by its empty diff. This is agent-agnostic. Caveat: edits I make by hand in the same tree during a session are attributed to it
 (labelled "working tree during session", not "agent wrote").
 
 **Worktrees.** The first snapshot also runs `git rev-parse --path-format=absolute --git-dir --git-common-dir`. If

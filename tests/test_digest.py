@@ -1,6 +1,7 @@
 """The digest (docs/design.md §4.4): what a session did, from its messages and git snapshots, with no model."""
 
 import json
+import os
 import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -425,3 +426,84 @@ def test_over_the_cap_the_diff_goes_before_the_errors() -> None:
 def test_front_matter_escapes_what_yaml_forbids() -> None:
     text = digest([message(0, "user", "go")], [snapshot(branch="feat\u0085x\u007f")])
     assert front(text)["branch"] == '"feat\\u0085x\\u007f"'
+
+
+def test_front_matter_writes_a_character_past_the_bmp_as_one_escape() -> None:
+    text = digest([message(0, "user", "go")], [snapshot(branch="feat/\U0001f680")])
+    assert front(text)["branch"] == '"feat/\\U0001f680"'
+
+
+@pytest.mark.parametrize("command", ["uv run --with pytest python x.py", "npx --package jest node a.js"])
+def test_a_wrappers_option_value_isnt_the_program_it_runs(command: str) -> None:
+    assert section(digest([bash(1, command, "ok")]), "Commands").splitlines()[2].split(" | ")[3] == "other"
+
+
+def test_a_snapshot_checks_no_signature_whatever_the_config_says(repo: Path, tmp_path: Path) -> None:
+    ran = tmp_path / "ran"
+    tool = tmp_path / "gpg.sh"
+    tool.write_text(f"#!/bin/sh\ntouch {ran}\n")
+    tool.chmod(0o755)
+    base = git(repo, "rev-parse", "HEAD").strip()
+    (repo / "app.py").write_text("x = 2\n")
+    git(repo, "commit", "-qam", "signed")
+    signature = "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQ==\n -----END PGP SIGNATURE-----\n"
+    body = git(repo, "cat-file", "commit", "HEAD").replace("\n\n", "\n" + signature + "\n", 1)
+    signed = subprocess.run(
+        ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+        cwd=repo,
+        input=body,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    git(repo, "update-ref", "HEAD", signed)
+    git(repo, "config", "log.showSignature", "true")
+    git(repo, "config", "gpg.program", str(tool))
+    snap = take(repo, T0, base=base)
+    assert snap is not None
+    assert [commit.split(" ", 1)[1] for commit in snap.commits] == ["signed"]
+    assert not ran.exists()
+
+
+def test_a_file_only_touched_isnt_changed(repo: Path) -> None:
+    os.utime(repo / "app.py", (1, 1))
+    snap = take(repo, T0)
+    assert snap is not None
+    assert (snap.files, snap.stat, snap.uncommitted) == ((), "", False)
+
+
+def test_an_added_line_that_looks_like_a_file_header_is_still_a_line(repo: Path) -> None:
+    (repo / "app.py").write_text("x = 1\n++ TODO fix\ny = 2  # FIXME\n")
+    snap = take(repo, T0)
+    assert snap is not None
+    markers = section(digest([message(0, "user", "go")], [snap]), "Markers")
+    assert markers == "- todo · `app.py:2` · `++ TODO fix`\n- todo · `app.py:3` · `y = 2  # FIXME`\n"
+
+
+def test_a_path_git_would_quote_comes_out_as_it_is(repo: Path) -> None:
+    (repo / 'q"x.py').write_text("a = 1\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "quoted")
+    first = take(repo, T0)
+    (repo / 'q"x.py').write_text("a = 1  # TODO\n")
+    (repo / "tab\there.txt").write_text("")
+    last = take(repo, T0, base=first.base if first else None)
+    assert last is not None
+    assert last.files == ('q"x.py', "tab\there.txt")
+    assert '`q"x.py:1`' in section(digest([message(0, "user", "go")], [last]), "Markers")
+
+
+def test_a_worktree_of_a_bare_repo_has_no_main_checkout(repo: Path, tmp_path: Path) -> None:
+    bare = tmp_path / "bare.git"
+    git(tmp_path, "clone", "-q", "--bare", str(repo), str(bare))
+    linked = tmp_path / "wt-bare"
+    git(bare, "worktree", "add", "-q", str(linked))
+    snap = take(linked, T0)
+    assert snap is not None
+    assert (snap.worktree, snap.main) == (linked, None)
+
+
+def test_a_final_message_cut_to_fit_points_to_its_message() -> None:
+    answer = message(3, "assistant", "z" * (HARD_CAP + 10))
+    text = digest([message(0, "user", "go"), answer])
+    assert section(text, "Final message") == "[the final message cut to fit: kb show s1#3]\n"
