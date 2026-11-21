@@ -376,7 +376,9 @@ text of a failed call, which agentsview drops (§4.1). The digest stores an exce
   minutes". The value is low-stakes: too short and a paused session finalizes and later reopens (one extra commit
   to the same file); too long and its digest arrives late. Config value, default 30 min. The quiet counts from the session's own last
   time, or from when the tracker last saw it change if that's earlier, so a source whose clock is ahead of ours
-  doesn't hold a session open.
+  doesn't hold a session open. Only a newer time reopens one, so a source's clock put back would hide its next
+  turns until they pass the time stored; kb's sources read agents on this machine's clock, where a time ahead of it
+  comes from a time without a zone read as UTC, an offset that stays the same, so its later turns still reopen it.
 - `tracker` lists sessions active in the last 24 h (`active_since`) every 10 s, with `include_children=true`
   because agentsview files headless runs as children (§4.1), and opens a `watch` for each ACTIVE one. It reads a
   session's whole transcript when it is new, its listing changed, or its watch ticked, and keeps no cursor. The

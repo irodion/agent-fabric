@@ -940,14 +940,14 @@ def test_a_listing_ahead_of_the_clock_doesnt_hold_a_session_with_no_times_open(
     assert kinds(t.poll(T0 + 31 * MINUTE)) == [("finalized", "s1")]
 
 
-def test_a_session_ahead_of_the_clock_reopens_when_its_clock_is_put_right(
-    db: sqlite3.Connection, source: Source
-) -> None:
+def test_a_reparse_doesnt_reopen_a_session_ahead_of_the_clock(db: sqlite3.Connection, source: Source) -> None:
     source.add("s1")
-    turn(source, "s1", T0 + timedelta(days=1))  # a clock a day ahead of ours
+    turn(source, "s1", T0 + timedelta(hours=3))  # a zone-less local time on a machine 3 h ahead of UTC
     t = tracker(db, feed(source))
     t.poll(T0)
     assert kinds(t.poll(T0 + 31 * MINUTE)) == ENDS
-    turn(source, "s1", T0 + 40 * MINUTE, prompt="and now?")  # the clock put right
+    first, call, answer = source.texts["s1"]
+    source.reparse("s1", [first, call, answer.model_copy(update={"content": "Done!"})])
+    assert t.poll(T0 + 32 * MINUTE) == []
+    turn(source, "s1", T0 + timedelta(hours=3, minutes=40), prompt="and now?")  # the same offset, later
     assert kinds(t.poll(T0 + 41 * MINUTE)) == [("reopened", "s1")]
-    assert kinds(t.poll(T0 + 72 * MINUTE)) == ENDS
