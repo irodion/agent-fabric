@@ -303,6 +303,10 @@ class Tracker:
         elif latest is None:
             # A session with no times at all, such as Cursor CLI's in agentsview: a change happened about now.
             active_at = now if changed else row.active_at
+        elif row.active_at > now and changed:
+            # The time stored is ahead of the clock, as a source's clock was: a change is activity, at the time it
+            # gives now, which may be earlier, as when that clock was put right.
+            active_at = latest
         else:
             # Only a newer time is activity: a re-parse, or a new field in how a message reads, isn't.
             active_at = max(row.active_at, latest)
@@ -313,7 +317,9 @@ class Tracker:
             project=row.project if row else _project(_first(meta)),
             cwd=row.cwd if row else _first(meta).cwd,
             headless=row.headless if row else _headless(_first(meta)),
-            state="active" if row is None or active_at > row.active_at else row.state,
+            state="active"
+            if row is None or active_at > row.active_at or (row.active_at > now and changed)
+            else row.state,
             finalizations=row.finalizations if row else 0,
             status="ok",
             listing=listing if listing is not None else row.listing if row else "",

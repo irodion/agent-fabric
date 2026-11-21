@@ -769,3 +769,9 @@ def test_what_the_agent_said_before_its_last_calls_isnt_the_final_message() -> N
     text = digest(messages)
     assert section(text, "Final message") == ""
     assert "ends_with_question: false" in front(text)["outcome"]
+
+
+def test_a_go_package_that_didnt_build_fails_the_run() -> None:
+    out = "ok  \texample.test/good\t0.01s\nFAIL\texample.test/broken [build failed]\nFAIL\n"
+    text = digest([bash(1, "go test ./... | tee test.log", out)])
+    assert 'last_tests: "failed"' in front(text)["outcome"]
