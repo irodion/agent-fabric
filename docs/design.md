@@ -489,7 +489,7 @@ from HEAD, not from nothing. The digest lists the newest 500
 and counts the rest, and the diff is measured from the oldest all the same. The
 per-file counts come from `--numstat`, and the diff itself is read only to 2 MB, git stopped past that: a generated
 file can make a diff of any size. As nothing refreshes the index, a file whose timestamp moved with no change shows
-in the plumbing's diff, and is left out by `--numstat` and by its empty diff. This is agent-agnostic. Caveat: edits I make by hand in the same tree during a session are attributed to it
+in the plumbing's diff, and is left out by `--numstat` and by its empty diff. A read git fails (a clean filter that errors, a timeout) gives no snapshot, not an empty one, which would read as a clean tree. This is agent-agnostic. Caveat: edits I make by hand in the same tree during a session are attributed to it
 (labelled "working tree during session", not "agent wrote").
 
 **Worktrees.** The first snapshot also runs `git rev-parse --path-format=absolute --git-dir --git-common-dir`. If
