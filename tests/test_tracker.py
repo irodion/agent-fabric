@@ -911,3 +911,30 @@ def test_the_recorded_sessions_end_their_turn_and_finalize(db: sqlite3.Connectio
     assert len(rows) == 3  # the listing's fourth session has no recorded messages, so isn't read
     assert sorted(kinds(later)) == sorted(("finalized", sid) for sid in rows)
     assert [c.kind for _, c in t.changes()].count("turn_end") == 3
+
+
+def test_half_an_emoji_in_a_transcript_doesnt_stop_its_turn_end(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1")
+    turn(source, "s1", T0, prompt="cut \ud83d here", answer="ok \ud83d")
+    t = tracker(db, feed(source))
+    assert kinds(t.poll(T0 + 3 * SECOND)) == [("started", "s1")]
+    assert kinds(t.poll(T0 + 8 * SECOND)) == [("turn_end", "s1")]
+
+
+def test_a_time_ahead_of_the_clock_doesnt_hold_a_session_open(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1")
+    turn(source, "s1", T0 + timedelta(days=1))  # a clock a day ahead of ours
+    t = tracker(db, feed(source))
+    t.poll(T0)
+    assert kinds(t.poll(T0 + 31 * MINUTE)) == ENDS
+
+
+def test_a_listing_ahead_of_the_clock_doesnt_hold_a_session_with_no_times_open(
+    db: sqlite3.Connection, source: Source
+) -> None:
+    source.add("s1", ended_at=T0 + timedelta(days=1))
+    source.say("s1", "user", "hi", None)
+    source.changed("s1", ended_at=T0 + timedelta(days=1))
+    t = tracker(db, feed(source))
+    t.poll(T0)
+    assert kinds(t.poll(T0 + 31 * MINUTE)) == [("finalized", "s1")]
