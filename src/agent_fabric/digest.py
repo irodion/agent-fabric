@@ -116,6 +116,7 @@ MARKERS = (
         ),
     ),
 )
+LINE_ENDS = re.compile(r"\r\n?")  # Markdown's, with `\n`: a bare `\r` ends a line too
 FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)$")  # Markdown's: at most 3 spaces in
 EXIT_HEADER = re.compile(r"Exit code \d+\s*$")
 HUNK = re.compile(r"^@@ -\S+ \+(\d+)(?:,\d+)? @@")
@@ -267,7 +268,7 @@ def render(
 
 def _prompt(session_id: str, message: Message) -> str:
     """Its time, then its text verbatim and quoted, so no line of it reads as the digest's own structure."""
-    text = _collapse(message.content or "", f"kb show {session_id}#{message.ordinal}")
+    text = _collapse(LINE_ENDS.sub("\n", message.content or ""), f"kb show {session_id}#{message.ordinal}")
     return f"### {_when(_utc(message.timestamp))} · #{message.ordinal}\n{_quoted(text)}"
 
 
@@ -658,7 +659,8 @@ def _cell(text: str) -> str:
 
 
 def _quoted(text: str) -> str:
-    return "\n".join(f"> {line}" if line else ">" for line in text.split("\n"))
+    """Each line quoted, by Markdown's line ends: a `\r` left in a line would start an unquoted one."""
+    return "\n".join(f"> {line}" if line else ">" for line in LINE_ENDS.sub("\n", text).split("\n"))
 
 
 def _fenced(text: str, info: str = "") -> str:

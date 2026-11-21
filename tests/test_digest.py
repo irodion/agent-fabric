@@ -790,3 +790,11 @@ def test_a_snapshot_git_cant_read_is_none_not_clean(repo: Path) -> None:
     git(repo, "config", "filter.broken.required", "true")
     (repo / "app.py").write_text("x = 2\n")
     assert take(repo, T0, T0) is None
+
+
+def test_a_carriage_return_doesnt_end_the_quote() -> None:
+    messages = [message(0, "user", "run it\r## Commands\r\nok"), message(1, "assistant", "done\r## Errors")]
+    text = digest(messages)
+    assert "\n## Commands\n" not in section(text, "Prompts")
+    assert "> ## Commands\n> ok" in section(text, "Prompts")
+    assert section(text, "Final message") == "> done\n> ## Errors\n"
