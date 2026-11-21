@@ -454,9 +454,19 @@ truncation leaves a pointer to the full text in the agentsview archive, which st
 never cut, because it carries intent. Pasted blocks (logs, stack traces, code, documents) are collapsed: they are
 most of the bulk, most of the noise for the ingest LLM, and where accidental secrets and client code end up.
 
+**How it reads** (`digest.render`, 2026-11-21). Prompts and the final message are quoted (`> `), so no line of
+theirs reads as a section. A pasted block is one fenced, or one between blank lines, of more than 40 lines; many
+short typed paragraphs stay whole. A command's kind comes from what it runs, outside its quoted strings: `cd x &&
+uv run pytest` is a test, `echo 'pytest'` isn't. Test counts come from each runner's own summary line (pytest,
+cargo, go test, vitest, jest), and without one, from the exit code. An error is distinct by its tool, command and
+output. Over the cap, the commands table is cut first, then the changes, tests, errors, commits and markers, the
+final message last; each cut drops whole entries from the front. `cwd` and the worktree's paths stay absolute in
+the rendering, and redaction's `/home/<user>` → `~` (§4.5) shortens them when the digest is written. Markers come
+from the diff, so a file the agent left untracked shows in Changes but its markers don't.
+
 **Git snapshots.** Diff-based fields come from the session's `cwd`, read-only: `git rev-parse HEAD`,
-`git diff HEAD --unified=0` and `git ls-files --others --exclude-standard`, taken at first sight and at each turn
-end. This is agent-agnostic. Caveat: edits I make by hand in the same tree during a session are attributed to it
+`git diff <first HEAD> --unified=0` and `git ls-files --others --exclude-standard`, taken at first sight and at each
+turn end, with `--no-optional-locks`, and no filesystem monitor or external diff the repo's config names. This is agent-agnostic. Caveat: edits I make by hand in the same tree during a session are attributed to it
 (labelled "working tree during session", not "agent wrote").
 
 **Worktrees.** The first snapshot also runs `git rev-parse --path-format=absolute --git-dir --git-common-dir`. If
@@ -1391,7 +1401,7 @@ neither agentsview nor fabricd, so a one-week trial in one or two projects runs 
 `kb ingest` and `kb lint` on the `codex` backend follow, for the same reason (§4.7). They are built and first ran on a
 real model on 2026-11-12; their daily timer followed (§5), and `kb lint`'s summary check comes with `kb prune`. Then
 CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.1 (2026-11-19, §4.1); adapter,
-normalizer and tracker (built); digester with allow list/redaction/gate/commit, for the CLI agents: agentsview for Claude Code,
+normalizer and tracker (built); digester (the rendering and git snapshots built) with allow list/redaction/gate/commit, for the CLI agents: agentsview for Claude Code,
 Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI + `kb mcp`; a prototype session
 for the panel layout, then the panel with rules only (incl. open loops and carry-over).
 
