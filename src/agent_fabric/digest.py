@@ -349,7 +349,9 @@ def _run(command: str | None) -> tuple[str, str]:
 def _past_options(words: list[str]) -> list[str]:
     """A wrapper's words from the program it runs: past its options, a timeout's duration and `X=1`. The common
     options that take the next word as their value (`--with pytest`) take it with them; any other is a flag
-    (`--frozen pytest`). `--` ends the options."""
+    (`--frozen pytest`). `--` ends the options. Where that leaves a word that names no program kb knows, as an
+    option's value does (`timeout -s KILL 60 pytest`, `env -u VAR pytest`), the first later word that does is the
+    program."""
     index = 0
     while index < len(words):
         word = words[index]
@@ -361,7 +363,13 @@ def _past_options(words: list[str]) -> list[str]:
             index += 1
         else:
             break
-    return words[index:]
+    known = (start for start in range(index, len(words)) if _known(words[start:]))
+    return words[next(known, index) :]
+
+
+def _known(words: list[str]) -> bool:
+    text = " ".join([words[0].rsplit("/", 1)[-1], *words[1:]])
+    return bool(WRAPPERS.match(text)) or any(pattern.match(text) for _, pattern in COMMAND_KINDS)
 
 
 def _tests(ordinal: int, action: Action) -> Tests | None:

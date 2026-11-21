@@ -18,6 +18,7 @@ Only `Tracker.poll` and `Tracker.tick` read the sources; `run` drives them from 
 
 import asyncio
 import hashlib
+import json
 import logging
 import sqlite3
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
@@ -203,7 +204,9 @@ class Tracker:
             # Not settled on what was read before it changed, unless it has been unreadable for longer than a
             # listing looks back: then whatever it did is out of reach.
             return []
-        idle = now - row.active_at >= self._idle
+        # From the session's last activity, or when the tracker last saw a change if that's earlier: a source whose
+        # clock is ahead of ours (or a zone-less local time) mustn't hold a session open until its time comes.
+        idle = now - min(row.active_at, row.changed_at) >= self._idle
         changes = []
         with self._db:
             # A session idle long enough to finalize is quiet too: its last turn ends first, as after a restart.
@@ -493,7 +496,7 @@ def _answer(messages: Sequence[Message]) -> str | None:
     if not said or said[-1].role != "assistant" or said[-1].tool_calls or not said[-1].content:
         return None
     prompts = sum(message.role == "user" for message in said)
-    return f"{prompts}:{hashlib.sha256(said[-1].content.encode()).hexdigest()}"
+    return f"{prompts}:{hashlib.sha256(said[-1].content.encode(errors='surrogatepass')).hexdigest()}"
 
 
 def _latest(messages: Iterable[Message]) -> datetime | None:
@@ -516,8 +519,9 @@ def _utc(stamp: datetime) -> datetime:
 
 
 def _hash(messages: Iterable[Message]) -> str:
-    """The messages as they read, without their ordinals, which a re-parse can change."""
+    """The messages as they read, without their ordinals, which a re-parse can change. As escaped JSON, so half an
+    emoji (a lone surrogate, which pydantic won't write as UTF-8) hashes too."""
     digest = hashlib.sha256()
     for message in messages:
-        digest.update(message.model_dump_json(exclude={"ordinal"}).encode())
+        digest.update(json.dumps(message.model_dump(mode="json", exclude={"ordinal"}), sort_keys=True).encode())
     return digest.hexdigest()

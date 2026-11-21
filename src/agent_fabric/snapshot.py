@@ -14,16 +14,21 @@ snapshots. A snapshot is taken when a session is first seen and at each of its t
 import os
 import re
 import subprocess
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 TIMEOUT = 20.0
-MAX_DIFF = 2_000_000  # characters kept of a diff; a generated file can make one of any size
+MAX_DIFF = 2_000_000  # bytes read of a diff; a generated file can make one of any size, so git stops past it
 MAX_COMMITS = 500
 SAFE = ("-c", "core.quotepath=off", "-c", "core.fsmonitor=false")
-DIFF = ("--no-color", "--no-renames", "--ignore-submodules=dirty", "-p", "--unified=0")
+CHANGED = ("--no-renames", "--ignore-submodules=dirty")
+DIFF = ("--no-color", *CHANGED, "-p", "--unified=0")
+# Per file, lines added and removed: no hunks, so as small as the list of files, and no file that only looks
+# changed (its timestamp moved, the index not refreshed), as `--quiet` would count.
+NUMSTAT = (*CHANGED, "--numstat", "-z")
 # What would point git at another repo than the folder's, as a hook's caller sets (`git rev-parse --local-env-vars`).
 REPO_VARIABLES = frozenset(
     {
@@ -93,23 +98,27 @@ def take(cwd: Path, at: datetime, since: datetime) -> Snapshot | None:
     made = _git(
         top,
         "rev-list",
+        "--first-parent",
         "--no-commit-header",
         f"--since={stamp}",
         "--format=%P%x00%h %s",
         "HEAD",
     )
-    # All of them, oldest first, for the base; the digest names the newest MAX_COMMITS.
+    # All of them, oldest first, for the base; the digest names the newest MAX_COMMITS. Along first parents only,
+    # so a merge, as `git pull` makes, is one commit, and not the commits it brought in.
     commits = [line.split("\0", 1) for line in (made or "").split("\n") if "\0" in line][::-1]
     base = head
-    if commits:
-        parents = commits[0][0].split()
-        base = parents[0] if parents else (_git(top, "hash-object", "-t", "tree", "/dev/null") or "").strip()
+    if commits and (parents := commits[0][0].split()):
+        base = parents[0]
+    elif commits and (_git(top, "rev-parse", "--is-shallow-repository") or "").strip() != "true":
+        # A root commit made in the session; in a shallow clone, a commit with no parents is only where it was cut.
+        base = (_git(top, "hash-object", "-t", "tree", "/dev/null") or "").strip()
     dirs = (_git(top, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir") or "").split("\n")
     linked = len(dirs) >= 2 and dirs[0] != dirs[1]
     branch = _git(top, "symbolic-ref", "--quiet", "--short", "HEAD")
-    diff = _git(top, "diff-index", *DIFF, base) or ""
-    changed = parse(diff)
-    since_head = changed if base == head else parse(_git(top, "diff-index", *DIFF, "HEAD") or "")
+    diff, diff_cut = _read(top, MAX_DIFF, "diff-index", *DIFF, base) or ("", False)
+    changed = _numstat(_git(top, "diff-index", *NUMSTAT, base))
+    since_head = changed if base == head else _numstat(_git(top, "diff-index", *NUMSTAT, "HEAD"))
     untracked = tuple(_split(_git(top, "ls-files", "-z", "--others", "--exclude-standard")))
     return Snapshot(
         at=at,
@@ -118,10 +127,10 @@ def take(cwd: Path, at: datetime, since: datetime) -> Snapshot | None:
         branch=branch.strip() if branch else None,
         worktree=top if linked else None,
         main=_main(top) if linked else None,
-        files=tuple(sorted({*(f.path for f in changed), *untracked})),
+        files=tuple(sorted({*(path for path, _, _ in changed), *untracked})),
         stat=_stat(changed),
-        diff=diff[:MAX_DIFF],
-        diff_cut=len(diff) > MAX_DIFF,
+        diff=diff,
+        diff_cut=diff_cut,
         untracked=untracked,
         commits=tuple(subject for _, subject in commits[-MAX_COMMITS:]),
         commits_unlisted=max(len(commits) - MAX_COMMITS, 0),
@@ -211,12 +220,21 @@ def _unquote(name: str) -> str:
     return out.decode(errors="replace")
 
 
-def _stat(changed: list[FileDiff]) -> str:
+def _numstat(out: str | None) -> list[tuple[str, int, int]]:
+    """`--numstat -z`'s files, with their lines added and removed; a binary file's are `-`, counted as 0."""
+    found = []
+    for record in _split(out):
+        added, removed, path = record.split("\t", 2)
+        found.append((path, int(added) if added.isdigit() else 0, int(removed) if removed.isdigit() else 0))
+    return found
+
+
+def _stat(changed: list[tuple[str, int, int]]) -> str:
     if not changed:
         return ""
-    width = min(max(len(found.path) for found in changed), 80)
-    rows = [f" {found.path:<{width}} | +{found.added} -{found.removed}" for found in changed]
-    added, removed = sum(f.added for f in changed), sum(f.removed for f in changed)
+    width = min(max(len(path) for path, _, _ in changed), 80)
+    rows = [f" {path:<{width}} | +{added} -{removed}" for path, added, removed in changed]
+    added, removed = sum(a for _, a, _ in changed), sum(r for _, _, r in changed)
     return "\n".join([*rows, f" {len(changed)} files changed, {added} insertions(+), {removed} deletions(-)"])
 
 
@@ -231,7 +249,7 @@ def _git(cwd: Path, *args: str) -> str | None:
         done = subprocess.run(
             ["git", "--no-optional-locks", *SAFE, *args],
             cwd=cwd,
-            env={key: value for key, value in os.environ.items() if key not in REPO_VARIABLES | DIFF_VARIABLES},
+            env=_env(),
             capture_output=True,
             check=False,
             timeout=TIMEOUT,
@@ -239,3 +257,35 @@ def _git(cwd: Path, *args: str) -> str | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     return done.stdout.decode(errors="replace") if done.returncode == 0 else None
+
+
+def _read(cwd: Path, limit: int, *args: str) -> tuple[str, bool] | None:
+    """Its output's first `limit` bytes, and whether there was more, which git isn't left to write: a diff of a
+    huge file is never held whole. None when git fails, can't run or takes longer than TIMEOUT."""
+    try:
+        with subprocess.Popen(
+            ["git", "--no-optional-locks", *SAFE, *args],
+            cwd=cwd,
+            env=_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        ) as process:
+            timer = threading.Timer(TIMEOUT, process.kill)
+            timer.start()
+            try:
+                out = process.stdout.read(limit + 1) if process.stdout else b""
+                cut = len(out) > limit
+                if cut:
+                    process.kill()
+                process.wait()
+            finally:
+                timer.cancel()
+    except OSError:
+        return None
+    if not cut and process.returncode != 0:
+        return None
+    return out[:limit].decode(errors="replace"), cut
+
+
+def _env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items() if key not in REPO_VARIABLES | DIFF_VARIABLES}

@@ -374,7 +374,9 @@ text of a failed call, which agentsview drops (§4.1). The digest stores an exce
 
 - **Why a timeout:** no agent gives a reliable session-end signal (§2), so "finished" means "quiet for N
   minutes". The value is low-stakes: too short and a paused session finalizes and later reopens (one extra commit
-  to the same file); too long and its digest arrives late. Config value, default 30 min.
+  to the same file); too long and its digest arrives late. Config value, default 30 min. The quiet counts from the session's own last
+  time, or from when the tracker last saw it change if that's earlier, so a source whose clock is ahead of ours
+  doesn't hold a session open.
 - `tracker` lists sessions active in the last 24 h (`active_since`) every 10 s, with `include_children=true`
   because agentsview files headless runs as children (§4.1), and opens a `watch` for each ACTIVE one. It reads a
   session's whole transcript when it is new, its listing changed, or its watch ticked, and keeps no cursor. The
@@ -477,13 +479,17 @@ person at a terminal, which in porcelain commands changed paths and prefixes and
 (2026-11-21 review). A filesystem monitor and submodules' status are turned off too. That keeps a snapshot quick
 and isn't a boundary: the agent already runs code in the same folder, so a repo's clean filters (git-lfs's) run as
 git runs them, and an LFS file reads as itself, not as its pointer. The session's commits are those committed since
-it was first seen, and the diff is measured from the parent of the earliest, or from HEAD: a rebase, pull or amend
-mid-session needs no base carried between snapshots. The cost: a commit someone else made in that window and pulled
-in counts too, and so does an older unpushed commit that a rebase replays, since it gets a new date (2026-11-21
-review: kept, as anchoring on the first HEAD brought back the base's own cases). The digest lists the newest 500
-and counts the rest, and the diff is measured from the oldest all the same. As
-nothing refreshes the index, a file whose timestamp moved with no change shows in the plumbing's diff, and is left
-out by its empty diff. This is agent-agnostic. Caveat: edits I make by hand in the same tree during a session are attributed to it
+it was first seen, along first parents, and the diff is measured from the parent of the earliest, or from HEAD: a
+rebase, pull or amend mid-session needs no base carried between snapshots. A merge, as `git pull` makes, is one
+commit: the commits it brings in aren't listed, though their files are in the diff, as they changed the tree. The
+cost: a pull that fast-forwards over commits made in that window lists them, and so does a rebase of older unpushed
+commits, since they get new dates (2026-11-21 review: kept, as anchoring on the first HEAD brought back the base's
+own cases). In a shallow clone, a commit with no parents is where the clone was cut, so the diff is then measured
+from HEAD, not from nothing. The digest lists the newest 500
+and counts the rest, and the diff is measured from the oldest all the same. The
+per-file counts come from `--numstat`, and the diff itself is read only to 2 MB, git stopped past that: a generated
+file can make a diff of any size. As nothing refreshes the index, a file whose timestamp moved with no change shows
+in the plumbing's diff, and is left out by `--numstat` and by its empty diff. This is agent-agnostic. Caveat: edits I make by hand in the same tree during a session are attributed to it
 (labelled "working tree during session", not "agent wrote").
 
 **Worktrees.** The first snapshot also runs `git rev-parse --path-format=absolute --git-dir --git-common-dir`. If

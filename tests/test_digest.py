@@ -627,7 +627,16 @@ def test_commits_past_the_listed_ones_are_counted_and_measured_from(
 
 
 @pytest.mark.parametrize(
-    "command", ["uv run --frozen pytest", "uv run -- pytest", "npx --yes jest", "timeout -k 5 60 pytest"]
+    "command",
+    [
+        "uv run --frozen pytest",
+        "uv run -- pytest",
+        "npx --yes jest",
+        "timeout -k 5 60 pytest",
+        "timeout -s KILL 600 pytest",
+        "env -u VAR pytest",
+        "uv run --frozen python -m unittest",
+    ],
 )
 def test_a_wrappers_flag_doesnt_hide_the_runner(command: str) -> None:
     assert section(digest([bash(1, command, "Exit code 2\ncrashed")]), "Tests").startswith("- #1 ")
@@ -701,3 +710,48 @@ def test_a_digest_its_cuts_cant_fit_loses_its_lists_then_says_it_is_over() -> No
     assert section(text, "Changes") == "[… cut to fit the digest]\n"
     text = digest([message(i, "user", "y" * 3000) for i in range(80)])
     assert front(text)["over_cap"] == "true"
+
+
+def at(when: datetime) -> dict[str, str]:
+    return {"GIT_AUTHOR_DATE": when.isoformat(), "GIT_COMMITTER_DATE": when.isoformat()}
+
+
+def test_a_pull_during_the_session_brings_in_no_commits_of_its_own(repo: Path) -> None:
+    start = git(repo, "rev-parse", "HEAD").strip()
+    before(repo, "switch", "-q", "-c", "theirs", "HEAD")
+    (repo / "theirs.py").write_text("t = 1\n")
+    before(repo, "add", ".")
+    # A teammate's commit, made after the session started on a branch from before it: older than the session's.
+    subprocess.run(["git", "commit", "-qm", "theirs"], cwd=repo, env=os.environ | at(T0 + MINUTE), check=True)
+    before(repo, "switch", "-q", "main")
+    (repo / "mine.py").write_text("m = 1\n")
+    git(repo, "add", ".")
+    subprocess.run(["git", "commit", "-qm", "mine"], cwd=repo, env=os.environ | at(T0 + 2 * MINUTE), check=True)
+    git(repo, "merge", "-q", "--no-ff", "-m", "pull", "theirs")
+    snap = take(repo, T0 + 5 * MINUTE, T0)
+    assert snap is not None
+    assert [commit.split(" ", 1)[1] for commit in snap.commits] == ["mine", "pull"]
+    assert snap.base == start
+
+
+def test_a_shallow_clones_cut_isnt_measured_from_nothing(repo: Path, tmp_path: Path) -> None:
+    (repo / "two.py").write_text("")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "two")
+    clone = tmp_path / "clone"
+    git(tmp_path, "clone", "-q", "--depth", "1", f"file://{repo}", str(clone))
+    snap = take(clone, T0, T0)
+    assert snap is not None
+    assert (snap.base, snap.files) == (snap.head, ())
+
+
+def test_a_huge_diff_is_read_only_to_its_cap_and_still_counted_whole(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("agent_fabric.snapshot.MAX_DIFF", 1000)
+    (repo / "dump.sql").write_text("".join(f"insert {i};\n" for i in range(5000)))
+    git(repo, "add", "dump.sql")
+    snap = take(repo, T0, T0)
+    assert snap is not None
+    assert (snap.diff_cut, len(snap.diff) <= 1000, snap.files) == (True, True, ("dump.sql",))
+    assert "| +5000 -0" in snap.stat
