@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ from typing import Any
 import pytest
 
 from agent_fabric.capture import Message, SessionMeta
-from agent_fabric.digest import HARD_CAP, path, render
+from agent_fabric.digest import HARD_CAP, MAX_FILES, path, render
 from agent_fabric.snapshot import REPO_VARIABLES, Snapshot, take
 
 FIXTURES = Path(__file__).parent / "fixtures" / "agentsview"
@@ -135,6 +136,13 @@ def test_system_messages_arent_prompts() -> None:
         ("git status", "git"),
         ("cd x && git commit -m 'run pytest later'", "git"),
         ("echo 'pytest is slow'", "other"),
+        ("uv add --dev pytest", "install"),
+        ("pip install pytest-cov", "install"),
+        ("cat pytest.ini", "other"),
+        ('uv run --cache-dir "$TMPDIR/uv" pytest -q', "test"),
+        ("CI=1 timeout 60 go test ./...", "test"),
+        ("python3 -m pytest tests", "test"),
+        ("npx eslint .", "lint"),
         ("python3 check.py", "other"),
     ],
 )
@@ -187,6 +195,11 @@ ERROR tests/test_b.py::test_two
             "- #1 jest: failed (2 passed, 1 failed, 0 skipped); failing: math \u203a adds",
         ),
         ("make test", "all good\n", "- #1 tests: passed"),
+        (
+            "pnpm test",
+            "Exit code 1\n FAIL  src/a.test.ts > adds\n      Tests  1 failed | 3 passed (4)\n",
+            "- #1 vitest: failed (3 passed, 1 failed, 0 skipped); failing: src/a.test.ts > adds",
+        ),
     ],
 )
 def test_a_test_run_gives_its_runner_counts_and_failures(command: str, output: str, line: str) -> None:
@@ -308,6 +321,10 @@ def test_a_snapshot_of_a_linked_worktree_names_its_main_checkout(repo: Path, tmp
     assert (snap.worktree, snap.main) == (linked, repo)
     text = digest([message(0, "user", "go")], [snap], cwd=str(linked))
     assert front(text)["worktree"] == f'{{path: "{linked}", main: "{repo}"}}'
+    (linked / "pkg").mkdir()
+    inside = take(linked / "pkg", T0)
+    assert inside is not None
+    assert inside.worktree == linked
 
 
 def test_a_base_rewritten_away_measures_from_the_head(repo: Path) -> None:
@@ -326,3 +343,85 @@ def test_a_snapshot_reads_its_own_folder_whatever_repo_a_hook_named(
     snap = take(repo, T0)
     assert snap is not None
     assert snap.branch == "main"
+
+
+def test_a_command_that_only_names_a_runner_sets_no_test_outcome() -> None:
+    messages = [bash(1, "pytest", "Exit code 1\n" + PYTEST_FAILED), bash(2, "uv add --dev pytest", "ok")]
+    messages.append(bash(3, "cat pytest.ini", "[pytest]"))
+    text = digest(messages)
+    assert front(text)["outcome"].startswith('{last_tests: "failed",')
+    assert section(text, "Tests").count("- #") == 1
+
+
+def test_a_session_in_a_subfolder_gets_the_whole_repos_changes_by_their_paths_from_the_top(repo: Path) -> None:
+    (repo / "sub").mkdir()
+    (repo / "sub" / "t.py").write_text("a = 1\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "sub")
+    (repo / "sub" / "t.py").write_text("a = 2\n")
+    (repo / "sub" / "new.py").write_text("")
+    (repo / "top.py").write_text("")
+    snap = take(repo / "sub", T0)
+    assert snap is not None
+    assert snap.files == ("sub/new.py", "sub/t.py", "top.py")
+    assert snap.untracked == ("sub/new.py", "top.py")
+
+
+def test_a_snapshot_runs_no_converter_or_filter_the_repo_names(repo: Path, tmp_path: Path) -> None:
+    ran = tmp_path / "ran"
+    tool = tmp_path / "tool.sh"
+    tool.write_text(f'#!/bin/sh\ntouch {ran}\ncat "$@"\n')
+    tool.chmod(0o755)
+    (repo / ".gitattributes").write_text("*.bin diff=hex filter=boom\n")
+    git(repo, "config", "diff.hex.textconv", str(tool))
+    git(repo, "config", "filter.boom.clean", str(tool))
+    git(repo, "config", "filter.boom.required", "true")
+    (repo / "a.bin").write_text("one\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "bin")
+    ran.unlink()
+    (repo / "a.bin").write_text("two\n")
+    snap = take(repo, T0)
+    assert snap is not None
+    assert "a.bin" in snap.files
+    assert not ran.exists()
+
+
+def test_markers_name_their_file_whatever_diff_prefixes_the_user_set(repo: Path) -> None:
+    git(repo, "config", "diff.mnemonicPrefix", "true")
+    first = take(repo, T0)
+    (repo / "app.py").write_text("x = 1  # TODO\n")
+    git(repo, "config", "diff.noprefix", "true")
+    last = take(repo, T0, base=first.base if first else None)
+    assert last is not None
+    assert "`app.py:1`" in section(digest([message(0, "user", "go")], [last]), "Markers")
+
+
+def snapshot(**fields: Any) -> Snapshot:
+    empty = Snapshot(T0, "a" * 40, "a" * 40, "main", None, None, (), "", "", False, (), (), False)
+    return replace(empty, **fields)
+
+
+def test_thousands_of_files_are_named_up_to_a_cap_and_counted() -> None:
+    names = tuple(f"node_modules/p{i}/index.js" for i in range(MAX_FILES + 300))
+    snap = snapshot(files=names, untracked=names, uncommitted=True)
+    text = digest([message(0, "user", "go")], [snap])
+    assert len(json.loads(front(text)["files_modified"])) == MAX_FILES
+    assert front(text)["files_unlisted"] == "300"
+    assert section(text, "Changes").count("node_modules/") == MAX_FILES
+    assert ", and 300 more" in section(text, "Changes")
+
+
+def test_over_the_cap_the_diff_goes_before_the_errors() -> None:
+    diff = "\n".join(f"+line {i} " + "z" * 1200 for i in range(200))
+    snap = snapshot(diff=diff, stat=" a.py | 200 +\n 1 file changed", files=("a.py",), uncommitted=True)
+    messages = [message(0, "user", "go"), bash(1, "make", "Exit code 2\nboom")]
+    text = digest(messages, [snap])
+    assert len(text.encode()) <= HARD_CAP
+    assert "[the diff cut to fit the digest]" in section(text, "Changes")
+    assert "- #1 shell `make` · exit 2: boom" in section(text, "Errors")
+
+
+def test_front_matter_escapes_what_yaml_forbids() -> None:
+    text = digest([message(0, "user", "go")], [snapshot(branch="feat\u0085x\u007f")])
+    assert front(text)["branch"] == '"feat\\u0085x\\u007f"'

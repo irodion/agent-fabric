@@ -456,17 +456,22 @@ most of the bulk, most of the noise for the ingest LLM, and where accidental sec
 
 **How it reads** (`digest.render`, 2026-11-21). Prompts and the final message are quoted (`> `), so no line of
 theirs reads as a section. A pasted block is one fenced, or one between blank lines, of more than 40 lines; many
-short typed paragraphs stay whole. A command's kind comes from what it runs, outside its quoted strings: `cd x &&
-uv run pytest` is a test, `echo 'pytest'` isn't. Test counts come from each runner's own summary line (pytest,
-cargo, go test, vitest, jest), and without one, from the exit code. An error is distinct by its tool, command and
+short typed paragraphs stay whole. A command's kind comes from what one of its commands starts with, outside quoted strings, after `&&`, `;`, a
+pipe or a wrapper such as `uv run` or `npx`: `cd x && uv run pytest` is a test, while `echo 'pytest'`,
+`cat pytest.ini` and `uv add pytest` aren't. Test counts come from each runner's own summary line (pytest,
+cargo, go test, vitest, jest; for `pnpm test` and the like, vitest's or jest's), and without one, from the exit
+code. An error is distinct by its tool, command and
 output. Over the cap, the commands table is cut first, then the changes, tests, errors, commits and markers, the
-final message last; each cut drops whole entries from the front. `cwd` and the worktree's paths stay absolute in
+final message last; each cut drops whole entries from the front. The front matter, the stat and the untracked list
+name at most 200 files and count the rest. `cwd` and the worktree's paths stay absolute in
 the rendering, and redaction's `/home/<user>` → `~` (§4.5) shortens them when the digest is written. Markers come
 from the diff, so a file the agent left untracked shows in Changes but its markers don't.
 
 **Git snapshots.** Diff-based fields come from the session's `cwd`, read-only: `git rev-parse HEAD`,
 `git diff <first HEAD> --unified=0` and `git ls-files --others --exclude-standard`, taken at first sight and at each
-turn end, with `--no-optional-locks`, and no filesystem monitor or external diff the repo's config names. This is agent-agnostic. Caveat: edits I make by hand in the same tree during a session are attributed to it
+turn end, from the repo's top folder so a session in a subfolder gets the whole repo's changes. Git runs with
+`--no-optional-locks`, and with no filesystem monitor, external diff, text converter or clean filter that the repo's
+config or `.gitattributes` names, so a snapshot runs nothing of the repo's. This is agent-agnostic. Caveat: edits I make by hand in the same tree during a session are attributed to it
 (labelled "working tree during session", not "agent wrote").
 
 **Worktrees.** The first snapshot also runs `git rev-parse --path-format=absolute --git-dir --git-common-dir`. If

@@ -28,33 +28,54 @@ ERROR_TAIL = 30  # lines of output kept with an error
 MAX_ERRORS = 20
 MAX_COMMAND = 300  # characters of a command shown in the table
 MAX_MARKER = 200
+MAX_FILES = 200  # files named in the front matter, the stat and the untracked list
+# Over the cap, sections are cut in this order; prompts never, as typed text isn't cut.
+CUT_ORDER = ("Commands", "Changes", "Tests", "Errors", "Commits", "Markers", "Final message")
 IDLE = timedelta(minutes=5)  # a gap longer than this between two messages isn't active time
 
-# A command's kind, by the first that matches outside its quoted strings.
+# A command's kind, by what one of its commands starts with: after `&&`, `;`, a pipe or a wrapper (`uv run`, `npx`).
+# Each pattern ends at a word's end, so `pytest.ini` isn't pytest, and `uv add pytest` is an install.
+END = r"(?=\s|$)"
 COMMAND_KINDS = (
     (
         "test",
-        r"\b(?:pytest|py\.test|jest|vitest|mocha|tox|nox|rspec|phpunit|ctest|go test|cargo (?:test|nextest)"
-        r"|(?:npm|pnpm|yarn|bun) (?:run )?test|make (?:test|check)|python3? -m unittest)\b",
+        re.compile(
+            r"(?:pytest|py\.test|jest|vitest|mocha|tox|nox|rspec|phpunit|ctest|go test|cargo (?:test|nextest)"
+            r"|(?:npm|pnpm|yarn|bun) (?:run )?test|make (?:test|check)|python3? -m (?:pytest|unittest))" + END
+        ),
     ),
     (
         "lint",
-        r"\b(?:ruff|eslint|biome|mypy|pyright|clippy|shellcheck|shfmt|golangci-lint|prettier|flake8|pylint"
-        r"|actionlint|semgrep|gitleaks|tsc --noEmit|(?:npm|pnpm|yarn|bun) (?:run )?lint)\b",
+        re.compile(
+            r"(?:ruff|eslint|biome|mypy|pyright|cargo clippy|shellcheck|shfmt|golangci-lint|prettier|flake8|pylint"
+            r"|actionlint|semgrep|gitleaks|tsc --noEmit|(?:npm|pnpm|yarn|bun) (?:run )?lint)" + END
+        ),
     ),
     (
         "build",
-        r"\b(?:cargo (?:build|check)|go build|tsc|make|cmake|uv build|gradle|mvn|docker build"
-        r"|(?:npm|pnpm|yarn|bun) (?:run )?build)\b",
+        re.compile(
+            r"(?:cargo (?:build|check)|go build|tsc|make|cmake|uv build|gradle|mvn|docker build"
+            r"|(?:npm|pnpm|yarn|bun) (?:run )?build)" + END
+        ),
     ),
     (
         "install",
-        r"\b(?:pip3? install|uv (?:add|sync|pip install|tool install)|(?:npm|pnpm|yarn|bun) (?:install|add|i)"
-        r"|cargo (?:add|install)|go (?:get|install)|apt(?:-get)? install|brew install|poetry (?:add|install))\b",
+        re.compile(
+            r"(?:pip3? install|uv (?:add|sync|pip install|tool install)|(?:npm|pnpm|yarn|bun) (?:install|add|i|ci)"
+            r"|cargo (?:add|install)|go (?:get|install)|apt(?:-get)? install|brew install|poetry (?:add|install))"
+            + END
+        ),
     ),
-    ("git", r"(?:^|[;&|(]\s*)git\b"),
+    ("git", re.compile(r"git" + END)),
 )
 QUOTED = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
+SEPARATORS = re.compile(r"&&|\|\||[;|&(){}\n]")
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*")
+# What runs the command after it: the runner is any later word of the segment.
+WRAPPERS = re.compile(
+    r"(?:uv (?:tool )?run|uvx|npx|bunx|pnpm (?:exec|dlx)|npm exec|yarn (?:dlx|exec)|poetry run|pdm run|hatch run"
+    r"|pipenv run|rye run|python3? -m|timeout|time|env|nice|nohup|xvfb-run)" + END
+)
 
 MARKERS = (
     ("todo", re.compile(r"\b(?:TODO|FIXME|HACK|XXX)\b")),
@@ -74,16 +95,18 @@ MARKERS = (
         ),
     ),
 )
+EXIT_HEADER = re.compile(r"Exit code \d+\s*$")
 HUNK = re.compile(r"^@@ -\S+ \+(\d+)(?:,\d+)? @@")
 
-# What each test runner prints of its counts and its failures.
+# What each test runner prints of its counts and its failures; a package script (`pnpm test`) may run any of them.
 COUNT = re.compile(r"(\d+) (passed|failed|skipped|errors?|xfailed|xpassed|todo)\b")
 RUNNERS = (
-    ("pytest", re.compile(r"\b(?:pytest|py\.test|tox|nox)\b")),
-    ("cargo test", re.compile(r"\bcargo (?:test|nextest)\b")),
-    ("go test", re.compile(r"\bgo test\b")),
-    ("vitest", re.compile(r"\bvitest\b")),
-    ("jest", re.compile(r"\b(?:jest|(?:npm|pnpm|yarn|bun) (?:run )?test)\b")),
+    ("pytest", re.compile(r"(?:pytest|py\.test|tox|nox|python3? -m pytest)" + END)),
+    ("cargo test", re.compile(r"cargo (?:test|nextest)" + END)),
+    ("go test", re.compile(r"go test" + END)),
+    ("vitest", re.compile(r"vitest" + END)),
+    ("jest", re.compile(r"jest" + END)),
+    ("package script", re.compile(r"(?:npm|pnpm|yarn|bun) (?:run )?test" + END)),
 )
 COUNTED_AS: dict[str, str] = {
     "error": "failed",
@@ -120,7 +143,7 @@ class _Section:
     title: str
     head: tuple[str, ...]  # lines that stay
     entries: tuple[str, ...]  # cut from the front when the digest is over its cap
-    cut: str = ""  # what a cut says, after how many entries went
+    cut: str = "[… {n} earlier entries cut: kb show {session}]"  # what a cut says
 
 
 def path(meta: SessionMeta, project: str, start: datetime) -> str:
@@ -174,19 +197,28 @@ def render(
             "edits": sum(action.kind == "edit" for _, action in actions),
             "errors": sum(action.failed for _, action in actions),
         },
-        "files_modified": list(last.files) if last else [],
+        "files_modified": list(last.files[:MAX_FILES]) if last else [],
+        **({"files_unlisted": len(last.files) - MAX_FILES} if last and len(last.files) > MAX_FILES else {}),
         "revision": revision,
     }
     sections = [
         _Section("Prompts", (), tuple(_prompt(meta.id, message) for message in prompts)),
         _commands(meta.id, shells),
-        _Section("Tests", (), tuple(_test_line(found) for found in tests), "earlier test runs cut"),
+        _Section(
+            "Tests",
+            (),
+            tuple(_test_line(found) for found in tests),
+            "[… {n} earlier test runs cut: kb show {session}]",
+        ),
         _errors(meta.id, actions),
         _changes(first, last),
         _Section(
-            "Commits", (), tuple(f"- {commit}" for commit in last.commits) if last else (), "earlier commits cut"
+            "Commits",
+            (),
+            tuple(f"- {commit}" for commit in last.commits) if last else (),
+            "[… {n} earlier commits cut]",
         ),
-        _Section("Markers", (), tuple(_markers(last.diff)) if last else (), "earlier markers cut"),
+        _Section("Markers", (), tuple(_markers(last.diff)) if last else (), "[… {n} earlier markers cut]"),
         _Section("Final message", (), (_quoted(final.content),) if final and final.content else ()),
     ]
     head = "---\n" + "".join(f"{key}: {_yaml(value)}\n" for key, value in front.items()) + "---\n"
@@ -245,20 +277,37 @@ def _commands(session_id: str, shells: list[tuple[int, Action]]) -> _Section:
         error = _first_error(action.output) if action.failed else ""
         rows.append(f"| #{ordinal} | {_cell(command)} | {code} | {_kind(action.command)} | {_cell(error)} |")
     head = ("| # | command | exit | kind | first error line |", "|---|---|---|---|---|") if rows else ()
-    return _Section("Commands", head, tuple(rows), "earlier commands cut")
+    return _Section("Commands", head, tuple(rows), "[… {n} earlier commands cut: kb show {session}]")
 
 
 def _kind(command: str | None) -> str:
-    bare = QUOTED.sub("''", command or "")
-    return next((kind for kind, pattern in COMMAND_KINDS if re.search(pattern, bare)), "other")
+    return _run(command)[0]
+
+
+def _run(command: str | None) -> tuple[str, str]:
+    """The command's kind, and the command that gave it from where it starts."""
+    for segment in SEPARATORS.split(QUOTED.sub("''", command or "")):
+        words = segment.split()
+        while words and (ASSIGNMENT.fullmatch(words[0]) or words[0] in ("sudo", "command", "exec")):
+            words = words[1:]
+        text = " ".join(words)
+        starts = [0]
+        if WRAPPERS.match(text):
+            starts += [index for index in range(1, len(words)) if not words[index].startswith("-")]
+        for index in starts:
+            rest = " ".join(words[index:])
+            for kind, pattern in COMMAND_KINDS:
+                if pattern.match(rest):
+                    return kind, rest
+    return "other", ""
 
 
 def _tests(ordinal: int, action: Action) -> Tests | None:
     """A test run's counts and failures, by what its runner prints; None for a command that runs no tests."""
-    if _kind(action.command) != "test":
+    kind, run = _run(action.command)
+    if kind != "test":
         return None
-    bare = QUOTED.sub("''", action.command or "")
-    runner = next((name for name, pattern in RUNNERS if pattern.search(bare)), "tests")
+    runner = next((name for name, pattern in RUNNERS if pattern.match(run)), "tests")
     out = action.output or ""
     counts: dict[str, int] = {}
     failing: list[str] = []
@@ -277,10 +326,12 @@ def _tests(ordinal: int, action: Action) -> Tests | None:
             "failed": max(len(failing), int(packages_failed)),
             "skipped": sum(state == "SKIP" for state, _ in runs),
         }
-    elif runner == "vitest" and (summaries := VITEST_SUMMARY.findall(out)):
+    elif runner in ("vitest", "package script") and (summaries := VITEST_SUMMARY.findall(out)):
+        runner = "vitest"
         counts = _counts(summaries[-1])
         failing = VITEST_FAILED.findall(out)
-    elif runner == "jest" and (summaries := JEST_SUMMARY.findall(out)):
+    elif runner in ("jest", "package script") and (summaries := JEST_SUMMARY.findall(out)):
+        runner = "jest"
         counts = _counts(summaries[-1])
         failing = [name for name in JEST_FAILED.findall(out) if not name.startswith("Console")]
     if counts:
@@ -339,7 +390,7 @@ def _errors(session_id: str, actions: list[tuple[int, Action]]) -> _Section:
         entry = f"- #{ordinal} {action.kind} `{_cell(what[:MAX_COMMAND])}` · {status}: {_first_error(action.output)}"
         entries.append(entry + cut + ("\n" + _fenced(tail) if tail else ""))
     head = (f"{len(distinct) - len(kept)} earlier errors not shown.",) if len(distinct) > len(kept) else ()
-    return _Section("Errors", head, tuple(entries), "earlier errors cut")
+    return _Section("Errors", head, tuple(entries), "[… {n} earlier errors cut: kb show {session}]")
 
 
 def _changes(first: Snapshot | None, last: Snapshot | None) -> _Section:
@@ -350,9 +401,14 @@ def _changes(first: Snapshot | None, last: Snapshot | None) -> _Section:
     if first.uncommitted:
         head.append("It already had uncommitted changes when the session was first seen.")
     if last.stat:
-        head.append(_fenced(last.stat))
+        stat = last.stat.split("\n")
+        if len(stat) > MAX_FILES + 1:  # its last line sums it up
+            stat = [*stat[:MAX_FILES], f"… {len(stat) - MAX_FILES - 1} more files", stat[-1]]
+        head.append(_fenced("\n".join(stat)))
     if last.untracked:
-        head.append("Untracked: " + ", ".join(f"`{name}`" for name in last.untracked))
+        more = len(last.untracked) - MAX_FILES
+        names = ", ".join(f"`{_cell(name)}`" for name in last.untracked[:MAX_FILES])
+        head.append("Untracked: " + names + (f", and {more} more" if more > 0 else ""))
     lines = last.diff.rstrip("\n").split("\n") if last.diff else []
     entries: tuple[str, ...] = ()
     if lines:
@@ -362,7 +418,7 @@ def _changes(first: Snapshot | None, last: Snapshot | None) -> _Section:
         entries = (_fenced(shown, "diff") + note,)
     if not last.stat and not last.untracked:
         head.append("No changes.")
-    return _Section("Changes", tuple(head), entries, "the diff cut")
+    return _Section("Changes", tuple(head), entries, "[the diff cut to fit the digest]")
 
 
 def _markers(diff: str) -> Iterable[str]:
@@ -390,20 +446,19 @@ def _fit(sections: list[_Section], room: int, session_id: str) -> str:
     """The sections, each cut from its front until the whole fits; the prompts last, since typed text isn't cut."""
     entries = {section.title: list(section.entries) for section in sections}
     cut = dict.fromkeys(entries, 0)
-    order = [s.title for s in sections if s.title not in ("Prompts", "Final message")] + ["Final message"]
 
     def body() -> str:
         out = []
         for section in sections:
             lines = list(section.head)
             if cut[section.title]:
-                lines.append(f"[… {cut[section.title]} {section.cut or 'entries cut'}: kb show {session_id}]")
+                lines.append(section.cut.format(n=cut[section.title], session=session_id))
             lines += entries[section.title]
             out.append(f"## {section.title}\n" + ("\n".join(lines) + "\n" if lines else ""))
         return "\n".join(out)
 
     text = body()
-    for title in order:
+    for title in CUT_ORDER:
         while len(text.encode()) > room and entries[title]:
             over = len(text.encode()) - room
             # Drop as many entries from the front as the excess needs, at least one.
@@ -426,7 +481,8 @@ def _final(said: Sequence[Message]) -> Message | None:
 
 
 def _first_error(output: str | None) -> str:
-    lines = [line.strip() for line in (output or "").split("\n") if line.strip()]
+    # Not the `Exit code N` Claude Code starts a failed command's output with: the exit column has it.
+    lines = [line.strip() for line in (output or "").split("\n") if line.strip() and not EXIT_HEADER.match(line)]
     found = next((line for line in lines if ERRORS.search(line)), lines[0] if lines else "")
     return found[:MAX_COMMAND]
 
@@ -466,7 +522,7 @@ def _yaml(value: object) -> str:
     """YAML in flow style: JSON for every scalar and list, which YAML reads as it is, with bare keys for a map."""
     if isinstance(value, dict):
         return "{" + ", ".join(f"{key}: {_yaml(item)}" for key, item in value.items()) + "}"
-    return json.dumps(value, ensure_ascii=False)
+    return json.dumps(value)  # ASCII: YAML forbids some control characters JSON would leave as they are
 
 
 def _segment(text: str) -> str:
