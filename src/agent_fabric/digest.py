@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from agent_fabric.capture import Message, SessionMeta
-from agent_fabric.normalize import ERRORS, Action, events
+from agent_fabric.normalize import ERRORS, Action, events, shows_files
 from agent_fabric.snapshot import Snapshot, parse
 
 SCHEMA = "fabric.digest/1"
@@ -41,7 +41,8 @@ COMMAND_KINDS = (
         "test",
         re.compile(
             r"(?:pytest|py\.test|jest|vitest|mocha|tox|nox|rspec|phpunit|ctest|go test|cargo (?:test|nextest)"
-            r"|(?:npm|pnpm|yarn|bun) (?:run )?test|make (?:test|check)|python3? -m (?:pytest|unittest))" + END
+            r"|(?:npm|pnpm|yarn|bun) (?:run )?test|make (?:test|check)|python3?(?:\.\d+)? -m (?:pytest|unittest))"
+            + END
         ),
     ),
     (
@@ -71,16 +72,10 @@ COMMAND_KINDS = (
 QUOTED = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
 SEPARATORS = re.compile(r"&&|\|\||[;|&(){}\n]")
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*")
-# What runs the command after it: the runner is any later word of the segment.
+# What runs the command after it, past its own options: `uv run --frozen pytest`, `timeout 60 pytest`.
 WRAPPERS = re.compile(
     r"(?:uv (?:tool )?run|uvx|npx|bunx|pnpm (?:exec|dlx)|npm exec|yarn (?:dlx|exec)|poetry run|pdm run|hatch run"
     r"|pipenv run|rye run|timeout|time|env|nice|nohup|xvfb-run)" + END
-)
-# A wrapper's options that take the next word as their value: `uv run --with pytest python x.py` runs python.
-VALUED = frozenset(
-    {"--with", "--with-editable", "--with-requirements", "--from", "--package", "-p", "--python", "--cache-dir"}
-    | {"--directory", "--project", "--env-file", "--index", "--extra", "--group", "-c", "--call", "-s", "--signal"}
-    | {"-k", "--kill-after", "-n", "--adjustment", "-u", "--unset", "-C", "--chdir"}
 )
 
 MARKERS = (
@@ -101,18 +96,18 @@ MARKERS = (
         ),
     ),
 )
+FENCE = re.compile(r"\s*(`{3,}|~{3,})(?!.*\1)")  # an opening or closing fence, alone
 EXIT_HEADER = re.compile(r"Exit code \d+\s*$")
 HUNK = re.compile(r"^@@ -\S+ \+(\d+)(?:,\d+)? @@")
 
 # What each test runner prints of its counts and its failures; a package script (`pnpm test`) may run any of them.
 COUNT = re.compile(r"(\d+) (passed|failed|skipped|errors?|xfailed|xpassed|todo)\b")
 RUNNERS = (
-    ("pytest", re.compile(r"(?:pytest|py\.test|tox|nox|python3? -m pytest)" + END)),
+    ("pytest", re.compile(r"(?:pytest|py\.test|tox|nox|python3?(?:\.\d+)? -m pytest)" + END)),
     ("cargo test", re.compile(r"cargo (?:test|nextest)" + END)),
     ("go test", re.compile(r"go test" + END)),
     ("vitest", re.compile(r"vitest" + END)),
     ("jest", re.compile(r"jest" + END)),
-    ("package script", re.compile(r"(?:npm|pnpm|yarn|bun) (?:run )?test" + END)),
 )
 COUNTED_AS: dict[str, str] = {
     "error": "failed",
@@ -121,15 +116,18 @@ COUNTED_AS: dict[str, str] = {
     "xpassed": "passed",
     "todo": "skipped",
 }
-PYTEST_SUMMARY = re.compile(r"^=*\s*((?:\d+ \w+(?:, )?)+) in [\d.]+s\b.*$", re.MULTILINE)
+PYTEST_SUMMARY = re.compile(
+    r"^=*\s*((?:\d+ (?:passed|failed|skipped|errors?|xfailed|xpassed|deselected|warnings?)(?:, )?)+) in [\d.]+s\b",
+    re.MULTILINE,
+)
 PYTEST_FAILED = re.compile(r"^(?:FAILED|ERROR) (\S+)", re.MULTILINE)
 CARGO_RESULT = re.compile(r"^test result: \w+\. (\d+) passed; (\d+) failed; (\d+) ignored", re.MULTILINE)
 CARGO_FAILED = re.compile(r"^test (\S+) \.\.\. FAILED$", re.MULTILINE)
 GO_TESTS = re.compile(r"^\s*--- (PASS|FAIL|SKIP): (\S+)", re.MULTILINE)
-GO_PACKAGES = re.compile(r"^(ok|FAIL)\s+\S+", re.MULTILINE)
-JEST_SUMMARY = re.compile(r"^Tests:\s+(.+)$", re.MULTILINE)
+GO_PACKAGES = re.compile(r"^(ok|FAIL)\s+\S+\s+(?:[\d.]+s|\(cached\))", re.MULTILINE)
+JEST_SUMMARY = re.compile(r"^Tests:\s+(\d+ \w+(?:, \d+ \w+)*)", re.MULTILINE)
 JEST_FAILED = re.compile(r"^\s*● (.+?)\s*$", re.MULTILINE)
-VITEST_SUMMARY = re.compile(r"^\s*Tests\s+(.+?)(?:\s+\(\d+\))?$", re.MULTILINE)
+VITEST_SUMMARY = re.compile(r"^\s*Tests\s+(\d+ \w+(?: \| \d+ \w+)*)", re.MULTILINE)
 VITEST_FAILED = re.compile(r"^\s*(?:FAIL|\u00d7|\u2717)\s+(.+?)\s*$", re.MULTILINE)  # FAIL, a cross or a ballot X
 
 
@@ -188,7 +186,7 @@ def render(
         "cwd": meta.cwd,
         "branch": (last.branch if last else None) or meta.git_branch,
         "worktree": _worktree(first),
-        "head": {"start": first.head[:7], "end": last.head[:7]} if first and last else None,
+        "head": {"start": last.base[:7], "end": last.head[:7]} if last else None,
         "time": {"start": _when(start), "end": _when(end), "active_min": _active_minutes(stamps)},
         "models": list(dict.fromkeys(message.model for message in said if message.model)),
         "outcome": {
@@ -258,22 +256,27 @@ def _collapse(text: str, pointer: str) -> str:
 
 
 def _blocks(lines: list[str]) -> Iterable[list[str]]:
+    """A fenced block whole, from a fence to the next one; otherwise lines between blank lines. A line that opens and
+    closes a fence (```x```) is no fence, and nor is a last fence with none to close it."""
+    fences = [i for i, line in enumerate(lines) if FENCE.match(line)]
+    closing = dict(zip(fences[::2], fences[1::2], strict=False))
     block: list[str] = []
-    fenced = False
-    for line in lines:
-        fence = line.lstrip().startswith("```")
-        if not fenced and not line.strip():
+    index = 0
+    while index < len(lines):
+        if index in closing:
             if block:
                 yield block
-            yield [line]
-            block = []
+            yield lines[index : closing[index] + 1]
+            block, index = [], closing[index] + 1
             continue
-        block.append(line)
-        if fence:
-            fenced = not fenced
-            if not fenced:
+        if lines[index].strip():
+            block.append(lines[index])
+        else:
+            if block:
                 yield block
-                block = []
+            yield [lines[index]]
+            block = []
+        index += 1
     if block:
         yield block
 
@@ -286,7 +289,8 @@ def _commands(session_id: str, shells: list[tuple[int, Action]]) -> _Section:
             command = command[:MAX_COMMAND] + f"… (kb show {session_id}#{ordinal})"
         code = str(action.exit_code) if action.exit_code is not None else action.status or ""
         error = _first_error(action.output) if action.failed else ""
-        rows.append(f"| #{ordinal} | {_cell(command)} | {code} | {_kind(action.command)} | {_cell(error)} |")
+        kind = "test" if _tests(ordinal, action) else _kind(action.command)
+        rows.append(f"| #{ordinal} | {_cell(command)} | {code} | {kind} | {_cell(error)} |")
     head = ("| # | command | exit | kind | first error line |", "|---|---|---|---|---|") if rows else ()
     return _Section("Commands", head, tuple(rows), "[… {n} earlier commands cut: kb show {session}]")
 
@@ -296,67 +300,55 @@ def _kind(command: str | None) -> str:
 
 
 def _run(command: str | None) -> tuple[str, str]:
-    """The command's kind, and the command that gave it from where it starts."""
+    """The command's kind, and the command that gave it from where its program starts."""
     for segment in SEPARATORS.split(QUOTED.sub("''", command or "")):
         words = segment.split()
-        while words and (ASSIGNMENT.fullmatch(words[0]) or words[0] in ("sudo", "command", "exec")):
-            words = words[1:]
-        starts = [0]
-        if wrapper := WRAPPERS.match(" ".join(words)):
-            starts.append(_program(words, len(wrapper[0].split())))
-        for index in starts:
-            rest = " ".join(words[index:])
+        while words:
+            while words and (ASSIGNMENT.fullmatch(words[0]) or words[0] in ("sudo", "command", "exec")):
+                words = words[1:]
+            if not words:
+                break
+            words = [words[0].rsplit("/", 1)[-1], *words[1:]]  # `.venv/bin/pytest` runs pytest
+            if wrapper := WRAPPERS.match(" ".join(words)):
+                words = _past_options(words[len(wrapper[0].split()) :])
+                continue
+            text = " ".join(words)
             for kind, pattern in COMMAND_KINDS:
-                if pattern.match(rest):
-                    return kind, rest
+                if pattern.match(text):
+                    return kind, text
+            break
     return "other", ""
 
 
-def _program(words: list[str], index: int) -> int:
-    """Where the program a wrapper runs starts: past its options and their values, a timeout's duration and `X=1`."""
+def _past_options(words: list[str]) -> list[str]:
+    """A wrapper's words from the program it runs: past its options, a timeout's duration and `X=1`. A long option
+    with no `=` may take the next word as its value (`--with pytest`), so that word goes too."""
+    index = 0
     while index < len(words):
         word = words[index]
-        if word in VALUED:
+        if word.startswith("--") and "=" not in word:
             index += 2
         elif word.startswith("-") or ASSIGNMENT.fullmatch(word) or word[:1].isdigit():
             index += 1
         else:
             break
-    return index
+    return words[index:]
 
 
 def _tests(ordinal: int, action: Action) -> Tests | None:
-    """A test run's counts and failures, by what its runner prints; None for a command that runs no tests."""
-    kind, run = _run(action.command)
-    if kind != "test":
+    """A test run's counts and failures, by what its runner prints; None for a command that runs no tests.
+
+    A runner's summary in the output makes a test run, however the command started it; a command that names a runner
+    is one even without a summary, as when it crashed first. A command that only shows files, such as `cat ci.log`,
+    is none, whatever the file says."""
+    if shows_files(action.command):
         return None
-    runner = next((name for name, pattern in RUNNERS if pattern.match(run)), "tests")
     out = action.output or ""
-    counts: dict[str, int] = {}
-    failing: list[str] = []
-    if runner == "pytest" and (summaries := PYTEST_SUMMARY.findall(out)):
-        counts = _counts(summaries[-1])
-        failing = PYTEST_FAILED.findall(out)
-    elif runner == "cargo test" and (results := CARGO_RESULT.findall(out)):
-        counts = {name: sum(int(r[i]) for r in results) for i, name in enumerate(("passed", "failed", "skipped"))}
-        failing = CARGO_FAILED.findall(out)
-    elif runner == "go test" and (GO_TESTS.search(out) or GO_PACKAGES.search(out)):
-        runs = GO_TESTS.findall(out)
-        failing = [name for state, name in runs if state == "FAIL"]
-        packages_failed = any(state == "FAIL" for state in GO_PACKAGES.findall(out))
-        counts = {
-            "passed": sum(state == "PASS" for state, _ in runs),
-            "failed": max(len(failing), int(packages_failed)),
-            "skipped": sum(state == "SKIP" for state, _ in runs),
-        }
-    elif runner in ("vitest", "package script") and (summaries := VITEST_SUMMARY.findall(out)):
-        runner = "vitest"
-        counts = _counts(summaries[-1])
-        failing = VITEST_FAILED.findall(out)
-    elif runner in ("jest", "package script") and (summaries := JEST_SUMMARY.findall(out)):
-        runner = "jest"
-        counts = _counts(summaries[-1])
-        failing = [name for name in JEST_FAILED.findall(out) if not name.startswith("Console")]
+    found = _summary(out)
+    kind, run = _run(action.command)
+    if found is None and kind != "test":
+        return None
+    runner, counts, failing = found or (next((n for n, p in RUNNERS if p.match(run)), "tests"), {}, [])
     if counts:
         ok: bool | None = not counts.get("failed") and not action.failed
     else:
@@ -370,6 +362,31 @@ def _tests(ordinal: int, action: Action) -> Tests | None:
         tuple(dict.fromkeys(failing)),
         ok,
     )
+
+
+def _summary(out: str) -> tuple[str, dict[str, int], list[str]] | None:
+    """The runner whose summary the output holds, with its counts and failing tests."""
+    if summaries := PYTEST_SUMMARY.findall(out):
+        return "pytest", _counts(summaries[-1]), PYTEST_FAILED.findall(out)
+    if results := CARGO_RESULT.findall(out):
+        counts = {name: sum(int(r[i]) for r in results) for i, name in enumerate(("passed", "failed", "skipped"))}
+        return "cargo test", counts, CARGO_FAILED.findall(out)
+    if GO_PACKAGES.search(out):
+        runs = GO_TESTS.findall(out)
+        failing = [name for state, name in runs if state == "FAIL"]
+        packages_failed = any(state == "FAIL" for state in GO_PACKAGES.findall(out))
+        counts = {
+            "passed": sum(state == "PASS" for state, _ in runs),
+            "failed": max(len(failing), int(packages_failed)),
+            "skipped": sum(state == "SKIP" for state, _ in runs),
+        }
+        return "go test", counts, failing
+    if summaries := VITEST_SUMMARY.findall(out):
+        return "vitest", _counts(summaries[-1]), VITEST_FAILED.findall(out)
+    if summaries := JEST_SUMMARY.findall(out):
+        failing = [name for name in JEST_FAILED.findall(out) if not name.startswith("Console")]
+        return "jest", _counts(summaries[-1]), failing
+    return None
 
 
 def _counts(summary: str) -> dict[str, int]:

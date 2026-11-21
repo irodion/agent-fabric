@@ -115,7 +115,9 @@ def _action(
         exit_code = int(echoed[-1])
     # A source that records no status (Cursor) still has the output of a call that finished.
     finished = status not in ("started", "running") and (status is not None or output is not None)
-    unexplained = patterns and (kind == "edit" or (kind == "shell" and exit_code is None and not _reads(command)))
+    unexplained = patterns and (
+        kind == "edit" or (kind == "shell" and exit_code is None and not shows_files(command))
+    )
     failed = (
         status == "errored"
         or bool(exit_code)
@@ -128,7 +130,7 @@ def _action(
 HARMLESS_REDIRECT = re.compile(r"(?<![^\s;|&(])(?:\d?>>?\s*/dev/null|\d?>&\d|&>>?\s*/dev/null)(?=[\s;|&)]|$)")
 
 
-def _reads(command: str | None) -> bool:
+def shows_files(command: str | None) -> bool:
     """Whether every part of the command only shows files: `rg 'a|b' 2>/dev/null | head` does; `cat a && pytest`
     and `cat a > f` don't. It hides a command's failure, so in doubt it says no: any other redirect, a substitution,
     or quoting the shell's splitting can't follow."""

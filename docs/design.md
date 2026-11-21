@@ -455,12 +455,13 @@ never cut, because it carries intent. Pasted blocks (logs, stack traces, code, d
 most of the bulk, most of the noise for the ingest LLM, and where accidental secrets and client code end up.
 
 **How it reads** (`digest.render`, 2026-11-21). Prompts and the final message are quoted (`> `), so no line of
-theirs reads as a section. A pasted block is one fenced, or one between blank lines, of more than 40 lines; many
-short typed paragraphs stay whole. A command's kind comes from what one of its commands starts with, outside quoted strings, after `&&`, `;`, a
-pipe or a wrapper such as `uv run` or `npx`: `cd x && uv run pytest` is a test, while `echo 'pytest'`,
-`cat pytest.ini` and `uv add pytest` aren't. Test counts come from each runner's own summary line (pytest,
-cargo, go test, vitest, jest; for `pnpm test` and the like, vitest's or jest's), and without one, from the exit
-code. An error is distinct by its tool, command and
+theirs reads as a section. A pasted block is one between a pair of fences, or one between blank lines, of more
+than 40 lines; many short typed paragraphs stay whole, and a fence with no pair is a typed line. A command's kind comes from what one of its commands starts with, outside quoted strings, after `&&`, `;`, a
+pipe or wrappers such as `uv run` or `timeout 60`, by the program's name without its folder: `cd x && uv run
+pytest` is a test, while `echo 'pytest'`, `cat pytest.ini` and `uv add pytest` aren't. A test run is one whose output
+holds a runner's summary (pytest, cargo, go test, vitest, jest), however it was started, or one whose command names a
+runner, as when it crashed before its summary; a command that only shows files is none. Its counts come from that
+summary, and without one, its verdict from the exit code. An error is distinct by its tool, command and
 output. Over the cap, the commands table is cut first, then the changes, tests, errors, commits and markers, the
 final message last; each cut drops whole entries from the front. The front matter, the stat and the untracked list
 name at most 200 files and count the rest. `cwd` and the worktree's paths stay absolute in
@@ -468,12 +469,15 @@ the rendering, and redaction's `/home/<user>` → `~` (§4.5) shortens them when
 from the diff, so a file the agent left untracked shows in Changes but its markers don't.
 
 **Git snapshots.** Diff-based fields come from the session's `cwd`, read-only: `git rev-parse HEAD`,
-the diff from the first HEAD with `--unified=0` and the untracked files, taken at first sight and at each
-turn end, from the repo's top folder so a session in a subfolder gets the whole repo's changes. Only plumbing runs
+the diff with `--unified=0` and the untracked files, taken at first sight and at each turn end, from the repo's top folder so a session in a subfolder gets the whole repo's changes. Only plumbing runs
 (`git diff-index -p`, `rev-list`, `ls-files -z`) with `--no-optional-locks`: it ignores the settings meant for a
 person at a terminal, which in porcelain commands changed paths and prefixes and ran converters and signature checks
-(2026-11-21 review). A filesystem monitor, clean filters and submodules' status are turned off too. That keeps a
-snapshot quick and free of side effects, and isn't a boundary: the agent already runs code in the same folder. As
+(2026-11-21 review). A filesystem monitor and submodules' status are turned off too. That keeps a snapshot quick
+and isn't a boundary: the agent already runs code in the same folder, so a repo's clean filters (git-lfs's) run as
+git runs them, and an LFS file reads as itself, not as its pointer. The session's commits are those committed since
+it was first seen, and the diff is measured from the parent of the earliest, or from HEAD: a rebase, pull or amend
+mid-session needs no base carried between snapshots, while a commit someone else made in that window and pulled in
+counts too. As
 nothing refreshes the index, a file whose timestamp moved with no change shows in the plumbing's diff, and is left
 out by its empty diff. This is agent-agnostic. Caveat: edits I make by hand in the same tree during a session are attributed to it
 (labelled "working tree during session", not "agent wrote").
