@@ -46,6 +46,8 @@ REPO_VARIABLES = frozenset(
         "GIT_NO_REPLACE_OBJECTS",
     }
 )
+# What would change the diff's form: context lines instead of `--unified=0`, another program making it.
+DIFF_VARIABLES = frozenset({"GIT_DIFF_OPTS", "GIT_EXTERNAL_DIFF"})
 CHANGE = re.compile(r"(?:@@ |Binary files |new file mode |deleted file mode |old mode |Submodule )")
 ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
 
@@ -182,7 +184,8 @@ def _git_header_path(line: str) -> str:
     rest = line.removeprefix("diff --git ")
     if rest.endswith('"'):
         return _unquote(rest[rest.rindex(' "') + 1 :]).removeprefix("b/")
-    return rest.rsplit(" b/", 1)[-1]
+    # With renames off, `a/<path> b/<path>` names one path twice: its second half, whatever ` b/` the path holds.
+    return rest[(len(rest) - 1) // 2 + 1 :].removeprefix("b/")
 
 
 def _unquote(name: str) -> str:
@@ -228,7 +231,7 @@ def _git(cwd: Path, *args: str) -> str | None:
         done = subprocess.run(
             ["git", "--no-optional-locks", *SAFE, *args],
             cwd=cwd,
-            env={key: value for key, value in os.environ.items() if key not in REPO_VARIABLES},
+            env={key: value for key, value in os.environ.items() if key not in REPO_VARIABLES | DIFF_VARIABLES},
             capture_output=True,
             check=False,
             timeout=TIMEOUT,

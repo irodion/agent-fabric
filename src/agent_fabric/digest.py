@@ -155,7 +155,9 @@ def path(meta: SessionMeta, project: str, start: datetime) -> str:
     """`raw/sessions/<project>/<yyyy>/<mm>/<yyyy-mm-dd>-<agent>-<shortid>.md`, inside the wiki or the local folder."""
     when = _utc(start)
     folder = "/".join(_segment(part) for part in project.split("/") if part.strip("./"))
-    short = _segment(meta.id.rsplit(":", 1)[-1][:8])
+    # The id's last 8 letters and digits: a UUIDv7 (Codex's) starts with its time, so its first 8 are shared by all
+    # sessions started in the same minute or so, while its end is random, like a UUIDv4's (Claude Code's).
+    short = _segment(re.sub(r"[^A-Za-z0-9]", "", meta.id.rsplit(":", 1)[-1])[-8:])
     return f"raw/sessions/{folder or 'unknown'}/{when:%Y/%m}/{when:%Y-%m-%d}-{_segment(meta.agent)}-{short}.md"
 
 
@@ -231,8 +233,13 @@ def render(
             "[the final message cut to fit: kb show {session}#" + str(final.ordinal if final else "") + "]",
         ),
     ]
+    sections = [_Section(s.title, tuple(map(_clean, s.head)), tuple(map(_clean, s.entries)), s.cut) for s in sections]
     head = "---\n" + "".join(f"{key}: {_yaml(value)}\n" for key, value in front.items()) + "---\n"
-    return head + _fit(sections, HARD_CAP - len(head.encode()), meta.id)
+    body = _fit(sections, HARD_CAP - len(head.encode()), meta.id)
+    if len(head.encode()) + len(body.encode()) > HARD_CAP:
+        # Typed prompts alone are over it: say so, for whoever writes the digest.
+        head = head.removesuffix("---\n") + "over_cap: true\n---\n"
+    return head + body
 
 
 # ── sections ──────────────────────────────────────────────────────────────
@@ -318,7 +325,9 @@ def _kind(command: str | None) -> str:
 
 
 def _run(command: str | None) -> tuple[str, str]:
-    """The command's kind, and the command that gave it from where its program starts."""
+    """The command's kind, and the command that gave it from where its program starts: a test, if any of its steps
+    is one (`uv sync && pytest`), else the first step's kind."""
+    found: list[tuple[str, str]] = []
     for segment in SEPARATORS.split(QUOTED.sub("''", command or "")):
         words = segment.split()
         while words:
@@ -331,11 +340,10 @@ def _run(command: str | None) -> tuple[str, str]:
                 words = _past_options(words[len(wrapper[0].split()) :])
                 continue
             text = " ".join(words)
-            for kind, pattern in COMMAND_KINDS:
-                if pattern.match(text):
-                    return kind, text
+            if kind := next((k for k, pattern in COMMAND_KINDS if pattern.match(text)), None):
+                found.append((kind, text))
             break
-    return "other", ""
+    return next((item for item in found if item[0] == "test"), found[0] if found else ("other", ""))
 
 
 def _past_options(words: list[str]) -> list[str]:
@@ -448,7 +456,8 @@ def _errors(session_id: str, actions: list[tuple[int, Action]]) -> _Section:
         cut = f"\n[… {len(lines) - ERROR_TAIL} lines before: kb show {session_id}#{ordinal}]" * (
             len(lines) > ERROR_TAIL
         )
-        entry = f"- #{ordinal} {action.kind} `{_cell(what[:MAX_COMMAND])}` · {status}: {_first_error(action.output)}"
+        first = _inline(_first_error(action.output))
+        entry = f"- #{ordinal} {action.kind} `{_inline(what[:MAX_COMMAND])}` · {status}: {first}"
         entries.append(entry + cut + ("\n" + _fenced(tail) if tail else ""))
     head = (f"{len(distinct) - len(kept)} earlier errors not shown.",) if len(distinct) > len(kept) else ()
     return _Section("Errors", head, tuple(entries), "[… {n} earlier errors cut: kb show {session}]")
@@ -468,7 +477,7 @@ def _changes(first: Snapshot | None, last: Snapshot | None) -> _Section:
         head.append(_fenced("\n".join(stat)))
     if last.untracked:
         more = len(last.untracked) - MAX_FILES
-        names = ", ".join(f"`{_cell(name)}`" for name in last.untracked[:MAX_FILES])
+        names = ", ".join(f"`{_inline(name)}`" for name in last.untracked[:MAX_FILES])
         head.append("Untracked: " + names + (f", and {more} more" if more > 0 else ""))
     lines = last.diff.rstrip("\n").split("\n") if last.diff else []
     entries: tuple[str, ...] = ()
@@ -494,7 +503,7 @@ def _markers(diff: str) -> Iterable[str]:
                 for kind, pattern in MARKERS:
                     if pattern.search(added):
                         shown = added.strip()[:MAX_MARKER]
-                        yield f"- {kind} · `{_cell(found.path)}:{line}` · `{_cell(shown)}`"
+                        yield f"- {kind} · `{_inline(found.path)}:{line}` · `{_inline(shown)}`"
                         break
                 line += 1
 
@@ -505,6 +514,7 @@ def _markers(diff: str) -> Iterable[str]:
 def _fit(sections: list[_Section], room: int, session_id: str) -> str:
     """The sections, each cut from its front until the whole fits; the prompts last, since typed text isn't cut."""
     entries = {section.title: list(section.entries) for section in sections}
+    heads = {section.title: list(section.head) for section in sections}
     cut = dict.fromkeys(entries, 0)
 
     def body() -> str:
@@ -512,8 +522,9 @@ def _fit(sections: list[_Section], room: int, session_id: str) -> str:
         for section in sections:
             notice = [section.cut.format(n=cut[section.title], session=session_id)] if cut[section.title] else []
             # Above a table, which a line without a pipe would join as a row; else after the section's head.
-            table = bool(section.head) and section.head[0].startswith("|")
-            lines = [*notice, *section.head] if table else [*section.head, *notice]
+            head = heads[section.title]
+            table = bool(head) and head[0].startswith("|")
+            lines = [*notice, *head] if table else [*head, *notice]
             lines += entries[section.title]
             out.append(f"## {section.title}\n" + ("\n".join(lines) + "\n" if lines else ""))
         return "\n".join(out)
@@ -529,6 +540,13 @@ def _fit(sections: list[_Section], room: int, session_id: str) -> str:
                 drop += 1
             del entries[title][:drop]
             cut[title] += drop
+            text = body()
+    # Still over: the heads' lists go too (the stat, the untracked names), table headers with their rows.
+    for section in sections:
+        if len(text.encode()) <= room:
+            break
+        if section.title in CUT_ORDER and section.head and not entries[section.title]:
+            heads[section.title] = ["[… cut to fit the digest]"]
             text = body()
     return text
 
@@ -589,6 +607,7 @@ def _yaml(value: object) -> str:
     character past U+FFFF as two `\u` halves, which YAML reads as two broken characters; YAML's own `\U` is one."""
     if isinstance(value, dict):
         return "{" + ", ".join(f"{key}: {_yaml(item)}" for key, item in value.items()) + "}"
+    value = _clean(value) if isinstance(value, str) else value
     return "".join(_escape(char) for char in json.dumps(value, ensure_ascii=False))
 
 
@@ -602,6 +621,16 @@ def _escape(char: str) -> str:
 def _segment(text: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-.")
     return cleaned or "unknown"
+
+
+def _clean(text: str) -> str:
+    """Text as UTF-8 can hold it: a lone surrogate, half an emoji an agent cut by UTF-16 length, becomes U+FFFD."""
+    return text.encode("utf-8", "surrogatepass").decode("utf-8", "replace")
+
+
+def _inline(text: str) -> str:
+    """Inline code or a line of text: one line, no backtick to end it early."""
+    return text.replace("`", "'").replace("\r", "").replace("\n", " ⏎ ")
 
 
 def _cell(text: str) -> str:
