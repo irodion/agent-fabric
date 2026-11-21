@@ -254,7 +254,7 @@ def test_a_path_is_sharded_by_project_and_month() -> None:
     session = meta(id="codex:01a1f2c2-eb87", agent="codex")
     assert (
         path(session, "github.com/me/proj", T0)
-        == "raw/sessions/github.com/me/proj/2026/11/2026-11-20-codex-01a1f2c2.md"
+        == "raw/sessions/github.com/me/proj/2026/11/2026-11-20-codex-f2c2eb87.md"
     )
     assert path(session, "../../etc", T0).startswith("raw/sessions/etc/2026/11/")
 
@@ -641,3 +641,63 @@ def test_fences_pair_as_markdown_pairs_them() -> None:
     indented = "\n".join(["    ```", typed, "    ```"])
     for prompt in (mixed, indented):
         assert "cut" not in section(digest([message(0, "user", prompt)]), "Prompts")
+
+
+def test_half_an_emoji_doesnt_stop_the_digest() -> None:
+    text = digest([message(0, "user", "cut \ud83d here"), message(1, "assistant", "ok \ud83d")])
+    assert "cut �" in section(text, "Prompts")
+
+
+def test_two_codex_sessions_started_together_get_their_own_files() -> None:
+    first = path(meta(id="codex:01a1f2c2-eb87-7743-97f3-eba0fe2f6192", agent="codex"), "p", T0)
+    second = path(meta(id="codex:01a1f2c2-eb88-7a01-8c11-0b3c5d7e9f10", agent="codex"), "p", T0)
+    assert first != second
+
+
+def test_diff_options_in_the_environment_dont_change_the_snapshot(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / "app.py").write_text("a = 1\nb = 2\nc = 3\nd = 4\n")
+    before(repo, "commit", "-qam", "four")
+    (repo / "app.py").write_text("a = 1\nb = 2\nc = 3\nd = 4  # TODO\n")
+    monkeypatch.setenv("GIT_DIFF_OPTS", "--unified=3")
+    snap = take(repo, T0, T0)
+    assert snap is not None
+    assert "\n b = 2" not in snap.diff
+    assert "`app.py:4`" in section(digest([message(0, "user", "go")], [snap]), "Markers")
+
+
+@pytest.mark.parametrize("command", ["uv sync && pytest", "git stash && pytest -x"])
+def test_a_test_after_another_step_is_a_test_run(command: str) -> None:
+    assert section(digest([bash(1, command, "Exit code 139\nSegmentation fault")]), "Tests").startswith("- #1 pytest")
+
+
+def test_a_binary_change_under_a_path_with_b_slash_keeps_its_path(repo: Path) -> None:
+    (repo / "x b").mkdir()
+    (repo / "x b" / "y.bin").write_bytes(b"\0one")
+    before(repo, "add", ".")
+    before(repo, "commit", "-qm", "bin")
+    (repo / "x b" / "y.bin").write_bytes(b"\0two")
+    snap = take(repo, T0, T0)
+    assert snap is not None
+    assert snap.files == ("x b/y.bin",)
+
+
+def test_a_pipe_outside_the_table_isnt_escaped(repo: Path) -> None:
+    (repo / "app.py").write_text("x = a | b  # noqa\n")
+    snap = take(repo, T0, T0)
+    assert snap is not None
+    assert "`x = a | b  # noqa`" in section(digest([message(0, "user", "go")], [snap]), "Markers")
+
+
+def test_a_digest_its_cuts_cant_fit_loses_its_lists_then_says_it_is_over() -> None:
+    names = tuple(f"{'d' * 300}/{i}.js" for i in range(MAX_FILES))
+    snap = snapshot(files=names, untracked=names, uncommitted=True)
+    text = digest([message(0, "user", "go")], [snap])
+    assert "Untracked:" in section(text, "Changes")
+    prompts = [message(i, "user", "y" * 1500) for i in range(70)]
+    text = digest(prompts, [snap])
+    assert len(text.encode()) <= HARD_CAP
+    assert section(text, "Changes") == "[… cut to fit the digest]\n"
+    text = digest([message(i, "user", "y" * 3000) for i in range(80)])
+    assert front(text)["over_cap"] == "true"

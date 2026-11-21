@@ -463,8 +463,10 @@ holds a runner's summary (pytest, cargo, go test, vitest, jest), however it was 
 runner, as when it crashed before its summary; a command that only shows files is none. Its counts come from that
 summary, and without one, its verdict from the exit code. An error is distinct by its tool, command and
 output. Over the cap, the commands table is cut first, then the changes, tests, errors, commits and markers, the
-final message last; each cut drops whole entries from the front. The front matter, the stat and the untracked list
-name at most 200 files and count the rest. `cwd` and the worktree's paths stay absolute in
+final message last; each cut drops whole entries from the front, and then the stat and the untracked list if need
+be. Typed prompts alone can still be over it, and then the front matter says `over_cap: true`. The front matter,
+the stat and the untracked list name at most 200 files and count the rest. A file's `<shortid>` is the id's last 8
+letters and digits: Codex's ids are UUIDv7s, whose first 8 are the time, shared by sessions started together. `cwd` and the worktree's paths stay absolute in
 the rendering, and redaction's `/home/<user>` → `~` (§4.5) shortens them when the digest is written. Markers come
 from the diff, so a file the agent left untracked shows in Changes but its markers don't.
 
