@@ -153,8 +153,8 @@ def test_a_digest_that_cant_be_written_waits_and_is_tried_again(lab: Lab, caplog
 
     (lab.wiki() / "mine.md").unlink()
     (lab.wiki() / "more.md").unlink()
-    assert lab.step(again + RETRY + SECOND) == []  # not a minute since the last try
-    [written] = lab.step(again + 2 * RETRY)
+    assert lab.step(again + 2 * RETRY) == []  # two minutes after a second failure
+    [written] = lab.step(again + 3 * RETRY)
     assert "revision: 2" in written.path.read_text()
 
 
@@ -317,11 +317,11 @@ def test_a_backlog_is_read_in_batches_each_saved(lab: Lab, monkeypatch: pytest.M
     def failing(*args: Any) -> None:
         taken.append(args)
         if len(taken) > BATCH:
-            raise RuntimeError("stopped")
+            raise KeyboardInterrupt  # the process stopped partway, as one session's error no longer does
 
     monkeypatch.setattr(snapshot, "take", failing)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(KeyboardInterrupt):
         lab.digester.step(T0 + SECOND)
     place = connect(lab.path).execute("SELECT place FROM digester").fetchone()["place"]
     assert place == BATCH
@@ -338,3 +338,73 @@ def test_a_retry_waits_a_minute_whatever_the_clocks_zone(lab: Lab) -> None:
     lab.digester.step((LATER + 30 * SECOND).astimezone(timezone(timedelta(hours=2))))
 
     assert lab.source.attempts == tried
+
+
+def test_a_snapshot_that_fails_holds_back_no_digest(lab: Lab, monkeypatch: pytest.MonkeyPatch) -> None:
+    def failing(*args: Any) -> None:
+        raise RuntimeError("git said something new")
+
+    monkeypatch.setattr(snapshot, "take", failing)
+    turn(lab.source, "s1", T0)
+    lab.step(T0 + 10 * SECOND)
+
+    [written] = lab.step(LATER)
+
+    assert written.where == "local"
+
+
+def test_a_digest_that_keeps_failing_is_tried_less_often(lab: Lab) -> None:
+    allow(lab.env)
+    a_session(lab)
+    lab.wiki().mkdir()
+    git(lab.wiki(), lab.env, "init", "-q", "-b", "other")  # a repo with no main: no digest goes in
+    tries = []
+    for minute in range(8):
+        before = lab.source.attempts
+        lab.digester.step(LATER + minute * RETRY) if minute else lab.step(LATER)
+        if lab.source.attempts > before:
+            tries.append(minute)
+
+    assert tries == [0, 1, 3, 7]
+
+
+def test_a_session_with_no_times_is_dated_when_first_seen(lab: Lab) -> None:
+    lab.source.add("s3", agent="codex", cwd=str(lab.repo))  # with no times, as Cursor CLI's
+    lab.source.say("s3", "user", "hi", None)
+    lab.source.say("s3", "assistant", "Hello.", None)
+    lab.step(T0)
+
+    [written] = [w for w in lab.step(T0 + IDLE + MINUTE) if w.path.name.endswith("-s3.md")]
+
+    assert written.path.name.startswith("2026-11-20-")
+    front = written.path.read_text().split("---\n")[1]
+    assert "1970" not in front
+    assert 'start: "2026-11-20T09:00:00Z"' in front
+
+
+def test_one_digest_whose_bookkeeping_fails_leaves_the_others(lab: Lab, monkeypatch: pytest.MonkeyPatch) -> None:
+    lab.source.add("s2", cwd=str(lab.repo))
+    turn(lab.source, "s2", T0)
+    a_session(lab)
+    write = Digester._write
+
+    def locked(self: Digester, row: sqlite3.Row, now: datetime) -> Written | None:
+        if row["session_id"] == "s1":
+            raise sqlite3.OperationalError("database is locked")
+        return write(self, row, now)
+
+    monkeypatch.setattr(Digester, "_write", locked)
+
+    assert [w.path.name for w in lab.step(LATER)] == ["2026-11-20-claude-s2.md"]
+
+
+def test_a_digest_whose_session_the_tracker_lost_says_so(lab: Lab, caplog: pytest.LogCaptureFixture) -> None:
+    a_session(lab)
+    lab.tracker.poll(LATER)
+    with connect(lab.path) as db:
+        db.execute("DELETE FROM sessions WHERE id = 's1'")
+
+    with caplog.at_level(logging.WARNING, logger="agent_fabric.digester"):
+        assert lab.digester.step(LATER) == []
+
+    assert "the tracker has no such session" in caplog.text

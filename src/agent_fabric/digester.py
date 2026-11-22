@@ -6,8 +6,9 @@ with it; its workspace is found once, when it's first seen. At each finalization
 transcript, read again, and those snapshots, and written where §4.5 says.
 
 A digest that can't be written now stays due: the wiki not clean, gitleaks missing, its source not answering. It's
-tried again a minute later, and each new reason is logged once. One whose session reopened meanwhile waits for the
-next finalization; one whose source no longer has the session, or is no longer configured, is dropped and logged.
+tried again a minute later, then two, doubling up to an hour, and each new reason is logged once. One whose session
+reopened meanwhile waits for the next finalization; one whose source no longer has the session, or is no longer
+configured, is dropped and logged.
 """
 
 import asyncio
@@ -32,7 +33,8 @@ from agent_fabric.workspaces import Workspace, workspace_of
 
 log = logging.getLogger(__name__)
 
-RETRY = timedelta(minutes=1)
+RETRY = timedelta(minutes=1)  # after a failed write, doubling with each failure since
+MAX_RETRY = timedelta(hours=1)
 BATCH = 100  # changes read, and their place saved, at a time: a backlog after an outage is worked through in parts
 DEFAULT = ""  # the default workspace, in the `workspace` column
 
@@ -49,8 +51,9 @@ CREATE TABLE IF NOT EXISTS digests (
     last TEXT,                    -- its latest
     path TEXT,                    -- its digest's, fixed at the first write, so a reopened session keeps its file
     due INTEGER NOT NULL,         -- finalized, and its digest not written since
-    tried_at TEXT,                -- in UTC: the last write that failed
-    error TEXT                    -- why, logged once
+    retry_at TEXT,                -- in UTC: when to try a write that failed again
+    failures INTEGER NOT NULL DEFAULT 0,  -- in a row
+    error TEXT                    -- why the last failed, logged once
 );
 """
 
@@ -69,7 +72,14 @@ class Digester:
         now = now.astimezone(UTC)
         while changes := self._tracker.changes(self._place(), limit=BATCH):
             self._follow(changes, now)
-        return [written for row in self._due(now) if (written := self._write(row, now)) is not None]
+        found = []
+        for row in self._due(now):
+            try:
+                if (written := self._write(row, now)) is not None:
+                    found.append(written)
+            except Exception:  # its bookkeeping failed, as on a database locked too long: the others go on
+                log.exception("digest of %s failed", row["session_id"])
+        return found
 
     def _place(self) -> int:
         found = self._db.execute("SELECT place FROM digester").fetchone()
@@ -87,12 +97,16 @@ class Digester:
                 if change.kind in ("started", "turn_end"):
                     wanted[change.session_id] = None
         for session_id in wanted:
-            self._snapshot(session_id, now)
+            try:
+                self._snapshot(session_id, now)
+            except Exception:  # one session's mustn't hold the place, and every digest after it, back
+                log.exception("snapshot of %s failed", session_id)
         with self._db:
             for _, change in changes:
                 if change.kind == "finalized":
                     self._db.execute(
-                        "UPDATE digests SET due = 1, tried_at = NULL WHERE session_id = ?", (change.session_id,)
+                        "UPDATE digests SET due = 1, retry_at = NULL, failures = 0 WHERE session_id = ?",
+                        (change.session_id,),
                     )
             self._db.execute("INSERT OR REPLACE INTO digester (id, place) VALUES (1, ?)", (changes[-1][0],))
 
@@ -104,8 +118,8 @@ class Digester:
         with suppress(Exception):  # a config that can't be read now: found at the write, which reports it
             self._workspace(session, row)
         if session.state != "active" or session.cwd is None or not Path(session.cwd).is_dir():
-            # Finalized before this step read its turn end, after an outage: the folder is no longer its alone,
-            # as a later session may have changed it.
+            # Finalized before this step read its turn end, as after an outage, or first seen already idle, as on
+            # fabricd's first start: the folder is no longer its alone, as a later session may have changed it.
             return
         taken = snapshot.take(Path(session.cwd), now, datetime.fromisoformat(row["first_seen"]))
         if taken is None:
@@ -132,8 +146,8 @@ class Digester:
     def _due(self, now: datetime) -> list[sqlite3.Row]:
         return list(
             self._db.execute(
-                "SELECT * FROM digests WHERE due = 1 AND (tried_at IS NULL OR tried_at <= ?) ORDER BY session_id",
-                ((now - RETRY).isoformat(),),
+                "SELECT * FROM digests WHERE due = 1 AND (retry_at IS NULL OR retry_at <= ?) ORDER BY session_id",
+                (now.isoformat(),),
             )
         )
 
@@ -145,18 +159,23 @@ class Digester:
             return None
         feed = self._feeds.get(session.feed) if session else None
         if session is None or feed is None:
-            log.warning("no digest for %s: no feed configured reads it", session_id)
+            why = "the tracker has no such session" if session is None else "no feed configured reads it"
+            log.warning("no digest for %s: %s", session_id, why)
             self._done(session_id)
             return None
         try:
             meta = feed.source.session(session_id)
+            seen = datetime.fromisoformat(row["first_seen"])
+            if meta.started_at is None:
+                # No times at all, as Cursor CLI's in agentsview: dated when kb first saw it, file and front matter.
+                meta = meta.model_copy(update={"started_at": seen, "ended_at": meta.ended_at or seen})
             messages = feed.source.messages(session_id, 0).messages
             text = digest.render(
                 meta, messages, _snapshots(row), project=session.project, revision=session.finalizations
             )
             workspace = self._workspace(session, row)
             if row["path"] is None:
-                start = digest.started(meta, messages) or datetime.fromisoformat(row["first_seen"])
+                start = digest.started(meta, messages) or seen
                 with self._db:
                     self._db.execute(
                         "UPDATE digests SET path = ? WHERE session_id = ?",
@@ -166,15 +185,12 @@ class Digester:
             written = writer.write(
                 workspace, self._env, now, writer.Digest(text, row["path"], session.project, session.headless)
             )
-        except CaptureError as error:
-            if error.gone:
+        except Exception as error:  # whatever stops one digest mustn't stop the others
+            if isinstance(error, CaptureError) and error.gone:
                 log.warning("no digest for %s: its source no longer has it: %s", session_id, error)
                 self._done(session_id)
-                return None
-            self._failed(row, now, error)
-            return None
-        except Exception as error:  # whatever stops one digest mustn't stop the others
-            self._failed(row, now, error)
+            else:
+                self._failed(row, now, error)
             return None
         self._done(session_id)
         log.info("digest of %s: %s %s", session_id, written.where, written.path)
@@ -184,16 +200,18 @@ class Digester:
         reason = f"{type(error).__name__}: {error}"
         if _gist(reason) != _gist(row["error"] or ""):
             log.warning("digest of %s waits: %s", row["session_id"], reason, exc_info=_unexpected(error))
+        wait = min(RETRY * 2 ** min(row["failures"], 10), MAX_RETRY)
         with self._db:
             self._db.execute(
-                "UPDATE digests SET tried_at = ?, error = ? WHERE session_id = ?",
-                (now.isoformat(), reason, row["session_id"]),
+                "UPDATE digests SET retry_at = ?, failures = failures + 1, error = ? WHERE session_id = ?",
+                ((now + wait).isoformat(), reason, row["session_id"]),
             )
 
     def _done(self, session_id: str) -> None:
         with self._db:
             self._db.execute(
-                "UPDATE digests SET due = 0, tried_at = NULL, error = NULL WHERE session_id = ?", (session_id,)
+                "UPDATE digests SET due = 0, retry_at = NULL, failures = 0, error = NULL WHERE session_id = ?",
+                (session_id,),
             )
 
     def _row(self, session_id: str) -> sqlite3.Row | None:

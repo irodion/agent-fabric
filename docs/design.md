@@ -420,10 +420,12 @@ text of a failed call, which agentsview drops (§4.1). The digest stores an exce
 - **The digester** (`digester.py`, 2026-11-22) reads those changes on from its own place. It snapshots a session's
   folder (§4.4) at `started` and `turn_end` while the session is active, and keeps the first and latest. A session
   that finalized before its turn end was read, as after an outage, isn't snapshotted then: the folder is no longer
-  its alone, and a later session's work would read as its own. Its workspace is found once, when first seen, since a
+  its alone, and a later session's work would read as its own. So a session first seen already idle, as every one
+  of the last 24 h is on fabricd's first start, has a digest with no git fields. Its workspace is found once, when first seen, since a
   worktree removed when its session ends would place it in the default one; its digest's path is fixed at the first
   write, so a reopened session rewrites its file. At `finalized` the digest is due, rendered from the transcript
-  read again, and written by §4.5. One that can't be written now waits and is tried again; one whose session
+  read again, and written by §4.5. One that can't be written now waits and is tried again, less often each time,
+  since each try reads the whole transcript; one whose session
   reopened waits for the next finalization; one its source no longer has, or no feed reads, is dropped and logged.
   The draft digest at each turn end is left for the panel, which is what shows it (code review, 2026-11-22).
 
@@ -1574,6 +1576,8 @@ Open (2026-11-22):
   then run outside any sandbox, or swap a folder for a link between the writer's check and its write. Whether to
   move a root's wiki out of the root, or run its git with hooks and fsmonitor off, is to decide for ingest and the
   writer together.
+- When `state.db` forgets a session. The tracker's sessions and the digester's rows, each with two snapshots of up
+  to 2 MB of diff, are kept for good, as a session can reopen. Pruning them is to decide for both together.
 
 Open (2026-11-18):
 
