@@ -13,8 +13,10 @@ A root's local digests and quarantine are in kb's data folder, out of the root's
 at the root can write. Its wiki is there, so every folder on the way to a file in it is checked for links."""
 
 import os
-import tempfile
+import secrets
+import stat
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -88,25 +90,29 @@ def _commit(wiki: Git, relative: str, text: str, now: datetime, label: str) -> b
     _check_clean(wiki)
     written = [relative, LOG]
     # The checkout is clean, so these are the last commit's bytes: what a failure puts back.
+    if wiki.ok("check-ignore", "--", *written):  # `add` would refuse them, on every try
+        rules = "; ".join(wiki("check-ignore", "-v", "--", *written).splitlines())
+        raise GitError(f"{wiki.folder}'s ignore rules leave out what a digest writes ({rules}); digests wait")
     before = {path: (wiki.folder / path).read_bytes() if (wiki.folder / path).exists() else None for path in written}
+    target = wiki.folder / relative
+    made = [folder for folder in target.relative_to(wiki.folder).parents if not (wiki.folder / folder).exists()]
     try:
-        target = wiki.folder / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        _replace(target, text)
+        _replace(target, text.encode())
         if _at_head(wiki, relative) == wiki("hash-object", "--", relative).strip():
             return False  # what the last commit holds, as git would store it: the checkout is clean again
-        log = (before[LOG] or b"# Log\n").decode("utf-8", "surrogateescape")
-        if not log.endswith("\n"):
-            log += "\n"
-        _replace(wiki.folder / LOG, log + f"{now:%Y-%m-%d} digest {label}\n")
+        log = before[LOG] or b"# Log\n"  # as bytes: the user's log may hold anything
+        if not log.endswith(b"\n"):
+            log += b"\n"
+        _replace(wiki.folder / LOG, log + f"{now:%Y-%m-%d} digest {label}\n".encode())
         wiki("add", "--", *written)
         _on_main(wiki)  # again: I may have switched branch since, and a commit goes wherever HEAD is
         wiki("commit", "-q", "-m", f"digest: {label}", "--", *written)
     except BaseException as e:
-        if (left := _restore(wiki, before)) and isinstance(e, Exception):
+        if (left := _restore(wiki, before, made)) and isinstance(e, Exception):
             raise GitError(f"{e}; and kb couldn't undo its change to {left} in {wiki.folder}: restore it") from e
         raise
-    if _branch(wiki) != f"refs/heads/{MAIN}" or wiki("rev-parse", "HEAD") != wiki("rev-parse", MAIN):
+    if _branch(wiki) != f"refs/heads/{MAIN}" or wiki("rev-parse", "HEAD") != wiki("rev-parse", f"refs/heads/{MAIN}"):
         landed = wiki("rev-parse", "--short", "HEAD").strip()
         raise GitError(
             f"the digest was committed as {landed} on {_branch(wiki) or 'a detached HEAD'}, a branch "
@@ -128,8 +134,10 @@ def _check_clean(wiki: Git) -> None:
     for name, path in zip(UNDER_WAY, found, strict=True):
         if (wiki.folder / path).exists():
             raise GitError(f"a {UNDER_WAY[name]} is under way in {wiki.folder}; digests wait until it's done")
-    if wiki("status", "--porcelain", "--untracked-files=all"):
-        raise GitError(f"{wiki.folder} has changes not committed; digests wait until it's clean")
+    if changed := wiki("status", "--porcelain", "--untracked-files=all").splitlines():
+        # Named, since a kb stopped mid-write, killed say, leaves its own file here: the user tells it from theirs.
+        names = ", ".join(line[3:] for line in changed[:5]) + (", ..." if len(changed) > 5 else "")
+        raise GitError(f"{wiki.folder} has changes not committed ({names}); digests wait until it's clean")
 
 
 def _branch(wiki: Git) -> str:
@@ -142,8 +150,9 @@ def _on_main(wiki: Git) -> None:
         raise GitError(f"{wiki.folder} has {branch or 'a detached HEAD'} checked out; digests wait for {MAIN}")
 
 
-def _restore(wiki: Git, before: dict[str, bytes | None]) -> str:
-    """Each file back as it was, and unstaged; what couldn't be undone, if anything."""
+def _restore(wiki: Git, before: dict[str, bytes | None], made: list[Path]) -> str:
+    """Each file back as it was, and unstaged, and the folders made for it gone; what couldn't be undone, if
+    anything."""
     left = []
     for path, content in before.items():
         try:
@@ -153,6 +162,9 @@ def _restore(wiki: Git, before: dict[str, bytes | None]) -> str:
                 (wiki.folder / path).write_bytes(content)
         except OSError:
             left.append(path)
+    for folder in made:  # deepest first; one still holding a file left behind is named with it
+        with suppress(OSError):
+            (wiki.folder / folder).rmdir()
     if not wiki.ok("reset", "-q", "--", *before):
         left.append("what it staged")
     return ", ".join(left)
@@ -160,9 +172,11 @@ def _restore(wiki: Git, before: dict[str, bytes | None]) -> str:
 
 def _unlinked(workspace: Workspace, folder: Path, relative: str) -> Path:
     """`relative` in `folder`, refused where a link on the way would lead elsewhere: a root's `.fabric/` is open to
-    its agents. Checked from the root down, or from the folder itself in the default workspace."""
+    its agents. Checked from the root down for a folder there, and from the folder itself for any other: kb's data
+    folder may be under a root such as `~`, through a link the user made."""
     target = folder / relative
-    base = workspace.root if workspace.root is not None and folder.is_relative_to(workspace.root) else folder
+    fabric = workspace.root / ".fabric" if workspace.root is not None else None
+    base = fabric.parent if fabric is not None and folder.is_relative_to(fabric) else folder
     current = base
     for part in target.relative_to(base).parts:
         current /= part
@@ -173,17 +187,21 @@ def _unlinked(workspace: Workspace, folder: Path, relative: str) -> Path:
 
 def _move(text: str, target: Path, *, away: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    _replace(target, text)
+    _replace(target, text.encode())
     away.unlink(missing_ok=True)
 
 
-def _replace(target: Path, text: str) -> None:
-    """Written whole or not at all, for a reader such as `kb` that may open it at any time."""
-    fd, temporary = tempfile.mkstemp(dir=target.parent, prefix=".", suffix=".tmp")
+def _replace(target: Path, data: bytes) -> None:
+    """Written whole or not at all, for a reader such as `kb` that may open it at any time. A new file gets the mode
+    the umask gives, an existing one keeps its own."""
+    temporary = target.parent / f".{target.name}.{secrets.token_hex(6)}.tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
-            f.write(text)
+        with os.fdopen(fd, "wb") as f:
+            if target.exists():
+                os.fchmod(f.fileno(), stat.S_IMODE(target.stat().st_mode))
+            f.write(data)
         os.replace(temporary, target)
     except BaseException:
-        Path(temporary).unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
         raise

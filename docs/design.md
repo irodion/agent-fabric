@@ -548,7 +548,11 @@ The commit is made in the wiki's own checkout (`writer.py`, 2026-11-22), which i
 clean on `main` with no merge, rebase, `git am`, cherry-pick, revert or bisect under way. Otherwise the digest waits, written on a later try:
 during my review of an ingest branch, say, or while I have a change there uncommitted. So kb never writes over a
 change of mine or into a merge, and a commit that fails, as when a pre-commit hook stops it, is undone and leaves the
-checkout clean; where it can't be undone either, the error names what kb left behind. A digest is unchanged when git
+checkout clean; where it can't be undone either, the error names what kb left behind. A kb stopped mid-write, killed
+say, has no chance to undo, so its file reads as my change: the error lists what's uncommitted, to tell it from
+mine, rather than kb keeping a record of its writes to replay. A digest whose path or `log.md` the wiki's ignore
+rules leave out waits too, the error naming the rule: `git add` would refuse it on every try, and ignoring `raw/` may
+be meant (code review, 2026-11-22). A digest is unchanged when git
 would store what the last commit holds, so one holding a carriage return makes no commit when written again. The
 branch is checked again just before the commit, and after it: a switch in between, which git's own locks don't stop,
 lands the commit on the branch switched to, and kb says so and names it, to drop there (Codex review, 2026-11-22:
@@ -561,7 +565,8 @@ A session's latest digest is in one place: one written to the quarantine or the 
 other, and one committed to the wiki from both, as when a quarantined digest comes out clean after a reopen, or a
 project is allowed. A copy committed to the wiki before stays there: a reopened session whose new digest is
 quarantined keeps its last clean one in the wiki. Every folder on the way to a file in a root's wiki must be a
-folder and not a link, checked from the root down.
+folder and not a link, checked from the root down. Only there, in the root's `.fabric/`: kb's data folder can be under a root
+such as `~`, through a link the user made, as a dotfiles manager does.
 
 Local-only digests go through step 1 as well, so `kb` output never shows raw secrets.
 
