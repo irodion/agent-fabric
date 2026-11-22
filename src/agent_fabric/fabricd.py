@@ -2,8 +2,8 @@
 
 The tracker follows the sessions through their sources and records what it notices in `state.db`; each change it
 records wakes the digester, which reads on from its own place there. The two share nothing else: each has its own
-connection and its own worker thread. One fabricd runs at a time on a data folder, since two would write each digest
-twice. SIGTERM or SIGINT stops it once the step under way is done.
+sources, its own connection and its own worker thread. One fabricd runs at a time on a data folder, since two would
+write each digest twice. SIGTERM or SIGINT stops it once the step under way is done, and a second one at once.
 
 Its settings are read once, at start, from `~/.config/agent-fabric/config.toml`:
 
@@ -39,6 +39,7 @@ from agent_fabric.tracker import IDLE, POLL, TURN_QUIET, Change, Feed, Tracker
 log = logging.getLogger(__name__)
 
 PORT = 8080
+MAX_IDLE_MINUTES = 7 * 24 * 60  # a week: longer is surely a mistake, and far longer can't be a timedelta
 
 
 @dataclass(frozen=True)
@@ -53,8 +54,10 @@ def settings(config: Config) -> Settings:
     if type(port) is not int or not 0 < port < 65536:
         raise ValueError(f"[agentsview] port is a port number, not {port!r}")
     minutes = _table(config, "sessions").get("idle_minutes", IDLE // timedelta(minutes=1))
-    if type(minutes) is not int or minutes <= 0:
-        raise ValueError(f"[sessions] idle_minutes is a whole number of minutes, not {minutes!r}")
+    if type(minutes) is not int or not 0 < minutes <= MAX_IDLE_MINUTES:
+        raise ValueError(
+            f"[sessions] idle_minutes is a whole number of minutes from 1 to {MAX_IDLE_MINUTES}, not {minutes!r}"
+        )
     return Settings(port, timedelta(minutes=minutes))
 
 
@@ -105,44 +108,56 @@ def start(
     env: Mapping[str, str],
     *,
     feeds: Callable[[Mapping[str, str], int], Sequence[Feed]] = capture_feeds,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     poll: float = POLL,
 ) -> int:
-    """fabricd itself: 0 once stopped by SIGTERM or SIGINT, 1 if it failed or another is running, 2 if the config
-    can't be read."""
+    """fabricd itself: 0 once stopped by SIGTERM or SIGINT, 1 if it failed, another is running or the lock can't be
+    taken, 2 if the config can't be read. `feeds` is called once for the tracker and once for the digester, so that
+    neither uses the other's sources from its worker thread."""
     try:
         chosen = settings(read_config(env))
     except (OSError, ValueError) as error:
         print(f"fabricd: {tilde(config_file(env), env)}: {error}", file=sys.stderr)
         return 2
     path = state_db(env)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path.parent / "fabricd.lock", "a") as lock:
+    lock_path = path.parent / "fabricd.lock"
+    with ExitStack() as stack:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fcntl.flock(stack.enter_context(open(lock_path, "a")), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             print(f"fabricd: another fabricd is running on {tilde(path.parent, env)}", file=sys.stderr)
             return 1
-        with ExitStack() as stack:
-            built = feeds(env, chosen.port)
-            for feed in built:
-                if isinstance(feed.source, AgentsviewSource):
-                    stack.enter_context(feed.source)
-            following = Tracker(built, stack.enter_context(closing(tracker.connect(path))), idle=chosen.idle)
-            digesting = stack.enter_context(closing(digester.Digester(built, path, env, idle=chosen.idle)))
-            return asyncio.run(_until_stopped(following, digesting, poll))
+        except OSError as error:
+            print(f"fabricd: can't lock {tilde(lock_path, env)}: {error.strerror or error}", file=sys.stderr)
+            return 1
+        tracked, digested = (_entered(stack, feeds(env, chosen.port)) for _ in range(2))
+        following = Tracker(tracked, stack.enter_context(closing(tracker.connect(path))), idle=chosen.idle)
+        digesting = stack.enter_context(closing(digester.Digester(digested, path, env, idle=chosen.idle)))
+        return asyncio.run(_until_stopped(following, digesting, clock, poll))
 
 
-async def _until_stopped(following: Tracker, digesting: digester.Digester, poll: float) -> int:
+def _entered(stack: ExitStack, feeds: Sequence[Feed]) -> Sequence[Feed]:
+    """The feeds, each source with a client closed when fabricd stops."""
+    for feed in feeds:
+        if isinstance(feed.source, AgentsviewSource):
+            stack.enter_context(feed.source)
+    return feeds
+
+
+async def _until_stopped(
+    following: Tracker, digesting: digester.Digester, clock: Callable[[], datetime], poll: float
+) -> int:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(signum, stop.set)
-    work = asyncio.create_task(serve(following, digesting, poll=poll))
+        loop.add_signal_handler(signum, _first_signal, stop, signum)
+    work = asyncio.create_task(serve(following, digesting, clock=clock, poll=poll))
     stopping = asyncio.create_task(stop.wait())
     await asyncio.wait([work, stopping], return_when=asyncio.FIRST_COMPLETED)
     stopping.cancel()
     if not work.done():
-        log.info("fabricd stopping")
+        log.info("fabricd stopping once the step under way is done; a second signal stops it now")
         work.cancel()
     try:
         await work
@@ -151,3 +166,11 @@ async def _until_stopped(following: Tracker, digesting: digester.Digester, poll:
     except Exception:
         log.exception("fabricd failed")
     return 1
+
+
+def _first_signal(stop: asyncio.Event, signum: int) -> None:
+    """Stop once the step under way is done; a second signal, as when that step hangs, ends the process at once."""
+    if stop.is_set():
+        log.warning("fabricd stopped without waiting for the step under way")
+        os._exit(128 + signum)
+    stop.set()
