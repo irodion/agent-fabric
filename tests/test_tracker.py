@@ -8,6 +8,7 @@ import asyncio
 import json
 import shutil
 import sqlite3
+import tempfile
 import threading
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
@@ -16,10 +17,13 @@ from typing import Any
 
 import httpx
 import pytest
+from hypothesis import settings
+from hypothesis import strategies as st
+from hypothesis.stateful import RuleBasedStateMachine, initialize, precondition, rule
 
 from agent_fabric.capture import AgentsviewSource, CaptureError, Message, SessionMeta, Transcript
 from agent_fabric.copilot import CopilotSource
-from agent_fabric.tracker import SCHEMA, Change, Feed, Tracker, connect, run
+from agent_fabric.tracker import IDLE, SCHEMA, Change, Feed, Tracker, connect, run
 
 FIXTURES = Path(__file__).parent / "fixtures"
 T0 = datetime(2026, 11, 20, 9, 0, tzinfo=UTC)
@@ -965,3 +969,91 @@ def test_a_session_with_no_times_listed_ahead_of_the_clock_reopens_on_a_change(
     source.say("s1", "user", "and this", None)
     source.changed("s1", ended_at=T0 + timedelta(hours=3, minutes=40))
     assert kinds(t.poll(T0 + 40 * MINUTE)) == [("reopened", "s1")]
+
+
+# ── the lifecycle, as a state machine ─────────────────────────────────────
+
+
+class Lifecycle(RuleBasedStateMachine):
+    """§4.3's lifecycle against any order of turns, re-parses and polls, on a source whose clock may run ahead of
+    ours (a zone-less local time read as UTC) and whose messages may carry no times (Cursor CLI's in agentsview).
+
+    After every poll: a new message has started or reopened the session, a re-parse of a timed session reopens
+    nothing, a session unchanged for the idle timeout is finalized, and the changes come in their lifecycle's
+    order."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.source = Source()
+        self.source.add("s1")
+        self.folder = Path(tempfile.mkdtemp())
+        self.tracker = tracker(connect(self.folder / "state.db"), feed(source=self.source))
+        self.now = T0
+        self.ahead = timedelta(0)
+        self.timed = True
+        self.seen: datetime | None = None  # the last poll that read a change
+        self.pending: str | None = None  # what changed since the last poll: "turn" or "reparse"
+        self.state: str | None = None  # the lifecycle as the changes tell it
+
+    @initialize(ahead=st.sampled_from([timedelta(0), timedelta(hours=3)]), timed=st.booleans())
+    def source_clock(self, ahead: timedelta, timed: bool) -> None:
+        self.ahead, self.timed = ahead, timed
+
+    @rule()
+    def new_turn(self) -> None:
+        at = self.now + self.ahead
+        turn(self.source, "s1", at) if self.timed else self._untimed_turn()
+        self.source.changed("s1", ended_at=at)
+        self.pending = "turn"
+
+    def _untimed_turn(self) -> None:
+        self.source.say("s1", "user", "run make", None)
+        self.source.say("s1", "assistant", "Done.", None)
+
+    @precondition(lambda self: self.source.texts["s1"] and self.pending is None)
+    @rule()
+    def reparse(self) -> None:
+        """The answer read anew, its wording changed and its time not."""
+        *rest, last = self.source.texts["s1"]
+        wording = "Done!" if last.content == "Done." else "Done."
+        self.source.reparse("s1", [*rest, last.model_copy(update={"content": wording})])
+        self.pending = "reparse"
+
+    # Gaps by what they reach: not yet a turn's quiet, past it, past the idle timeout.
+    @rule(gap=st.sampled_from([2 * SECOND, 10 * SECOND, 5 * MINUTE, IDLE + MINUTE]))
+    def poll(self, gap: timedelta) -> None:
+        self.now += gap
+        before = self.state
+        changes = self.tracker.poll(self.now)
+        kinds = [change.kind for change in changes]
+        for change in changes:
+            expected = {
+                "started": (None,),
+                "turn_end": ("active",),
+                "finalized": ("active",),
+                "reopened": ("finalized",),
+            }[change.kind]
+            assert self.state in expected, f"{change.kind} while {self.state}"
+            self.state = {"started": "active", "reopened": "active", "finalized": "finalized"}.get(
+                change.kind, self.state
+            )
+        row = self.tracker.session("s1")
+        if self.pending == "turn" and before != "active":
+            # It may finalize in the same poll, when its own time is already the idle timeout ago.
+            assert {"started", "reopened"} & set(kinds), "a new message didn't reopen the session"
+        if self.pending == "reparse" and self.timed:
+            assert "reopened" not in kinds, "a re-parse reopened the session"
+        if self.pending:
+            self.seen = self.now
+        self.pending = None
+        if row is not None and self.seen is not None and self.now - self.seen >= IDLE:
+            assert row.state == "finalized", "a session unchanged for the idle timeout wasn't finalized"
+
+    def teardown(self) -> None:
+        shutil.rmtree(self.folder)
+
+
+TestLifecycle = Lifecycle.TestCase
+# Enough runs to find, fresh each time, both clock bugs a review caught here (a re-parse that reopened a session ahead
+# of the clock, and an untimed one that couldn't reopen), in about 8 s.
+TestLifecycle.settings = settings(max_examples=1000, stateful_step_count=20, deadline=None)

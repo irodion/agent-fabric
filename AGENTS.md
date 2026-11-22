@@ -115,8 +115,8 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   thread. Nothing starts it yet: fabricd will.
 - **Digests.** `digest.render` turns a session's messages and git snapshots into §4.4's Markdown, a pure function
   with no clock, so a session renders the same bytes each time; `digest.path` names its file. `snapshot.take` reads
-  a session's folder through git, read-only, measured from the first snapshot's HEAD. Neither writes or redacts yet:
-  the writer, with §4.5's allow list, redaction and gate, comes next.
+  a session's folder through git, read-only; which commits are the session's is §4.4's Git snapshots. Neither
+  writes or redacts yet: the writer, with §4.5's allow list, redaction and gate, comes next.
 
 These hold across the code:
 
