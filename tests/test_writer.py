@@ -11,7 +11,7 @@ import pytest
 from conftest import GITLEAKS, LEAK, a_stub
 
 from agent_fabric.secretgate import GateUnavailable
-from agent_fabric.wikirepo import GitError
+from agent_fabric.wikirepo import Git, GitError
 from agent_fabric.workspaces import Workspace
 from agent_fabric.writer import Digest, Written, write
 
@@ -431,3 +431,34 @@ def test_files_get_the_mode_the_umask_gives(env: dict[str, str]) -> None:
 
     for path in (wiki(env) / RELATIVE, wiki(env) / "log.md", written.path):
         assert path.stat().st_mode & 0o777 == 0o644, path
+
+
+def test_a_secret_redacted_from_the_label_still_stops_a_path_that_holds_it(env: dict[str, str]) -> None:
+    project = f"github.com/me/ghp_{'a' * 20}{LEAK}"  # redaction removes the token whole, the path keeps it
+    configure(env, f'[publish]\nallow = ["{project}"]\n')
+    relative = RELATIVE.replace(PROJECT, project)
+
+    written = write(Workspace(None), env, NOW, Digest(DIGEST, relative, project, headless=False))
+
+    assert written.where == "quarantine"
+
+
+def test_a_commit_that_lands_before_git_fails_is_not_undone(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    allow(env)
+    put(env, DIGEST + "first\n")
+    run = Git.__call__
+
+    def slow_hook(self: Git, *args: str) -> str:  # as when a post-commit hook outlasts git's timeout
+        out = run(self, *args)
+        if args[0] == "commit":
+            raise GitError("git commit timed out")
+        return out
+
+    monkeypatch.setattr(Git, "__call__", slow_hook)
+
+    with pytest.raises(GitError, match="timed out"):
+        put(env)
+    assert status(env) == ""
+    assert git(env, "show", "HEAD:log.md").count("digest") == 2
