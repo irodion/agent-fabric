@@ -65,7 +65,11 @@ class Digester:
         tracker's."""
         self._idle = idle
         self._db = connect(db)
-        self._db.executescript(SCHEMA)
+        try:
+            self._db.executescript(SCHEMA)
+        except BaseException:
+            self._db.close()
+            raise
         self._tracker = Tracker(feeds, self._db)  # only read: the sessions and their changes
         self._feeds = {feed.name: feed for feed in feeds}
         self._env = env

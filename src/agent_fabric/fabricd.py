@@ -21,9 +21,10 @@ import fcntl
 import logging
 import os
 import signal
+import sqlite3
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import ExitStack, closing
+from contextlib import AbstractContextManager, ExitStack, closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import NoReturn
@@ -121,9 +122,13 @@ def start(
         return 2
     path = state_db(env)
     lock_path = path.parent / "fabricd.lock"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        print(f"fabricd: can't make {tilde(path.parent, env)}: {error.strerror or error}", file=sys.stderr)
+        return 1
     with ExitStack() as stack:
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
             fcntl.flock(stack.enter_context(open(lock_path, "a")), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             print(f"fabricd: another fabricd is running on {tilde(path.parent, env)}", file=sys.stderr)
@@ -132,15 +137,19 @@ def start(
             print(f"fabricd: can't lock {tilde(lock_path, env)}: {error.strerror or error}", file=sys.stderr)
             return 1
         tracked, digested = (_entered(stack, feeds(env, chosen.port)) for _ in range(2))
-        following = Tracker(tracked, stack.enter_context(closing(tracker.connect(path))), idle=chosen.idle)
-        digesting = stack.enter_context(closing(digester.Digester(digested, path, env, idle=chosen.idle)))
+        try:
+            following = Tracker(tracked, stack.enter_context(closing(tracker.connect(path))), idle=chosen.idle)
+            digesting = stack.enter_context(closing(digester.Digester(digested, path, env, idle=chosen.idle)))
+        except (OSError, sqlite3.Error) as error:
+            print(f"fabricd: {tilde(path, env)}: {error}", file=sys.stderr)
+            return 1
         return asyncio.run(_until_stopped(following, digesting, clock, poll))
 
 
 def _entered(stack: ExitStack, feeds: Sequence[Feed]) -> Sequence[Feed]:
-    """The feeds, each source with a client closed when fabricd stops."""
+    """The feeds, each source that holds something, such as agentsview's client, closed when fabricd stops."""
     for feed in feeds:
-        if isinstance(feed.source, AgentsviewSource):
+        if isinstance(feed.source, AbstractContextManager):
             stack.enter_context(feed.source)
     return feeds
 
