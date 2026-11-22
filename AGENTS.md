@@ -123,7 +123,8 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   and turn ends, and its digest written at each finalization, retried while it can't be.
 - **fabricd.** `fabricd.start` is the process (`fabricd` on PATH): it reads `[agentsview] port` and `[sessions]
   idle_minutes` once, takes `fabricd.lock` beside `state.db` so that one runs per data folder, and runs `fabricd.serve`
-  until SIGTERM or SIGINT. `serve` runs `tracker.run` and `digester.run` together, each change the tracker records
+  until SIGTERM or SIGINT, which waits for the step under way; a second signal ends it at once. The tracker and the
+  digester each get their own sources. `serve` runs `tracker.run` and `digester.run` together, each change the tracker records
   waking the digester; either failing stops both, for the service manager to restart. Tests drive `serve` on a fixed
   clock, and `start` with a made-up feed and a real signal. Nothing installs its unit yet.
 

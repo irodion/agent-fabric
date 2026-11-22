@@ -9,11 +9,12 @@ import os
 import signal
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
 from contextlib import closing
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,7 @@ from test_digester import LATER, PROJECT
 from test_tracker import SECOND, T0, Source, feed, turn
 
 from agent_fabric import digester
-from agent_fabric.capture import AgentsviewSource
+from agent_fabric.capture import AgentsviewSource, SessionMeta
 from agent_fabric.config import Config
 from agent_fabric.copilot import CopilotSource
 from agent_fabric.digester import Digester
@@ -61,16 +62,28 @@ def repo(tmp_path: Path, env: dict[str, str]) -> Path:
     return folder
 
 
-def a_source(repo: Path, at: datetime) -> Source:
+class Listed(Source):
+    """A source that counts its listings."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.listings = 0
+
+    def active_sessions(self, since: datetime) -> list[SessionMeta]:
+        self.listings += 1
+        return super().active_sessions(since)
+
+
+def a_source(repo: Path, at: datetime) -> Listed:
     """A session in the repo, its first turn ended at `at`."""
-    found = Source()
+    found = Listed()
     found.add("s1", cwd=str(repo))
     turn(found, "s1", at)
     return found
 
 
 @pytest.fixture
-def source(repo: Path) -> Source:
+def source(repo: Path) -> Listed:
     return a_source(repo, T0)
 
 
@@ -177,6 +190,8 @@ def test_settings_default_to_agentsviews_port_and_a_30_minute_timeout(env: dict[
         ("[agentsview]\nport = true\n", "port is a port number"),
         ("[sessions]\nidle_minutes = 0\n", "idle_minutes is a whole number"),
         ("[sessions]\nidle_minutes = 1.5\n", "idle_minutes is a whole number"),
+        ("[sessions]\nidle_minutes = 10081\n", "from 1 to 10080"),
+        ("[sessions]\nidle_minutes = 99999999999999\n", "from 1 to 10080"),  # no timedelta holds it
         ("sessions = 30\n", r"\[sessions\] is not a table"),
     ],
 )
@@ -226,6 +241,16 @@ def test_a_second_fabricd_on_one_data_folder_doesnt_start(
     assert not state_db(env).exists()
 
 
+def test_a_lock_it_cant_take_stops_it_with_a_message(env: dict[str, str], capsys: pytest.CaptureFixture[str]) -> None:
+    (state_db(env).parent / "fabricd.lock").mkdir(parents=True)
+
+    assert start(env, feeds=lambda env, port: pytest.fail("started")) == 1
+    assert capsys.readouterr().err == (
+        "fabricd: can't lock ~/.local/share/agent-fabric/fabricd.lock: Is a directory\n"
+    )
+    assert not state_db(env).exists()
+
+
 def started(env: Mapping[str, str]) -> bool:
     """Whether fabricd's tracker has recorded a session's start."""
     if not state_db(env).exists():
@@ -241,46 +266,88 @@ def run_until(
     env: Mapping[str, str],
     feeds: Callable[[Mapping[str, str], int], list[Feed]],
     done: Callable[[], bool],
+    *,
+    now: datetime,
     signum: signal.Signals = signal.SIGTERM,
 ) -> int:
-    """`start`, sent `signum` once `done` holds."""
+    """`start` on a fixed clock, sent `signum` once `done` holds. Never signals once `start` has returned, when no
+    handler of fabricd's would catch it, and fails if `done` never comes."""
+    returned = threading.Event()
+    timed_out = threading.Event()
 
     def stop() -> None:
         for _ in range(500):
-            if done():
+            if done() or returned.is_set():
                 break
             time.sleep(0.01)
-        os.kill(os.getpid(), signum)
+        else:
+            timed_out.set()
+        if not returned.is_set():
+            os.kill(os.getpid(), signum)
 
     stopper = threading.Thread(target=stop)
     stopper.start()
     try:
-        return start(env, feeds=feeds, poll=0.05)
+        return start(env, feeds=feeds, clock=lambda: now, poll=0.05)
     finally:
+        returned.set()
         stopper.join()
+        assert not timed_out.is_set(), "never happened"
 
 
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
-def test_a_signal_stops_fabricd(env: dict[str, str], repo: Path, signum: signal.Signals) -> None:
+def test_a_signal_stops_fabricd(env: dict[str, str], source: Source, signum: signal.Signals) -> None:
     configure(env, "[agentsview]\nport = 8123\n")
-    source = a_source(repo, datetime.now(UTC) - timedelta(minutes=1))
     ports: list[int] = []
 
     def feeds(env: Mapping[str, str], port: int) -> list[Feed]:
         ports.append(port)
         return [feed(source)]
 
-    assert run_until(env, feeds, lambda: started(env), signum) == 0
-    assert ports == [8123]
+    assert run_until(env, feeds, lambda: started(env), now=T0 + 3 * SECOND, signum=signum) == 0
+    assert ports == [8123, 8123]  # the tracker's sources, and the digester's own
     assert started(env)
 
 
 def test_a_fabricd_started_after_another_stopped_runs_and_writes_nothing_twice(
-    env: dict[str, str], repo: Path
+    env: dict[str, str], source: Listed
 ) -> None:
-    source = a_source(repo, datetime.now(UTC) - 2 * IDLE)  # finalizes when first seen
-
-    assert run_until(env, lambda env, port: [feed(source)], lambda: bool(digests(env))) == 0
-    reads = len(source.reads)
-    assert run_until(env, lambda env, port: [feed(source)], lambda: len(source.reads) > reads) == 0
+    assert run_until(env, lambda env, port: [feed(source)], lambda: bool(digests(env)), now=LATER) == 0
+    listings, reads = source.listings, len(source.reads)
+    # Two polls, so that the first one's changes, had it recorded any, have woken the digester.
+    assert run_until(env, lambda env, port: [feed(source)], lambda: source.listings >= listings + 2, now=LATER) == 0
+    assert len(source.reads) == reads  # finalized, and its listing as it was: nothing to read again
     assert len(digests(env)) == 1
+
+
+STUCK = """
+import sys, threading
+from agent_fabric import digester, fabricd
+
+def stuck(self, now):
+    print("stuck", flush=True)
+    threading.Event().wait()
+
+digester.Digester.step = stuck
+sys.exit(fabricd.start({"HOME": sys.argv[1]}, feeds=lambda env, port: [], poll=0.05))
+"""
+
+
+def test_a_second_signal_stops_fabricd_without_waiting_for_a_stuck_step(env: dict[str, str], tmp_path: Path) -> None:
+    script = tmp_path / "stuck.py"
+    script.write_text(STUCK)
+    process = subprocess.Popen(
+        [sys.executable, str(script), env["HOME"]], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline() == "stuck\n"
+        process.send_signal(signal.SIGTERM)
+        with pytest.raises(subprocess.TimeoutExpired):
+            process.wait(0.5)  # the first waits for the step
+        process.send_signal(signal.SIGTERM)
+        _, err = process.communicate(timeout=5)
+    finally:
+        process.kill()
+    assert process.returncode == 128 + signal.SIGTERM
+    assert "stopped without waiting for the step under way" in err
