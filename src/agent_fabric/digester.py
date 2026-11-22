@@ -84,6 +84,9 @@ class Digester:
                 log.exception("digest of %s failed", row["session_id"])
         return found
 
+    def close(self) -> None:
+        self._db.close()
+
     def _place(self) -> int:
         found = self._db.execute("SELECT place FROM digester").fetchone()
         return int(found["place"]) if found else 0

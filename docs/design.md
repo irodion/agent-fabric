@@ -93,7 +93,7 @@ needs neither agentsview nor fabricd (§4.10).
 - Built once per version on CI from a pinned tag (below) and installed as a checksummed binary. Upgrade
   deliberately: bump the pin, CI rebuilds, the adapter contract tests pass, then release it with a manual run.
 - Run sandboxed under systemd (below): `agentsview serve --no-browser --no-update-check --port <port> --replace`.
-  `<port>` is the one port set in `config.toml` (§5): 8080, or another when 8080 is taken on the desktop. The unit's
+  `<port>` is the one port set in `config.toml` (`[agentsview] port`, §5): 8080, or another when 8080 is taken on the desktop. The unit's
   `--port` and every client's `--server http://127.0.0.1:<port>` use it. The port is explicit because without
   `--port` agentsview moves to the next free port when it's taken (seen on the desktop in phase 0) and its clients
   miss it; with it, the unit fails and retries every 30 s. `--replace` because otherwise `serve` defers to a running
@@ -374,7 +374,7 @@ text of a failed call, which agentsview drops (§4.1). The digest stores an exce
 
 - **Why a timeout:** no agent gives a reliable session-end signal (§2), so "finished" means "quiet for N
   minutes". The value is low-stakes: too short and a paused session finalizes and later reopens (one extra commit
-  to the same file); too long and its digest arrives late. Config value, default 30 min. The quiet counts from the session's own last
+  to the same file); too long and its digest arrives late. Config value (`[sessions] idle_minutes`), default 30 min. The quiet counts from the session's own last
   time, or from when the tracker last saw it change if that's earlier, so a source whose clock is ahead of ours
   doesn't hold a session open. Only a newer time reopens one, so a source's clock put back would hide its next
   turns until they pass the time stored; kb's sources read agents on this machine's clock, where a time ahead of it
@@ -588,8 +588,9 @@ What ingest sends to a hosted model goes through steps 1 and 2 first (§4.7). Th
 this is another way out of the machine.
 
 Single writer: the only commits to `main` are fabricd's digester's, one at a time, and mine; ingest writes only to
-its branch in a separate worktree. No lock file: fabricd is one process, and against my own commits in the checkout
-git's index lock and its mid-merge refusal are what count.
+its branch in a separate worktree. fabricd is one process, and one per data folder: it holds `fabricd.lock` beside
+`state.db` while it runs, so a second one started by hand exits instead of writing each digest twice. Against my own
+commits in the checkout, git's index lock and its mid-merge refusal are what count.
 
 ### 4.6 Wiki repo
 
@@ -1472,7 +1473,7 @@ neither agentsview nor fabricd, so a one-week trial in one or two projects runs 
 `kb ingest` and `kb lint` on the `codex` backend follow, for the same reason (§4.7). They are built and first ran on a
 real model on 2026-11-12; their daily timer followed (§5), and `kb lint`'s summary check comes with `kb prune`. Then
 CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.1 (2026-11-19, §4.1); adapter,
-normalizer and tracker (built); digester (the rendering, git snapshots, the writer with allow list/redaction/gate/commit, and the loop over the tracker's changes, built; turn-end drafts come with the panel), for the CLI agents: agentsview for Claude Code,
+normalizer and tracker (built); digester (the rendering, git snapshots, the writer with allow list/redaction/gate/commit, and the loop over the tracker's changes, built; turn-end drafts come with the panel); `fabricd` running the tracker and the digester (built; its unit next), for the CLI agents: agentsview for Claude Code,
 Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI + `kb mcp`; a prototype session
 for the panel layout, then the panel with rules only (incl. open loops and carry-over).
 
