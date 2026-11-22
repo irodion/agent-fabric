@@ -68,20 +68,23 @@ def write(workspace: Workspace, env: Mapping[str, str], now: datetime, digest: D
     if not allowed or (digest.headless and project not in config.headless(workspace.root)):
         _move(text, local, away=quarantine)
         return Written("local", local)
-    if rules := scan(text, env):
+    name = PurePosixPath(digest.path).stem  # <yyyy-mm-dd>-<agent>-<shortid>, whose id has no dash
+    agent, short = name[len("yyyy-mm-dd-") :].rsplit("-", 1)
+    label = f"{redact(project)} {agent} {short}"  # a project with no remote is named by its folder
+    if rules := scan(f"{text}\n{label}\n", env):
         _move(text, quarantine, away=local)
         return Written("quarantine", quarantine, tuple(rules))
     folder = _unlinked(workspace, workspace.wiki(env), ".")
     _unlinked(workspace, folder, digest.path)
     _unlinked(workspace, folder, LOG)
     wiki = ensure_wiki(folder, env, agents_file())
-    committed = _commit(wiki, digest.path, text, now.astimezone(UTC), project)
+    committed = _commit(wiki, digest.path, text, now.astimezone(UTC), label)
     local.unlink(missing_ok=True)
     quarantine.unlink(missing_ok=True)
     return Written("wiki", folder / digest.path, committed=committed)
 
 
-def _commit(wiki: Git, relative: str, text: str, now: datetime, project: str) -> bool:
+def _commit(wiki: Git, relative: str, text: str, now: datetime, label: str) -> bool:
     _check_clean(wiki)
     written = [relative, LOG]
     # The checkout is clean, so these are the last commit's bytes: what a failure puts back.
@@ -92,18 +95,23 @@ def _commit(wiki: Git, relative: str, text: str, now: datetime, project: str) ->
         _replace(target, text)
         if _at_head(wiki, relative) == wiki("hash-object", "--", relative).strip():
             return False  # what the last commit holds, as git would store it: the checkout is clean again
-        name = PurePosixPath(relative).stem  # <yyyy-mm-dd>-<agent>-<shortid>, whose id has no dash
-        agent, short = name[len("yyyy-mm-dd-") :].rsplit("-", 1)
         log = (before[LOG] or b"# Log\n").decode("utf-8", "surrogateescape")
         if not log.endswith("\n"):
             log += "\n"
-        _replace(wiki.folder / LOG, log + f"{now:%Y-%m-%d} digest {project} {agent} {short}\n")
+        _replace(wiki.folder / LOG, log + f"{now:%Y-%m-%d} digest {label}\n")
         wiki("add", "--", *written)
-        wiki("commit", "-q", "-m", f"digest: {project} {agent} {short}", "--", *written)
+        _on_main(wiki)  # again: I may have switched branch since, and a commit goes wherever HEAD is
+        wiki("commit", "-q", "-m", f"digest: {label}", "--", *written)
     except BaseException as e:
         if (left := _restore(wiki, before)) and isinstance(e, Exception):
             raise GitError(f"{e}; and kb couldn't undo its change to {left} in {wiki.folder}: restore it") from e
         raise
+    if _branch(wiki) != f"refs/heads/{MAIN}" or wiki("rev-parse", "HEAD") != wiki("rev-parse", MAIN):
+        landed = wiki("rev-parse", "--short", "HEAD").strip()
+        raise GitError(
+            f"the digest was committed as {landed} on {_branch(wiki) or 'a detached HEAD'}, a branch "
+            f"switched to during the write, not {MAIN}; drop that commit there, and kb writes it again"
+        )
     return True
 
 
@@ -115,15 +123,23 @@ def _at_head(wiki: Git, relative: str) -> str | None:
 
 def _check_clean(wiki: Git) -> None:
     """Clean on `main`, with nothing under way; GitError otherwise, naming what's in the way."""
-    branch = wiki("symbolic-ref", "-q", "HEAD").strip() if wiki.ok("symbolic-ref", "-q", "HEAD") else ""
-    if branch != f"refs/heads/{MAIN}":
-        raise GitError(f"{wiki.folder} has {branch or 'a detached HEAD'} checked out; digests wait for {MAIN}")
+    _on_main(wiki)
     found = wiki("rev-parse", *(arg for name in UNDER_WAY for arg in ("--git-path", name))).splitlines()
     for name, path in zip(UNDER_WAY, found, strict=True):
         if (wiki.folder / path).exists():
             raise GitError(f"a {UNDER_WAY[name]} is under way in {wiki.folder}; digests wait until it's done")
     if wiki("status", "--porcelain", "--untracked-files=all"):
         raise GitError(f"{wiki.folder} has changes not committed; digests wait until it's clean")
+
+
+def _branch(wiki: Git) -> str:
+    """The branch checked out, as a ref; empty on a detached HEAD."""
+    return wiki("symbolic-ref", "-q", "HEAD").strip() if wiki.ok("symbolic-ref", "-q", "HEAD") else ""
+
+
+def _on_main(wiki: Git) -> None:
+    if (branch := _branch(wiki)) != f"refs/heads/{MAIN}":
+        raise GitError(f"{wiki.folder} has {branch or 'a detached HEAD'} checked out; digests wait for {MAIN}")
 
 
 def _restore(wiki: Git, before: dict[str, bytes | None]) -> str:

@@ -549,7 +549,13 @@ clean on `main` with no merge, rebase, `git am`, cherry-pick, revert or bisect u
 during my review of an ingest branch, say, or while I have a change there uncommitted. So kb never writes over a
 change of mine or into a merge, and a commit that fails, as when a pre-commit hook stops it, is undone and leaves the
 checkout clean; where it can't be undone either, the error names what kb left behind. A digest is unchanged when git
-would store what the last commit holds, so one holding a carriage return makes no commit when written again. `log.md` is dated in UTC, as the digests' paths are.
+would store what the last commit holds, so one holding a carriage return makes no commit when written again. The
+branch is checked again just before the commit, and after it: a switch in between, which git's own locks don't stop,
+lands the commit on the branch switched to, and kb says so and names it, to drop there (Codex review, 2026-11-22:
+kept that small, as committing through plumbing would skip the wiki's pre-commit hook and still leave the checkout
+to bring up to date). The log line and the commit message name the project redacted, since a project with no remote
+is named by its folder, and gitleaks scans that line with the digest. The digest's path is made from the same id, so
+an allowed project with no remote still has its folder, user name and all, in its path. `log.md` is dated in UTC, as the digests' paths are.
 
 A session's latest digest is in one place: one written to the quarantine or the local folder is removed from the
 other, and one committed to the wiki from both, as when a quarantined digest comes out clean after a reopen, or a
