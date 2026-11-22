@@ -417,6 +417,16 @@ text of a failed call, which agentsview drops (§4.1). The digest stores an exce
   regeneration is byte-stable.
 - The tracker appends `started`, `turn_end`, `finalized` and `reopened` to a table in `state.db`, numbered, so the
   digester and the panel each read on from their own place and a restart loses none.
+- **The digester** (`digester.py`, 2026-11-22) reads those changes on from its place, on a connection of its own.
+  It snapshots a session's folder (§4.4) at `started` and `turn_end`, once a step however many turns ended since
+  the last, and keeps the first and the latest snapshot with the session. At `finalized` the digest is due: rendered
+  from the whole transcript, read again, and written by §4.5. Its path is fixed at the first write, so a reopened
+  session rewrites its file even if its earliest time moves. A digest that can't be written now (the wiki not clean,
+  gitleaks missing, the source not answering) is tried again a minute later, each new reason logged once; one whose
+  session reopened meanwhile waits for the next finalization, and one its source no longer has is dropped. It steps
+  every 10 s, or when the tracker emits a change, so a turn end's snapshot is taken within a step of it; changes
+  read after an outage are snapshotted as the folder is then. The draft digest at each turn end is left for the
+  panel, which is what shows it.
 
 ### 4.4 Digest
 
@@ -1461,7 +1471,7 @@ neither agentsview nor fabricd, so a one-week trial in one or two projects runs 
 `kb ingest` and `kb lint` on the `codex` backend follow, for the same reason (§4.7). They are built and first ran on a
 real model on 2026-11-12; their daily timer followed (§5), and `kb lint`'s summary check comes with `kb prune`. Then
 CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.1 (2026-11-19, §4.1); adapter,
-normalizer and tracker (built); digester (the rendering, git snapshots and the writer, with allow list/redaction/gate/commit, built), for the CLI agents: agentsview for Claude Code,
+normalizer and tracker (built); digester (the rendering, git snapshots, the writer with allow list/redaction/gate/commit, and the loop over the tracker's changes, built; turn-end drafts come with the panel), for the CLI agents: agentsview for Claude Code,
 Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI + `kb mcp`; a prototype session
 for the panel layout, then the panel with rules only (incl. open loops and carry-over).
 

@@ -1,0 +1,227 @@
+"""The digester: a digest for each session the tracker finalizes (docs/design.md §4.3-§4.5).
+
+It reads the tracker's changes on from its own place in `state.db`. A session's folder is snapshotted through git when
+it's first seen and at each of its turn ends, and the snapshots kept with it. At each finalization its digest is
+rendered from the whole transcript, read again, and those snapshots, and written where §4.5 says.
+
+A digest that can't be written now stays due: the wiki not clean, gitleaks missing, its source not answering. It's
+tried again a minute later, and each new reason is logged once. One whose session reopened meanwhile waits for the
+next finalization, and one whose session its source no longer has is dropped.
+"""
+
+import asyncio
+import json
+import logging
+import sqlite3
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
+from dataclasses import asdict, fields
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, NoReturn
+
+from agent_fabric import digest, snapshot, writer
+from agent_fabric.capture import CaptureError
+from agent_fabric.secretgate import GateUnavailable
+from agent_fabric.snapshot import Snapshot
+from agent_fabric.tracker import POLL, Feed, Tracked, Tracker
+from agent_fabric.wikirepo import GitError
+from agent_fabric.workspaces import Workspace, workspace_of
+
+log = logging.getLogger(__name__)
+
+RETRY = timedelta(minutes=1)
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS digester (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    place INTEGER NOT NULL        -- the last of the tracker's changes it has read
+);
+CREATE TABLE IF NOT EXISTS digests (
+    session_id TEXT PRIMARY KEY,
+    first_seen TEXT NOT NULL,     -- the session's commits are those made since
+    first TEXT,                   -- its first snapshot, as JSON; NULL until one is taken
+    last TEXT,                    -- its latest
+    path TEXT,                    -- its digest's, fixed at the first write, so a reopened session keeps its file
+    due INTEGER NOT NULL,         -- finalized, and its digest not written since
+    tried_at TEXT,                -- the last write that failed
+    error TEXT                    -- why, logged once
+);
+"""
+
+
+class Digester:
+    def __init__(self, feeds: Sequence[Feed], db: sqlite3.Connection, env: Mapping[str, str]) -> None:
+        """`db` is the tracker's `state.db`, on a connection of the digester's own."""
+        db.executescript(SCHEMA)
+        self._tracker = Tracker(feeds, db)  # only read: the sessions and their changes
+        self._feeds = {feed.name: feed for feed in feeds}
+        self._db = db
+        self._env = env
+
+    def step(self, now: datetime) -> list[writer.Written]:
+        """Follow the changes recorded since the last step, then write what's due."""
+        found = self._db.execute("SELECT place FROM digester").fetchone()
+        changes = self._tracker.changes(found["place"] if found else 0)
+        wanted: dict[str, None] = {}  # snapshotted once a step, however many turns ended since the last
+        with self._db:
+            for _, change in changes:
+                # First seen by its first change, `started`, which a step reads before the session's others.
+                self._db.execute(
+                    "INSERT OR IGNORE INTO digests (session_id, first_seen, due) VALUES (?, ?, 0)",
+                    (change.session_id, change.at.isoformat()),
+                )
+                if change.kind in ("started", "turn_end"):
+                    wanted[change.session_id] = None
+        for session_id in wanted:
+            self._snapshot(session_id, now)
+        with self._db:
+            for _, change in changes:
+                if change.kind == "finalized":
+                    self._db.execute(
+                        "UPDATE digests SET due = 1, tried_at = NULL WHERE session_id = ?", (change.session_id,)
+                    )
+            if changes:
+                self._db.execute("INSERT OR REPLACE INTO digester (id, place) VALUES (1, ?)", (changes[-1][0],))
+        return [written for row in self._due(now) if (written := self._write(row, now)) is not None]
+
+    def _snapshot(self, session_id: str, now: datetime) -> None:
+        session = self._tracker.session(session_id)
+        row = self._row(session_id)
+        if session is None or row is None or session.cwd is None or not Path(session.cwd).is_dir():
+            return
+        taken = snapshot.take(Path(session.cwd), now, datetime.fromisoformat(row["first_seen"]))
+        if taken is None:
+            return  # outside git, or git couldn't read it: the next turn end tries again
+        with self._db:
+            self._db.execute(
+                "UPDATE digests SET first = COALESCE(first, ?), last = ? WHERE session_id = ?",
+                (_dump(taken), _dump(taken), session_id),
+            )
+
+    def _due(self, now: datetime) -> list[sqlite3.Row]:
+        return list(
+            self._db.execute(
+                "SELECT * FROM digests WHERE due = 1 AND (tried_at IS NULL OR tried_at <= ?) ORDER BY session_id",
+                ((now - RETRY).isoformat(),),
+            )
+        )
+
+    def _write(self, row: sqlite3.Row, now: datetime) -> writer.Written | None:
+        session_id = row["session_id"]
+        session = self._tracker.session(session_id)
+        feed = self._feeds.get(session.feed) if session else None
+        if session is None or session.state == "active" or feed is None:
+            # Reopened, so it finalizes again; or read by a feed no longer configured, so never read again.
+            self._done(session_id)
+            return None
+        try:
+            meta = feed.source.session(session_id)
+            messages = feed.source.messages(session_id, 0).messages
+            text = digest.render(
+                meta, messages, _snapshots(row), project=session.project, revision=session.finalizations
+            )
+            if row["path"] is None:
+                start = digest.started(meta, messages) or datetime.fromisoformat(row["first_seen"])
+                with self._db:
+                    self._db.execute(
+                        "UPDATE digests SET path = ? WHERE session_id = ?",
+                        (digest.path(meta, session.project, start), session_id),
+                    )
+                row = self._row(session_id) or row
+            written = writer.write(
+                self._workspace(session),
+                self._env,
+                now,
+                writer.Digest(text, row["path"], session.project, session.headless),
+            )
+        except CaptureError as error:
+            if error.gone:
+                log.warning("no digest for %s: its source no longer has it: %s", session_id, error)
+                self._done(session_id)
+                return None
+            self._failed(row, now, error)
+            return None
+        except Exception as error:  # whatever stops one digest mustn't stop the others
+            self._failed(row, now, error)
+            return None
+        self._done(session_id)
+        log.info("digest of %s: %s %s", session_id, written.where, written.path)
+        return written
+
+    def _workspace(self, session: Tracked) -> Workspace:
+        return workspace_of(Path(session.cwd), self._env) if session.cwd else Workspace(None)
+
+    def _failed(self, row: sqlite3.Row, now: datetime, error: Exception) -> None:
+        reason = f"{type(error).__name__}: {error}"
+        if reason != row["error"]:
+            log.warning("digest of %s waits: %s", row["session_id"], reason, exc_info=_unexpected(error))
+        with self._db:
+            self._db.execute(
+                "UPDATE digests SET tried_at = ?, error = ? WHERE session_id = ?",
+                (now.isoformat(), reason, row["session_id"]),
+            )
+
+    def _done(self, session_id: str) -> None:
+        with self._db:
+            self._db.execute(
+                "UPDATE digests SET due = 0, tried_at = NULL, error = NULL WHERE session_id = ?", (session_id,)
+            )
+
+    def _row(self, session_id: str) -> sqlite3.Row | None:
+        found: sqlite3.Row | None = self._db.execute(
+            "SELECT * FROM digests WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return found
+
+
+async def run(
+    digester: Digester,
+    *,
+    wake: asyncio.Event | None = None,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    every: float = POLL,
+) -> NoReturn:
+    """A step every `every` seconds, or sooner when `wake` is set, as the tracker's `emit` can, so a turn end's
+    snapshot is taken close to it. Steps run in a worker thread, one at a time, which the database goes with."""
+    wake = wake or asyncio.Event()
+    while True:
+        wake.clear()
+        try:
+            await asyncio.to_thread(lambda: digester.step(clock()))
+        except Exception:
+            log.exception("digester step failed")
+        with suppress(TimeoutError):
+            await asyncio.wait_for(wake.wait(), every)
+
+
+def _unexpected(error: Exception) -> bool:
+    """Not one of the reasons `writer.write` and the sources give for a digest to wait: worth its traceback."""
+    return not isinstance(error, GitError | GateUnavailable | OSError | ValueError | CaptureError)
+
+
+def _snapshots(row: sqlite3.Row) -> list[Snapshot]:
+    return [_load(row[column]) for column in ("first", "last") if row[column] is not None]
+
+
+def _dump(taken: Snapshot) -> str:
+    values: dict[str, Any] = asdict(taken)
+    values |= {
+        "at": taken.at.isoformat(),
+        "worktree": str(taken.worktree) if taken.worktree else None,
+        "main": str(taken.main) if taken.main else None,
+    }
+    return json.dumps(values)
+
+
+def _load(text: str) -> Snapshot:
+    values = json.loads(text)
+    for field in fields(Snapshot):
+        if isinstance(values[field.name], list):
+            values[field.name] = tuple(values[field.name])
+    values |= {
+        "at": datetime.fromisoformat(values["at"]),
+        "worktree": Path(values["worktree"]) if values["worktree"] else None,
+        "main": Path(values["main"]) if values["main"] else None,
+    }
+    return Snapshot(**values)

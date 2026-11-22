@@ -184,6 +184,12 @@ def path(meta: SessionMeta, project: str, start: datetime) -> str:
     return f"raw/sessions/{folder or 'unknown'}/{when:%Y/%m}/{when:%Y-%m-%d}-{_segment(meta.agent)}-{short}.md"
 
 
+def started(meta: SessionMeta, messages: Sequence[Message]) -> datetime | None:
+    """When the session began, as its digest says: its earliest time, else its listing's; None with neither."""
+    stamps = list(_stamps(message for message in messages if not message.is_system))
+    return min(stamps) if stamps else _utc(meta.started_at) if meta.started_at else None
+
+
 def render(
     meta: SessionMeta,
     messages: Sequence[Message],
@@ -202,7 +208,7 @@ def render(
     tests = [run for ordinal, action in shells if (run := _tests(ordinal, action)) is not None]
     first, last = (snapshots[0], snapshots[-1]) if snapshots else (None, None)
     stamps = sorted(_stamps(said))
-    start = stamps[0] if stamps else _utc(meta.started_at)
+    start = _utc(started(meta, messages))
     end = stamps[-1] if stamps else _utc(meta.ended_at)
     front = {
         "schema": SCHEMA,
