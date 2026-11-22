@@ -23,7 +23,7 @@ from hypothesis.stateful import RuleBasedStateMachine, initialize, precondition,
 
 from agent_fabric.capture import AgentsviewSource, CaptureError, Message, SessionMeta, Transcript
 from agent_fabric.copilot import CopilotSource
-from agent_fabric.tracker import IDLE, SCHEMA, Change, Feed, Tracker, connect, run
+from agent_fabric.tracker import IDLE, SCHEMA, TURN_QUIET, Change, Feed, Tracker, connect, run
 
 FIXTURES = Path(__file__).parent / "fixtures"
 T0 = datetime(2026, 11, 20, 9, 0, tzinfo=UTC)
@@ -979,26 +979,33 @@ class Lifecycle(RuleBasedStateMachine):
     ours (a zone-less local time read as UTC) and whose messages may carry no times (Cursor CLI's in agentsview).
 
     After every poll: a new message has started or reopened the session, a re-parse of a timed session reopens
-    nothing, a session unchanged for the idle timeout is finalized, and the changes come in their lifecycle's
-    order."""
+    nothing, an answer has ended its turn once quiet, a session is finalized once unchanged for the idle timeout and
+    not before its last new message is that old, and the changes come in their lifecycle's order."""
 
     def __init__(self) -> None:
         super().__init__()
         self.source = Source()
         self.source.add("s1")
-        self.folder = Path(tempfile.mkdtemp())
-        self.db = connect(self.folder / "state.db")
-        self.tracker = tracker(self.db, feed(source=self.source))
+        self.folder: Path | None = None
+        self.db: sqlite3.Connection | None = None
         self.now = T0
         self.ahead = timedelta(0)
         self.timed = True
         self.seen: datetime | None = None  # the last poll that read a change
+        self.active = T0  # no later than the last new activity, by our clock
+        self.answer = (0, "")  # the last answer, by its turn and wording
+        self.ended = (0, "")  # the answer the last turn_end was for
+        self.read: datetime | None = None  # the poll that read the last answer
         self.pending: str | None = None  # what changed since the last poll: "turn" or "reparse"
         self.state: str | None = None  # the lifecycle as the changes tell it
 
     @initialize(ahead=st.sampled_from([timedelta(0), timedelta(hours=3)]), timed=st.booleans())
     def source_clock(self, ahead: timedelta, timed: bool) -> None:
         self.ahead, self.timed = ahead, timed
+        # Here, not in __init__, so that teardown removes the folder even if opening the database fails.
+        self.folder = Path(tempfile.mkdtemp())
+        self.db = connect(self.folder / "state.db")
+        self.tracker = tracker(self.db, feed(source=self.source))
 
     @rule()
     def new_turn(self) -> None:
@@ -1010,6 +1017,8 @@ class Lifecycle(RuleBasedStateMachine):
             self.source.say("s1", "assistant", "Done.", None)
             self.source.changed("s1", ended_at=at)  # only the listing has a time
         self.pending = "turn"
+        self.active = self.now
+        self.answer = (self.answer[0] + 1, "Done.")
 
     @precondition(lambda self: self.source.texts["s1"] and self.pending is None)
     @rule()
@@ -1019,6 +1028,7 @@ class Lifecycle(RuleBasedStateMachine):
         wording = "Done!" if last.content == "Done." else "Done."
         self.source.reparse("s1", [*rest, last.model_copy(update={"content": wording})])
         self.pending = "reparse"
+        self.answer = (self.answer[0], wording)
 
     # Gaps by what they reach: not yet a turn's quiet, past it, past the idle timeout.
     @rule(gap=st.sampled_from([2 * SECOND, 10 * SECOND, 5 * MINUTE, IDLE + MINUTE]))
@@ -1044,6 +1054,14 @@ class Lifecycle(RuleBasedStateMachine):
             assert {"started", "reopened"} & set(kinds), "a new message didn't reopen the session"
         if self.pending == "reparse" and self.timed:
             assert "reopened" not in kinds, "a re-parse reopened the session"
+        if "finalized" in kinds:
+            assert self.now - self.active >= IDLE, "a session finalized before its idle timeout"
+        if self.pending:
+            self.read = self.now
+        if "turn_end" in kinds:
+            self.ended = self.answer
+        if self.state == "active" and self.answer != self.ended and self.read is not None:
+            assert self.now - self.read < TURN_QUIET, "an answer quiet for 5 s didn't end its turn"
         if self.pending or "started" in kinds:  # a session first read with no messages has to finalize too
             self.seen = self.now
         self.pending = None
@@ -1051,11 +1069,14 @@ class Lifecycle(RuleBasedStateMachine):
             assert row.state == "finalized", "a session unchanged for the idle timeout wasn't finalized"
 
     def teardown(self) -> None:
-        self.db.close()
-        shutil.rmtree(self.folder)
+        if self.db is not None:
+            self.db.close()
+        if self.folder is not None:
+            shutil.rmtree(self.folder)
 
 
 TestLifecycle = Lifecycle.TestCase
-# Enough runs to find, fresh each time, both clock bugs a review caught here (a re-parse that reopened a session ahead
-# of the clock, and an untimed one that couldn't reopen), in about 9 s.
-TestLifecycle.settings = settings(max_examples=1000, stateful_step_count=20, deadline=None)
+# About 9 s. Fresh runs find each clock bug a review caught here (a re-parse that reopened a session ahead of the
+# clock, an untimed one that couldn't reopen) about 4 times in 5; the two tests above pin them. A failure prints a
+# blob for @reproduce_failure, since CI keeps no .hypothesis folder.
+TestLifecycle.settings = settings(max_examples=1000, stateful_step_count=20, deadline=None, print_blob=True)
