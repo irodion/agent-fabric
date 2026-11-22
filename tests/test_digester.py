@@ -17,6 +17,7 @@ from conftest import GITLEAKS, a_stub
 from test_tracker import MINUTE, SECOND, T0, Source, feed, turn
 
 from agent_fabric import snapshot
+from agent_fabric.capture import Transcript
 from agent_fabric.digester import BATCH, RETRY, Digester
 from agent_fabric.tracker import IDLE, Tracker, connect
 from agent_fabric.writer import Written
@@ -368,18 +369,22 @@ def test_a_digest_that_keeps_failing_is_tried_less_often(lab: Lab) -> None:
     assert tries == [0, 1, 3, 7]
 
 
-def test_a_session_with_no_times_is_dated_when_first_seen(lab: Lab) -> None:
+def test_a_session_with_no_times_is_dated_by_when_kb_saw_it(lab: Lab) -> None:
     lab.source.add("s3", agent="codex", cwd=str(lab.repo))  # with no times, as Cursor CLI's
     lab.source.say("s3", "user", "hi", None)
     lab.source.say("s3", "assistant", "Hello.", None)
     lab.step(T0)
+    lab.source.say("s3", "user", "and?", None)
+    lab.source.say("s3", "assistant", "That's all.", None)
+    lab.step(T0 + 10 * MINUTE)
 
-    [written] = [w for w in lab.step(T0 + IDLE + MINUTE) if w.path.name.endswith("-s3.md")]
+    [written] = [w for w in lab.step(T0 + 10 * MINUTE + IDLE + MINUTE) if w.path.name.endswith("-s3.md")]
 
     assert written.path.name.startswith("2026-11-20-")
     front = written.path.read_text().split("---\n")[1]
     assert "1970" not in front
     assert 'start: "2026-11-20T09:00:00Z"' in front
+    assert 'end: "2026-11-20T09:10:00Z"' in front  # its last change the tracker saw
 
 
 def test_one_digest_whose_bookkeeping_fails_leaves_the_others(lab: Lab, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -408,3 +413,56 @@ def test_a_digest_whose_session_the_tracker_lost_says_so(lab: Lab, caplog: pytes
         assert lab.digester.step(LATER) == []
 
     assert "the tracker has no such session" in caplog.text
+
+
+def test_a_session_first_seen_idle_isnt_snapshotted_before_the_tracker_settles_it(lab: Lab) -> None:
+    turn(lab.source, "s1", T0)
+    (lab.repo / "later.py").write_text("a later session's\n")
+    lab.source.add("s2", cwd=str(lab.repo))
+    turn(lab.source, "s2", LATER)
+    read = lab.source.messages
+
+    def stepping(session_id: str, from_ordinal: int) -> Transcript:
+        if session_id == "s2":  # s1 is read and recorded active, but not yet settled
+            lab.digester.step(LATER)
+        return read(session_id, from_ordinal)
+
+    lab.source.messages = stepping  # type: ignore[method-assign]
+
+    lab.tracker.poll(LATER)
+
+    row = connect(lab.path).execute("SELECT first FROM digests WHERE session_id = 's1'").fetchone()
+    assert row["first"] is None
+
+
+def test_a_root_no_longer_registered_sends_its_digest_where_the_session_is_now(lab: Lab) -> None:
+    config = Path(lab.env["HOME"]) / ".config" / "agent-fabric" / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(f'[[workspace]]\nroot = "{lab.repo.resolve()}"\nallow = ["{PROJECT}"]\n')
+    a_session(lab)
+    allow(lab.env)  # the root removed; the default workspace allows the project
+
+    [written] = lab.step(LATER)
+
+    assert written.where == "wiki"
+    assert written.path.is_relative_to(lab.wiki())
+    assert not (lab.repo / ".fabric").exists()
+
+
+def test_a_new_finalization_logs_its_reason_again(lab: Lab, caplog: pytest.LogCaptureFixture) -> None:
+    allow(lab.env)
+    a_session(lab)
+    lab.wiki().write_text("a file where the wiki goes\n")  # fails the same way each time
+
+    with caplog.at_level(logging.WARNING, logger="agent_fabric.digester"):
+        lab.step(LATER)
+        # Reopened while its digest waits out the minute before its next try, so nothing sees it active.
+        turn(lab.source, "s1", LATER + 10 * SECOND, prompt="again")
+        lab.step(LATER + 20 * SECOND)
+        lab.step(LATER + 20 * SECOND + IDLE)
+
+    assert len(caplog.records) == 2
+
+
+def test_the_state_database_lets_one_connection_read_while_another_writes(tmp_path: Path) -> None:
+    assert connect(tmp_path / "state.db").execute("PRAGMA journal_mode").fetchone()[0] == "wal"
