@@ -2,7 +2,8 @@
 
 import os
 import subprocess
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -158,22 +159,38 @@ def test_a_wiki_on_another_branch_takes_no_digest(env: dict[str, str]) -> None:
     assert git(env, "status", "--porcelain") == ""
 
 
-def test_what_i_have_staged_in_the_wiki_stays_staged(env: dict[str, str]) -> None:
+def status(env: dict[str, str]) -> str:
+    return git(env, "status", "--porcelain", "--untracked-files=all")
+
+
+@pytest.mark.parametrize(
+    ("mine", "files"),
+    [
+        (lambda w: (w / "log.md").write_text("# Log\nmy own line\n"), " M log.md\n"),
+        (lambda w: (w / "mine.md").write_text("my own\n"), "?? mine.md\n"),
+    ],
+    ids=["an edit", "a new file"],
+)
+def test_a_digest_waits_while_the_wiki_has_my_changes_and_leaves_them(
+    env: dict[str, str], mine: Callable[[Path], object], files: str
+) -> None:
     allow(env)
     put(env, DIGEST + "first\n")
-    (wiki(env) / "mine.md").write_text("my own\n")
-    git(env, "add", "mine.md")
+    head = git(env, "rev-parse", "HEAD")
+    mine(wiki(env))
 
-    put(env)
+    with pytest.raises(GitError, match="not committed"):
+        put(env)
+    assert status(env) == files
+    assert git(env, "rev-parse", "HEAD") == head
 
-    assert git(env, "status", "--porcelain") == "A  mine.md\n"
 
-
-def test_a_digest_waits_out_a_merge_and_then_logs_once(env: dict[str, str]) -> None:
+def test_a_digest_waits_out_a_merge_and_leaves_it_as_it_was(env: dict[str, str]) -> None:
     allow(env)
     put(env, DIGEST + "first\n")
     git(env, "switch", "-q", "-c", "ingest/2026-11-22")
     (wiki(env) / "index.md").write_text("# Index\n- theirs\n")
+    (wiki(env) / "log.md").write_text(git(env, "show", "HEAD:log.md") + "2026-11-22 ingest n1 add\n")
     git(env, "commit", "-qam", "ingest")
     git(env, "switch", "-q", "main")
     (wiki(env) / "index.md").write_text("# Index\n- ours\n")
@@ -181,13 +198,67 @@ def test_a_digest_waits_out_a_merge_and_then_logs_once(env: dict[str, str]) -> N
     subprocess.run(
         ["git", "merge", "-q", "ingest/2026-11-22"], cwd=wiki(env), env=env, capture_output=True, check=False
     )
+    during = status(env), (wiki(env) / "log.md").read_text()
+
+    with pytest.raises(GitError, match="merge is under way"):
+        put(env)
+    assert (status(env), (wiki(env) / "log.md").read_text()) == during
+    git(env, "merge", "--abort")
+    put(env)
+    assert git(env, "show", "HEAD:log.md").count("digest") == 2
+
+
+def test_a_commit_that_fails_leaves_the_wiki_clean(env: dict[str, str]) -> None:
+    allow(env)
+    put(env, DIGEST + "first\n")
+    a_stub(wiki(env) / ".git" / "hooks", "pre-commit", "#!/bin/sh\nexit 1\n")
+    head = git(env, "rev-parse", "HEAD")
 
     with pytest.raises(GitError):
         put(env)
-    git(env, "merge", "--abort")
+    assert status(env) == ""
+    assert git(env, "rev-parse", "HEAD") == head
+
+
+def test_a_new_digest_whose_commit_fails_is_not_left_behind(env: dict[str, str]) -> None:
+    allow(env)
+    put(env)
+    git(env, "rm", "-q", RELATIVE)
+    git(env, "commit", "-qm", "drop it")
+    a_stub(wiki(env) / ".git" / "hooks", "pre-commit", "#!/bin/sh\nexit 1\n")
+
+    with pytest.raises(GitError):
+        put(env)
+    assert status(env) == ""
+
+
+def test_a_digest_with_carriage_returns_is_committed_once(env: dict[str, str]) -> None:
+    allow(env)
+    put(env, DIGEST + "```\nok\r\nprogress\r100%\n```\n")
+    head = git(env, "rev-parse", "HEAD")
+
+    assert put(env, DIGEST + "```\nok\r\nprogress\r100%\n```\n").committed is False
+    assert git(env, "rev-parse", "HEAD") == head
+    assert status(env) == ""
+
+
+def test_the_log_is_dated_in_utc(env: dict[str, str]) -> None:
+    allow(env)
+    late = datetime(2026, 11, 23, 0, 30, tzinfo=timezone(timedelta(hours=2)))
+
+    write(Workspace(None), env, late, Digest(DIGEST, RELATIVE, PROJECT, headless=False))
+
+    assert git(env, "show", "HEAD:log.md").endswith(f"2026-11-22 digest {PROJECT} claude a1b2c3d4\n")
+
+
+def test_writing_a_digest_makes_no_folders_where_it_isnt(env: dict[str, str]) -> None:
+    allow(env)
+
     put(env)
 
-    assert git(env, "show", "HEAD:log.md").count("digest") == 2
+    data = Path(env["HOME"]) / ".local" / "share" / "agent-fabric"
+    assert not (data / "local").exists()
+    assert not (data / "quarantine").exists()
 
 
 def test_a_workspace_root_keeps_its_digests_in_its_own_folder(env: dict[str, str], tmp_path: Path) -> None:
@@ -200,6 +271,22 @@ def test_a_workspace_root_keeps_its_digests_in_its_own_folder(env: dict[str, str
     assert written.path == root.resolve() / ".fabric" / "local" / RELATIVE
 
 
+@pytest.mark.parametrize("link", [".fabric", ".fabric/wiki"])
+def test_a_link_out_of_a_workspace_root_is_refused_for_the_wiki_too(
+    env: dict[str, str], tmp_path: Path, link: str
+) -> None:
+    root = tmp_path / "work"
+    (root / link).parent.mkdir(parents=True, exist_ok=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (root / link).symlink_to(elsewhere)
+    configure(env, f'[[workspace]]\nroot = "{root}"\nallow = ["{PROJECT}"]\n')
+
+    with pytest.raises(OSError, match="is a link"):
+        put(env, workspace=Workspace(root.resolve()))
+    assert not any(elsewhere.iterdir())
+
+
 def test_a_link_out_of_a_workspace_root_is_refused(env: dict[str, str], tmp_path: Path) -> None:
     root = tmp_path / "work"
     (root / ".fabric" / "local").mkdir(parents=True)
@@ -208,6 +295,6 @@ def test_a_link_out_of_a_workspace_root_is_refused(env: dict[str, str], tmp_path
     (root / ".fabric" / "local" / "raw").symlink_to(elsewhere)
     configure(env, f'[[workspace]]\nroot = "{root}"\n')
 
-    with pytest.raises(OSError, match="leads out of"):
+    with pytest.raises(OSError, match="is a link"):
         put(env, workspace=Workspace(root.resolve()))
     assert not any(elsewhere.iterdir())

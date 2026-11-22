@@ -2,17 +2,18 @@
 
 Every digest is redacted first. A project on its workspace's allow list goes to the wiki, if gitleaks finds nothing,
 and is committed on `main`; one gitleaks stops goes to the quarantine, and every other project's stays in the local
-folder. A digest lives in one place: writing it removes its copy from the local folder or the quarantine.
+folder. Writing a digest there removes its copy from the other of those two folders, and a digest committed to the
+wiki removes both: a session's latest digest is in one place. A copy committed before stays in the wiki.
 
-The wiki's commit is made in its own checkout, which is mine too: kb writes the digest and `log.md`, and commits those
-two paths alone, so anything else I have staged or changed there stays as it was. It commits only while `main` is
-checked out, and git refuses a commit of some paths mid-merge, so it waits out a merge of an ingest branch."""
+The wiki's commit is made in its own checkout, which is mine too, and only while that checkout is clean on `main`
+with no merge, cherry-pick or revert under way: then nothing of mine is in the way, and a commit that fails leaves it
+clean again. Otherwise the digest waits, and the same call later writes it."""
 
 import os
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -23,6 +24,7 @@ from agent_fabric.wikirepo import MAIN, Git, GitError, ensure_wiki
 from agent_fabric.workspaces import Workspace
 
 LOG = "log.md"
+UNDER_WAY = {"MERGE_HEAD": "merge", "CHERRY_PICK_HEAD": "cherry-pick", "REVERT_HEAD": "revert"}
 
 
 @dataclass(frozen=True)
@@ -45,64 +47,90 @@ def write(workspace: Workspace, env: Mapping[str, str], now: datetime, digest: D
     """Write the digest in the workspace's wiki, quarantine or local folder.
 
     Raises `secretgate.GateUnavailable` when gitleaks can't vouch for a digest bound for the wiki, `GitError` when the
-    wiki can't take the commit now, and ValueError when the config can't be read: nothing is written then, and the
-    same call can be made again later."""
-    text, relative, project = redact(digest.text), digest.path, digest.project
+    wiki can't take the commit now, ValueError when the config can't be read, and OSError when a folder can't be
+    written or a link in it leads elsewhere. The same call made again later finishes the job."""
+    text, project = redact(digest.text), digest.project
     config = read_config(env)
+    local = _unlinked(workspace, workspace.local(env), digest.path)
+    quarantine = _unlinked(workspace, workspace.quarantine(env), digest.path)
     allowed = project in config.allowed(workspace.root)
     if not allowed or (digest.headless and project not in config.headless(workspace.root)):
-        return Written("local", _put(workspace.local(env), relative, text, also=workspace.quarantine(env)))
+        _move(text, local, away=quarantine)
+        return Written("local", local)
     if rules := scan(text, env):
-        where = _put(workspace.quarantine(env), relative, text, also=workspace.local(env))
-        return Written("quarantine", where, tuple(rules))
-    wiki = ensure_wiki(workspace.wiki(env), env, agents_file())
-    committed = _commit(wiki, relative, text, now, project)
-    for folder in (workspace.local(env), workspace.quarantine(env)):
-        _inside(folder, relative).unlink(missing_ok=True)
-    return Written("wiki", wiki.folder / relative, committed=committed)
+        _move(text, quarantine, away=local)
+        return Written("quarantine", quarantine, tuple(rules))
+    folder = _unlinked(workspace, workspace.wiki(env), ".")
+    _unlinked(workspace, folder, digest.path)
+    _unlinked(workspace, folder, LOG)
+    wiki = ensure_wiki(folder, env, agents_file())
+    committed = _commit(wiki, digest.path, text, now.astimezone(UTC), project)
+    local.unlink(missing_ok=True)
+    quarantine.unlink(missing_ok=True)
+    return Written("wiki", folder / digest.path, committed=committed)
 
 
 def _commit(wiki: Git, relative: str, text: str, now: datetime, project: str) -> bool:
-    branch = wiki("symbolic-ref", "-q", "HEAD").strip() if wiki.ok("symbolic-ref", "-q", "HEAD") else ""
-    if branch != f"refs/heads/{MAIN}":
-        raise GitError(f"{wiki.folder} has {branch or 'a detached HEAD'} checked out; digests wait for {MAIN}")
-    if _at_head(wiki, relative) == text:
-        return False
-    name = PurePosixPath(relative).stem  # <yyyy-mm-dd>-<agent>-<shortid>, whose id has no dash
-    agent, short = name[len("yyyy-mm-dd-") :].rsplit("-", 1)
-    # From the last commit's log, so a commit that failed after writing it doesn't log the digest twice.
-    log = (_at_head(wiki, LOG) or "# Log\n") + f"{now:%Y-%m-%d} digest {project} {agent} {short}\n"
-    _replace(_inside(wiki.folder, relative), text)
-    _replace(_inside(wiki.folder, LOG), log)
-    wiki("add", "--", relative, LOG)
-    wiki("commit", "-q", "-m", f"digest: {project} {agent} {short}", "--", relative, LOG)
+    _check_clean(wiki)
+    written = [relative, LOG]
+    try:
+        target = wiki.folder / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _replace(target, text)
+        if wiki.ok("cat-file", "-e", f"HEAD:{relative}") and wiki.ok("diff", "--quiet", "HEAD", "--", relative):
+            return False  # byte for byte what the last commit holds, so the checkout is clean again
+        name = PurePosixPath(relative).stem  # <yyyy-mm-dd>-<agent>-<shortid>, whose id has no dash
+        agent, short = name[len("yyyy-mm-dd-") :].rsplit("-", 1)
+        log = wiki.folder / LOG
+        before = log.read_text(encoding="utf-8", newline="") if log.exists() else "# Log\n"
+        _replace(log, before + f"{now:%Y-%m-%d} digest {project} {agent} {short}\n")
+        wiki("add", "--", *written)
+        wiki("commit", "-q", "-m", f"digest: {project} {agent} {short}", "--", *written)
+    except BaseException:
+        _restore(wiki, written)
+        raise
     return True
 
 
-def _at_head(wiki: Git, relative: str) -> str | None:
-    """The file as the last commit has it; None where it has none."""
-    if not wiki.ok("cat-file", "-e", f"HEAD:{relative}"):
-        return None
-    return wiki("cat-file", "blob", f"HEAD:{relative}")
+def _check_clean(wiki: Git) -> None:
+    """Clean on `main`, with nothing under way; GitError otherwise, naming what's in the way."""
+    branch = wiki("symbolic-ref", "-q", "HEAD").strip() if wiki.ok("symbolic-ref", "-q", "HEAD") else ""
+    if branch != f"refs/heads/{MAIN}":
+        raise GitError(f"{wiki.folder} has {branch or 'a detached HEAD'} checked out; digests wait for {MAIN}")
+    for ref, what in UNDER_WAY.items():
+        if wiki.ok("rev-parse", "-q", "--verify", ref):
+            raise GitError(f"a {what} is under way in {wiki.folder}; digests wait until it's done")
+    if wiki("status", "--porcelain", "--untracked-files=all"):
+        raise GitError(f"{wiki.folder} has changes not committed; digests wait until it's clean")
 
 
-def _put(folder: Path, relative: str, text: str, *, also: Path) -> Path:
-    """The digest in `folder`, and no longer in `also`."""
-    target = _inside(folder, relative)
-    _replace(target, text)
-    _inside(also, relative).unlink(missing_ok=True)
-    return target
+def _restore(wiki: Git, paths: list[str]) -> None:
+    """Each path as the last commit has it, staged or not, or gone where it has none: the checkout was clean."""
+    wiki.ok("reset", "-q", "--", *paths)
+    for path in paths:
+        if wiki.ok("cat-file", "-e", f"HEAD:{path}"):
+            wiki.ok("checkout", "-q", "HEAD", "--", path)
+        else:
+            (wiki.folder / path).unlink(missing_ok=True)
 
 
-def _inside(folder: Path, relative: str) -> Path:
-    """`relative` in `folder`, refused where a link would take it out: a root's `.fabric/` is open to its agents."""
+def _unlinked(workspace: Workspace, folder: Path, relative: str) -> Path:
+    """`relative` in `folder`, refused where a link on the way would lead elsewhere: a root's `.fabric/` is open to
+    its agents. Checked from the root down, or from the folder itself in the default workspace."""
     target = folder / relative
-    if folder.is_symlink() or not target.parent.resolve().is_relative_to(folder.resolve()):
-        raise OSError(f"{target} leads out of {folder}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.is_symlink():
-        raise OSError(f"{target} leads out of {folder}")
+    base = workspace.root if workspace.root is not None and folder.is_relative_to(workspace.root) else folder
+    current = base
+    for part in target.relative_to(base).parts:
+        current /= part
+        if current.is_symlink():
+            raise OSError(f"{current} is a link, which kb won't follow")
     return target
+
+
+def _move(text: str, target: Path, *, away: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _replace(target, text)
+    away.unlink(missing_ok=True)
 
 
 def _replace(target: Path, text: str) -> None:
