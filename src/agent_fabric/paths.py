@@ -20,6 +20,16 @@ def state_db(env: Mapping[str, str]) -> Path:
     return _data_home(env) / "agent-fabric" / "state.db"
 
 
+def local_dir(env: Mapping[str, str]) -> Path:
+    """Digests of projects not on the allow list, never committed (docs/design.md §4.5)."""
+    return _data_home(env) / "agent-fabric" / "local"
+
+
+def quarantine_dir(env: Mapping[str, str]) -> Path:
+    """Digests gitleaks stopped on their way to the wiki (docs/design.md §4.5)."""
+    return _data_home(env) / "agent-fabric" / "quarantine"
+
+
 def wiki_dir(env: Mapping[str, str]) -> Path:
     """This machine's wiki repo (docs/design.md §4.6)."""
     return Path(env["HOME"]) / "wiki"
