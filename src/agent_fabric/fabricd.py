@@ -1,0 +1,153 @@
+"""fabricd: the tracker and the digester in one long-running process (docs/design.md §3, §5).
+
+The tracker follows the sessions through their sources and records what it notices in `state.db`; each change it
+records wakes the digester, which reads on from its own place there. The two share nothing else: each has its own
+connection and its own worker thread. One fabricd runs at a time on a data folder, since two would write each digest
+twice. SIGTERM or SIGINT stops it once the step under way is done.
+
+Its settings are read once, at start, from `~/.config/agent-fabric/config.toml`:
+
+    [agentsview]
+    port = 8080          # the port agentsview's unit serves on (§4.1)
+
+    [sessions]
+    idle_minutes = 30    # how long a session is quiet before it finalizes (§4.3)
+
+Each workspace's allow list is read at each write, so a change to it needs no restart.
+"""
+
+import asyncio
+import fcntl
+import logging
+import os
+import signal
+import sys
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack, closing
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import NoReturn
+
+from agent_fabric import digester, tracker
+from agent_fabric.capture import AgentsviewSource
+from agent_fabric.config import Config, read_config
+from agent_fabric.copilot import AGENT as COPILOT
+from agent_fabric.copilot import CopilotSource
+from agent_fabric.paths import config_file, state_db, tilde
+from agent_fabric.tracker import IDLE, POLL, TURN_QUIET, Change, Feed, Tracker
+
+log = logging.getLogger(__name__)
+
+PORT = 8080
+
+
+@dataclass(frozen=True)
+class Settings:
+    port: int = PORT
+    idle: timedelta = IDLE
+
+
+def settings(config: Config) -> Settings:
+    """fabricd's settings from the config, each its default where it isn't set. ValueError where one is wrong."""
+    port = _table(config, "agentsview").get("port", PORT)
+    if type(port) is not int or not 0 < port < 65536:
+        raise ValueError(f"[agentsview] port is a port number, not {port!r}")
+    minutes = _table(config, "sessions").get("idle_minutes", IDLE // timedelta(minutes=1))
+    if type(minutes) is not int or minutes <= 0:
+        raise ValueError(f"[sessions] idle_minutes is a whole number of minutes, not {minutes!r}")
+    return Settings(port, timedelta(minutes=minutes))
+
+
+def _table(config: Config, name: str) -> dict[str, object]:
+    found = config.data.get(name, {})
+    if not isinstance(found, dict):
+        raise ValueError(f"[{name}] is not a table")
+    return found
+
+
+def capture_feeds(env: Mapping[str, str], port: int) -> list[Feed]:
+    """Each agent through its one source (§4.3): agentsview for Claude Code and Codex, Copilot CLI's own reader for
+    Copilot. Cursor CLI waits for its own reader (§4.1)."""
+    return [
+        Feed("agentsview", AgentsviewSource(f"http://127.0.0.1:{port}"), frozenset({"claude", "codex"})),
+        Feed("copilot", CopilotSource(env), frozenset({COPILOT})),
+    ]
+
+
+async def serve(
+    following: Tracker,
+    digesting: digester.Digester,
+    *,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    poll: float = POLL,
+    turn_quiet: float = TURN_QUIET.total_seconds(),
+) -> NoReturn:
+    """Run the tracker and the digester until cancelled, each change the tracker records waking the digester, so that
+    a turn end's snapshot is taken close to it. Cancelled, it returns once both have stopped; should either fail, the
+    other is stopped too and the failure raised, for the service manager to restart fabricd."""
+    wake = asyncio.Event()
+
+    def emit(change: Change) -> None:
+        wake.set()
+
+    async with asyncio.TaskGroup() as group:
+        group.create_task(tracker.run(following, emit=emit, clock=clock, poll=poll, turn_quiet=turn_quiet))
+        group.create_task(digester.run(digesting, wake=wake, clock=clock, every=poll))
+    raise AssertionError("both loops run until cancelled")
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    sys.exit(start(os.environ))
+
+
+def start(
+    env: Mapping[str, str],
+    *,
+    feeds: Callable[[Mapping[str, str], int], Sequence[Feed]] = capture_feeds,
+    poll: float = POLL,
+) -> int:
+    """fabricd itself: 0 once stopped by SIGTERM or SIGINT, 1 if it failed or another is running, 2 if the config
+    can't be read."""
+    try:
+        chosen = settings(read_config(env))
+    except (OSError, ValueError) as error:
+        print(f"fabricd: {tilde(config_file(env), env)}: {error}", file=sys.stderr)
+        return 2
+    path = state_db(env)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.parent / "fabricd.lock", "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(f"fabricd: another fabricd is running on {tilde(path.parent, env)}", file=sys.stderr)
+            return 1
+        with ExitStack() as stack:
+            built = feeds(env, chosen.port)
+            for feed in built:
+                if isinstance(feed.source, AgentsviewSource):
+                    stack.enter_context(feed.source)
+            following = Tracker(built, stack.enter_context(closing(tracker.connect(path))), idle=chosen.idle)
+            digesting = stack.enter_context(closing(digester.Digester(built, path, env, idle=chosen.idle)))
+            return asyncio.run(_until_stopped(following, digesting, poll))
+
+
+async def _until_stopped(following: Tracker, digesting: digester.Digester, poll: float) -> int:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(signum, stop.set)
+    work = asyncio.create_task(serve(following, digesting, poll=poll))
+    stopping = asyncio.create_task(stop.wait())
+    await asyncio.wait([work, stopping], return_when=asyncio.FIRST_COMPLETED)
+    stopping.cancel()
+    if not work.done():
+        log.info("fabricd stopping")
+        work.cancel()
+    try:
+        await work
+    except asyncio.CancelledError:
+        return 0
+    except Exception:
+        log.exception("fabricd failed")
+    return 1

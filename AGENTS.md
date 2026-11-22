@@ -5,8 +5,9 @@
 `docs/design.md` plans a memory shared across coding agents: session digests, a live panel, a wiki, an MCP server.
 Three parts are built: agent notes (`kb note`, `inbox`, `doctor`, `hook` and the `kb-note` skill), notes into the wiki
 (`kb ingest`, `kb lint`), and the CI that builds and vets agentsview. The agentsview adapter, the first piece of
-capture, is built too, with Copilot CLI's own reader, the normalizer, the tracker, and the digester. The rest of the design, including `fabricd` and the other `kb` commands, is still a plan (§9
-has the phases).
+capture, is built too, with Copilot CLI's own reader, the normalizer, the tracker, the digester, and `fabricd`, which
+runs the last two. The rest of the design, including fabricd's unit, its panel and the other `kb` commands, is still a
+plan (§9 has the phases).
 
 The design holds decisions, their reasons and dated findings from real agent runs. Details live in code and tests,
 which cite it by section. Read the section before changing what it covers:
@@ -96,7 +97,7 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   It reads kb's config once and hands that `Config` down, so its rows can't disagree over a file edited mid-run; only
   recording `--hooks` reads it again, to edit the file as it is. It writes TOON by hand: `toon-format` is a dev
   dependency that tests use as an independent decoder. `questionary` is a runtime dependency only for `kb setup`.
-- **Capture.** `capture.py` is the `CaptureSource` that fabricd will read sessions through, and `AgentsviewSource`
+- **Capture.** `capture.py` is the `CaptureSource` that fabricd reads sessions through, and `AgentsviewSource`
   implements it over agentsview's API, with `httpx`, `httpx-sse` and `pydantic` (§6). Its models keep agentsview's
   fields; `normalize.py` turns them into events (§4.2). The tests serve responses recorded from
   agentsview at the pin, scrubbed, through a fake agentsview. Each recorded response is checked against the pinned
@@ -112,15 +113,19 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   whole transcript of each whose listing changed, `tick` reads one whose watch fired, and both settle turn ends and
   finalizations against the clock they're given. The listing stored with a session is what says to read it again.
   Its rows and the changes it notices live in `state.db`; `tracker.run` drives it, with the sources read in a worker
-  thread. Nothing starts it yet: fabricd will.
+  thread.
 - **Digests.** `digest.render` turns a session's messages and git snapshots into §4.4's Markdown, a pure function
   with no clock, so a session renders the same bytes each time; `digest.path` names its file. `snapshot.take` reads
   a session's folder through git, read-only; which commits are the session's is §4.4's Git snapshots.
   `writer.write` redacts a digest and puts it in its workspace's wiki, quarantine or local folder by §4.5's allow
   list and gitleaks; it commits in the wiki's own checkout, the user's too, only while that is clean on `main`.
   `digester.Digester` follows the tracker's changes from its own place in `state.db`: snapshots at a session's start
-  and turn ends, and its digest written at each finalization, retried while it can't be. Like the tracker, nothing
-  starts it yet: fabricd will.
+  and turn ends, and its digest written at each finalization, retried while it can't be.
+- **fabricd.** `fabricd.start` is the process (`fabricd` on PATH): it reads `[agentsview] port` and `[sessions]
+  idle_minutes` once, takes `fabricd.lock` beside `state.db` so that one runs per data folder, and runs `fabricd.serve`
+  until SIGTERM or SIGINT. `serve` runs `tracker.run` and `digester.run` together, each change the tracker records
+  waking the digester; either failing stops both, for the service manager to restart. Tests drive `serve` on a fixed
+  clock, and `start` with a made-up feed and a real signal. Nothing installs its unit yet.
 
 These hold across the code:
 
