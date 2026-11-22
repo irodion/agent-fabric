@@ -3,10 +3,11 @@
 # then `kb setup`, which asks for the workspaces, their allow lists and backends, and the hooks, and applies them with
 # `kb doctor --fix`: that creates each workspace's inbox, copies the kb-note skill into the agents' skills folders,
 # adds the inboxes to Claude Code's and Codex's sandbox write lists, installs kb's hooks in each agent, and, once a
-# project is allowed in a workspace, installs its fabric-ingest@ timer to run kb ingest daily. Run it in your own
-# terminal, not in an agent's sandbox, which can't write those settings. Rerun it after pulling to update kb, the
-# skill and the hooks: pressing Enter at each question keeps what's recorded. What it prints at the end is kb
-# doctor's report, a TOON document an agent can read and explain.
+# project is allowed in a workspace, installs its fabric-ingest@ timer to run kb ingest daily, and fabricd.service to
+# write the sessions' digests. Run it in your own terminal, not in an agent's sandbox, which can't write those
+# settings. Rerun it after pulling to update kb, fabricd, the skill and the hooks: pressing Enter at each question
+# keeps what's recorded. What it prints at the end is kb doctor's report, a TOON document an agent can read and
+# explain.
 # Usage: scripts/install.sh [--hooks start,stop|start|stop|none]
 #   --hooks  skip kb setup's questions and install these hooks (default: both, or what was recorded); without a
 #            terminal, kb doctor --fix runs in place of kb setup too
@@ -58,6 +59,10 @@ pins=$(mktemp)
 trap 'rm -f "$pins"' EXIT
 uv export --directory "$root" --frozen --no-dev --no-emit-project --no-hashes --quiet -o "$pins"
 uv tool install --reinstall --quiet --constraints "$pins" "$root"
+# A fabricd that's running goes on with the code it started with: restart it on the new, and leave one that isn't.
+if command -v systemctl >/dev/null; then
+	systemctl --user try-restart fabricd.service >/dev/null 2>&1 || true
+fi
 kb="$(uv tool dir --bin)/kb"
 if ((${#hooks[@]} == 0)) && [[ -t 0 && -t 1 ]]; then
 	status=0
