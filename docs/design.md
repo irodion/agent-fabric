@@ -548,7 +548,9 @@ The commit is made in the wiki's own checkout (`writer.py`, 2026-11-22), which i
 clean on `main` with no merge, rebase, `git am`, cherry-pick, revert or bisect under way. Otherwise the digest waits, written on a later try:
 during my review of an ingest branch, say, or while I have a change there uncommitted. So kb never writes over a
 change of mine or into a merge, and a commit that fails, as when a pre-commit hook stops it, is undone and leaves the
-checkout clean; where it can't be undone either, the error names what kb left behind. A kb stopped mid-write, killed
+checkout clean; where it can't be undone either, the error names what kb left behind. A commit that landed
+before git failed, a post-commit hook outlasting git's timeout say, is left as it is: HEAD moved, so there's nothing
+to undo. A kb stopped mid-write, killed
 say, has no chance to undo, so its file reads as my change: the error lists what's uncommitted, to tell it from
 mine, rather than kb keeping a record of its writes to replay. A digest whose path or `log.md` the wiki's ignore
 rules leave out waits too, the error naming the rule: `git add` would refuse it on every try, and ignoring `raw/` may
@@ -559,7 +561,8 @@ lands the commit on the branch switched to, and kb says so and names it, to drop
 kept that small, as committing through plumbing would skip the wiki's pre-commit hook and still leave the checkout
 to bring up to date). The log line and the commit message name the project redacted, since a project with no remote
 is named by its folder, and gitleaks scans that line with the digest. The digest's path is made from the same id, so
-an allowed project with no remote still has its folder, user name and all, in its path. `log.md` is dated in UTC, as the digests' paths are.
+an allowed project with no remote still has its folder, user name and all, in its path. gitleaks scans that path and
+the id as they are too, since redacting the line can hide a token the path still holds (Codex review, 2026-11-22). `log.md` is dated in UTC, as the digests' paths are.
 
 A session's latest digest is in one place: one written to the quarantine or the local folder is removed from the
 other, and one committed to the wiki from both, as when a quarantined digest comes out clean after a reopen, or a

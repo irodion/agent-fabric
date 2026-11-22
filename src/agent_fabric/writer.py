@@ -73,7 +73,8 @@ def write(workspace: Workspace, env: Mapping[str, str], now: datetime, digest: D
     name = PurePosixPath(digest.path).stem  # <yyyy-mm-dd>-<agent>-<shortid>, whose id has no dash
     agent, short = name[len("yyyy-mm-dd-") :].rsplit("-", 1)
     label = f"{redact(project)} {agent} {short}"  # a project with no remote is named by its folder
-    if rules := scan(f"{text}\n{label}\n", env):
+    # The path is made from the project's id as it is, and redacting the label may have hidden a secret in it.
+    if rules := scan(f"{text}\n{label}\n{project}\n{digest.path}\n", env):
         _move(text, quarantine, away=local)
         return Written("quarantine", quarantine, tuple(rules))
     folder = _unlinked(workspace, workspace.wiki(env), ".")
@@ -96,6 +97,7 @@ def _commit(wiki: Git, relative: str, text: str, now: datetime, label: str) -> b
     before = {path: (wiki.folder / path).read_bytes() if (wiki.folder / path).exists() else None for path in written}
     target = wiki.folder / relative
     made = [folder for folder in target.relative_to(wiki.folder).parents if not (wiki.folder / folder).exists()]
+    head = None  # HEAD just before the commit, to tell one that landed from one that didn't
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         _replace(target, text.encode())
@@ -106,9 +108,12 @@ def _commit(wiki: Git, relative: str, text: str, now: datetime, label: str) -> b
             log += b"\n"
         _replace(wiki.folder / LOG, log + f"{now:%Y-%m-%d} digest {label}\n".encode())
         wiki("add", "--", *written)
+        head = _head(wiki)
         _on_main(wiki)  # again: I may have switched branch since, and a commit goes wherever HEAD is
         wiki("commit", "-q", "-m", f"digest: {label}", "--", *written)
     except BaseException as e:
+        if head is not None and _head(wiki) != head:
+            raise  # the commit landed, and what failed came after it, a slow post-commit hook say: nothing to undo
         if (left := _restore(wiki, before, made)) and isinstance(e, Exception):
             raise GitError(f"{e}; and kb couldn't undo its change to {left} in {wiki.folder}: restore it") from e
         raise
@@ -119,6 +124,10 @@ def _commit(wiki: Git, relative: str, text: str, now: datetime, label: str) -> b
             f"switched to during the write, not {MAIN}; drop that commit there, and kb writes it again"
         )
     return True
+
+
+def _head(wiki: Git) -> str:
+    return wiki("rev-parse", "HEAD").strip()
 
 
 def _at_head(wiki: Git, relative: str) -> str | None:
