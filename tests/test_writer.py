@@ -1,6 +1,7 @@
 """Seam: the digest writer, over a real wiki repo and a stand-in gitleaks (docs/design.md §4.5)."""
 
 import os
+import re
 import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta, timezone
@@ -230,6 +231,7 @@ def test_a_new_digest_whose_commit_fails_is_not_left_behind(env: dict[str, str])
     with pytest.raises(GitError):
         put(env)
     assert status(env) == ""
+    assert not (wiki(env) / RELATIVE).parent.exists()
 
 
 def test_a_digest_with_carriage_returns_is_committed_once(env: dict[str, str]) -> None:
@@ -361,3 +363,71 @@ def test_a_branch_switched_to_during_the_commit_is_named(env: dict[str, str]) ->
     with pytest.raises(GitError, match="on refs/heads/review"):
         put(env)
     assert git(env, "rev-parse", "main") == main
+
+
+def test_a_log_with_a_byte_not_in_utf8_takes_digests_and_keeps_it(env: dict[str, str]) -> None:
+    allow(env)
+    put(env, DIGEST + "first\n")
+    (wiki(env) / "log.md").write_bytes(b"# Log\ncaf\xe9\n")
+    git(env, "commit", "-qam", "latin-1")
+
+    assert put(env).committed is True
+    assert (wiki(env) / "log.md").read_bytes().startswith(b"# Log\ncaf\xe9\n2026-11-22 digest")
+
+
+def test_a_wiki_left_with_a_half_written_digest_names_it(env: dict[str, str]) -> None:
+    allow(env)
+    put(env, DIGEST + "first\n")
+    (wiki(env) / RELATIVE).write_text(DIGEST + "cut short")  # as a kb killed before its commit leaves it
+
+    with pytest.raises(GitError, match=re.escape(f"not committed ({RELATIVE})")):
+        put(env)
+
+
+def test_a_digest_whose_path_is_ignored_waits_and_says_why(env: dict[str, str]) -> None:
+    allow(env)
+    put(env, DIGEST + "first\n")
+    git(env, "rm", "-q", RELATIVE)
+    (wiki(env) / ".gitignore").write_text("raw/\n")
+    git(env, "add", ".gitignore")
+    git(env, "commit", "-qm", "ignore raw")
+
+    with pytest.raises(GitError, match=re.escape(".gitignore:1:raw/")):
+        put(env)
+    assert status(env) == ""
+    assert not (wiki(env) / "raw").exists()
+
+
+def test_a_root_above_kbs_data_follows_a_link_the_user_made_there(env: dict[str, str], tmp_path: Path) -> None:
+    home = Path(env["HOME"])
+    (tmp_path / "dotfiles").mkdir()
+    (home / ".local").symlink_to(tmp_path / "dotfiles")
+    configure(env, f'[[workspace]]\nroot = "{home}"\n')
+
+    written = put(env, workspace=Workspace(home.resolve()))
+
+    assert written.where == "local"
+    assert written.path.read_text() == REDACTED
+
+
+def test_a_tag_named_main_doesnt_fail_a_commit_on_the_branch(env: dict[str, str]) -> None:
+    allow(env)
+    put(env, DIGEST + "first\n")
+    git(env, "tag", "main")
+
+    assert put(env).committed is True
+
+
+def test_files_get_the_mode_the_umask_gives(env: dict[str, str]) -> None:
+    allow(env)
+    old = os.umask(0o022)
+    try:
+        put(env)
+        put(env, DIGEST + "again\n")
+        configure(env, "")
+        written = put(env)
+    finally:
+        os.umask(old)
+
+    for path in (wiki(env) / RELATIVE, wiki(env) / "log.md", written.path):
+        assert path.stat().st_mode & 0o777 == 0o644, path
