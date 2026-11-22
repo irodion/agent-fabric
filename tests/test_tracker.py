@@ -1029,6 +1029,8 @@ class Lifecycle(RuleBasedStateMachine):
         self.source.reparse("s1", [*rest, last.model_copy(update={"content": wording})])
         self.pending = "reparse"
         self.answer = (self.answer[0], wording)
+        if not self.timed:
+            self.active = self.now  # with no times to go by, any change is activity
 
     # Gaps by what they reach: not yet a turn's quiet, past it, past the idle timeout.
     @rule(gap=st.sampled_from([2 * SECOND, 10 * SECOND, 5 * MINUTE, IDLE + MINUTE]))
@@ -1054,11 +1056,16 @@ class Lifecycle(RuleBasedStateMachine):
             assert {"started", "reopened"} & set(kinds), "a new message didn't reopen the session"
         if self.pending == "reparse" and self.timed:
             assert "reopened" not in kinds, "a re-parse reopened the session"
+        if self.pending == "reparse" and not self.timed and before == "finalized":
+            assert "reopened" in kinds, "a change with no times didn't reopen the session"
+        if self.pending is None:
+            assert "reopened" not in kinds, "a poll that read no change reopened the session"
         if "finalized" in kinds:
             assert self.now - self.active >= IDLE, "a session finalized before its idle timeout"
         if self.pending:
             self.read = self.now
         if "turn_end" in kinds:
+            assert self.answer != self.ended, "an answer ended its turn twice"
             self.ended = self.answer
         if self.state == "active" and self.answer != self.ended and self.read is not None:
             assert self.now - self.read < TURN_QUIET, "an answer quiet for 5 s didn't end its turn"
