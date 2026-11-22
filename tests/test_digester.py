@@ -8,7 +8,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +17,7 @@ from conftest import GITLEAKS, a_stub
 from test_tracker import MINUTE, SECOND, T0, Source, feed, turn
 
 from agent_fabric import snapshot
-from agent_fabric.digester import RETRY, Digester
+from agent_fabric.digester import BATCH, RETRY, Digester
 from agent_fabric.tracker import IDLE, Tracker, connect
 from agent_fabric.writer import Written
 
@@ -72,7 +72,7 @@ class Lab:
         self.feed = feed(self.source)
         self.path = tmp_path / "state.db"
         self.tracker = Tracker([self.feed], connect(self.path))
-        self.digester = Digester([self.feed], connect(self.path), env)
+        self.digester = Digester([self.feed], self.path, env)
         self.env, self.repo = env, repo
         self.source.add("s1", cwd=str(repo))
 
@@ -146,11 +146,13 @@ def test_a_digest_that_cant_be_written_waits_and_is_tried_again(lab: Lab, caplog
 
     with caplog.at_level(logging.WARNING, logger="agent_fabric.digester"):
         assert lab.step(again) == []
+        (lab.wiki() / "more.md").write_text("more of mine\n")  # the reason's list of files changes; it doesn't
         assert lab.step(again + RETRY) == []
     [logged] = caplog.records  # the same reason, logged once
     assert "mine.md" in logged.message
 
     (lab.wiki() / "mine.md").unlink()
+    (lab.wiki() / "more.md").unlink()
     assert lab.step(again + RETRY + SECOND) == []  # not a minute since the last try
     [written] = lab.step(again + 2 * RETRY)
     assert "revision: 2" in written.path.read_text()
@@ -192,7 +194,7 @@ def test_a_restarted_digester_reads_on_from_its_place(lab: Lab) -> None:
     a_session(lab)
     lab.step(LATER)
 
-    restarted = Digester([lab.feed], connect(lab.path), lab.env)
+    restarted = Digester([lab.feed], lab.path, lab.env)
 
     assert restarted.step(LATER + MINUTE) == []
     assert lab.wiki_git("log", "--format=%s").count("digest:") == 1
@@ -248,3 +250,91 @@ def test_a_snapshot_survives_the_database(lab: Lab) -> None:
     assert row["first"] is not None
     assert "retry.py" in row["last"]
     assert "retry.py" not in row["first"]
+
+
+def test_a_session_keeps_the_workspace_it_was_first_seen_in_after_its_worktree_goes(lab: Lab, tmp_path: Path) -> None:
+    root = lab.repo.resolve()
+    worktree = tmp_path / "elsewhere" / "proj"  # outside the root, as Codex's are
+    git(lab.repo, lab.env, "worktree", "add", "-q", str(worktree))
+    config = Path(lab.env["HOME"]) / ".config" / "agent-fabric" / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(f'[[workspace]]\nroot = "{root}"\nallow = ["{PROJECT}"]\n')
+    lab.source.add("s2", cwd=str(worktree))
+    turn(lab.source, "s2", T0)
+    lab.step(T0 + 10 * SECOND)
+    shutil.rmtree(worktree)  # removed when its session ended
+
+    [written] = [w for w in lab.step(LATER) if w.path.name.endswith("-s2.md")]
+
+    assert written.where == "wiki"
+    assert written.path.is_relative_to(root / ".fabric" / "wiki")
+
+
+def test_a_session_finalized_before_its_turn_end_was_read_isnt_snapshotted_after(lab: Lab) -> None:
+    turn(lab.source, "s1", T0)
+    lab.tracker.poll(T0 + 3 * SECOND)
+    lab.tracker.poll(T0 + 10 * SECOND)
+    lab.tracker.poll(LATER)  # all while the digester was down
+    (lab.repo / "later.py").write_text("a later session's\n")
+
+    [written] = lab.digester.step(LATER + MINUTE)
+
+    text = written.path.read_text()
+    assert "later.py" not in text
+    assert "uncommitted_changes: null" in text
+
+
+def test_a_digest_no_configured_feed_reads_is_dropped_and_logged(lab: Lab, caplog: pytest.LogCaptureFixture) -> None:
+    a_session(lab)
+    lab.tracker.poll(LATER)
+
+    with caplog.at_level(logging.WARNING, logger="agent_fabric.digester"):
+        assert Digester([], lab.path, lab.env).step(LATER) == []
+
+    assert "no feed configured" in caplog.text
+    assert lab.digester.step(LATER + 2 * RETRY) == []
+
+
+def test_a_stored_snapshot_that_no_longer_loads_is_left_out(lab: Lab) -> None:
+    a_session(lab)
+    with connect(lab.path) as db:  # as a version with another `Snapshot` would have stored it
+        db.execute("UPDATE digests SET last = json_remove(last, '$.stat')")
+
+    [written] = lab.step(LATER)
+
+    text = written.path.read_text()
+    assert "retry.py" not in text  # the first snapshot's, from before the file
+    assert "uncommitted_changes: false" in text
+
+
+def test_a_backlog_is_read_in_batches_each_saved(lab: Lab, monkeypatch: pytest.MonkeyPatch) -> None:
+    for n in range(BATCH + 20):
+        lab.source.add(f"b{n}", cwd=str(lab.repo))
+        lab.source.say(f"b{n}", "user", "hi", T0)
+    lab.tracker.poll(T0 + SECOND)
+    taken: list[object] = []
+
+    def failing(*args: Any) -> None:
+        taken.append(args)
+        if len(taken) > BATCH:
+            raise RuntimeError("stopped")
+
+    monkeypatch.setattr(snapshot, "take", failing)
+
+    with pytest.raises(RuntimeError):
+        lab.digester.step(T0 + SECOND)
+    place = connect(lab.path).execute("SELECT place FROM digester").fetchone()["place"]
+    assert place == BATCH
+
+
+def test_a_retry_waits_a_minute_whatever_the_clocks_zone(lab: Lab) -> None:
+    allow(lab.env)
+    a_session(lab)
+    lab.wiki().mkdir()
+    git(lab.wiki(), lab.env, "init", "-q", "-b", "other")  # a repo with no main: no digest goes in
+    lab.step(LATER)
+    tried = lab.source.attempts
+
+    lab.digester.step((LATER + 30 * SECOND).astimezone(timezone(timedelta(hours=2))))
+
+    assert lab.source.attempts == tried
