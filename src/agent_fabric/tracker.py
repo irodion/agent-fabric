@@ -306,6 +306,8 @@ class Tracker:
         else:
             # Only a newer time is activity: a re-parse, or a new field in how a message reads, isn't.
             active_at = max(row.active_at, latest)
+        # A newer time is activity; in a session with no times, any change is, as it's the only sign there is.
+        active = row is not None and (active_at > row.active_at or (latest is None and changed))
         new = Tracked(
             id=session_id,
             feed=feed.name,
@@ -313,7 +315,7 @@ class Tracker:
             project=row.project if row else _project(_first(meta)),
             cwd=row.cwd if row else _first(meta).cwd,
             headless=row.headless if row else _headless(_first(meta)),
-            state="active" if row is None or active_at > row.active_at else row.state,
+            state="active" if active or row is None else row.state,
             finalizations=row.finalizations if row else 0,
             status="ok",
             listing=listing if listing is not None else row.listing if row else "",
