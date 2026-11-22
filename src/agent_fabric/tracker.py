@@ -120,9 +120,13 @@ def connect(path: Path) -> sqlite3.Connection:
     # `run` uses the tracker in a worker thread, one call at a time, and the database goes with it. The digester
     # writes it on a connection of its own: WAL lets each read while the other writes, and a write waits its turn.
     db = sqlite3.connect(path, check_same_thread=False, timeout=30)
-    db.execute("PRAGMA journal_mode=WAL")
-    db.row_factory = sqlite3.Row
-    db.executescript(SCHEMA)
+    try:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.row_factory = sqlite3.Row
+        db.executescript(SCHEMA)
+    except BaseException:
+        db.close()
+        raise
     return db
 
 

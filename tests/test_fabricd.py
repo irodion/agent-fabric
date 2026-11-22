@@ -251,6 +251,50 @@ def test_a_lock_it_cant_take_stops_it_with_a_message(env: dict[str, str], capsys
     assert not state_db(env).exists()
 
 
+def test_a_data_folder_it_cant_make_stops_it_with_a_message(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    state_db(env).parent.parent.mkdir(parents=True)
+    state_db(env).parent.write_text("")  # a file where the folder goes
+
+    assert start(env, feeds=lambda env, port: pytest.fail("started")) == 1
+    assert capsys.readouterr().err == "fabricd: can't make ~/.local/share/agent-fabric: File exists\n"
+
+
+def test_a_state_database_it_cant_open_stops_it_with_a_message(
+    env: dict[str, str], source: Source, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state_db(env).mkdir(parents=True)  # a folder where the database goes
+
+    assert start(env, feeds=lambda env, port: [feed(source)]) == 1
+    assert capsys.readouterr().err == (
+        "fabricd: ~/.local/share/agent-fabric/state.db: unable to open database file\n"
+    )
+
+
+class Closed(Listed):
+    """A source that holds something, closed when fabricd stops."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = 0
+
+    def __enter__(self) -> "Closed":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.closed += 1
+
+
+def test_each_source_that_holds_something_is_closed_when_fabricd_stops(env: dict[str, str], repo: Path) -> None:
+    source = Closed()
+    source.add("s1", cwd=str(repo))
+    turn(source, "s1", T0)
+
+    assert run_until(env, lambda env, port: [feed(source)], lambda: started(env), now=T0 + 3 * SECOND) == 0
+    assert source.closed == 2  # the tracker's and the digester's
+
+
 def started(env: Mapping[str, str]) -> bool:
     """Whether fabricd's tracker has recorded a session's start."""
     if not state_db(env).exists():
