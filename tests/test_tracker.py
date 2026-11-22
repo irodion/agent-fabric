@@ -987,7 +987,8 @@ class Lifecycle(RuleBasedStateMachine):
         self.source = Source()
         self.source.add("s1")
         self.folder = Path(tempfile.mkdtemp())
-        self.tracker = tracker(connect(self.folder / "state.db"), feed(source=self.source))
+        self.db = connect(self.folder / "state.db")
+        self.tracker = tracker(self.db, feed(source=self.source))
         self.now = T0
         self.ahead = timedelta(0)
         self.timed = True
@@ -1002,13 +1003,13 @@ class Lifecycle(RuleBasedStateMachine):
     @rule()
     def new_turn(self) -> None:
         at = self.now + self.ahead
-        turn(self.source, "s1", at) if self.timed else self._untimed_turn()
-        self.source.changed("s1", ended_at=at)
+        if self.timed:
+            turn(self.source, "s1", at)  # lists the session as ending at its answer's time
+        else:
+            self.source.say("s1", "user", "run make", None)
+            self.source.say("s1", "assistant", "Done.", None)
+            self.source.changed("s1", ended_at=at)  # only the listing has a time
         self.pending = "turn"
-
-    def _untimed_turn(self) -> None:
-        self.source.say("s1", "user", "run make", None)
-        self.source.say("s1", "assistant", "Done.", None)
 
     @precondition(lambda self: self.source.texts["s1"] and self.pending is None)
     @rule()
@@ -1043,17 +1044,18 @@ class Lifecycle(RuleBasedStateMachine):
             assert {"started", "reopened"} & set(kinds), "a new message didn't reopen the session"
         if self.pending == "reparse" and self.timed:
             assert "reopened" not in kinds, "a re-parse reopened the session"
-        if self.pending:
+        if self.pending or "started" in kinds:  # a session first read with no messages has to finalize too
             self.seen = self.now
         self.pending = None
         if row is not None and self.seen is not None and self.now - self.seen >= IDLE:
             assert row.state == "finalized", "a session unchanged for the idle timeout wasn't finalized"
 
     def teardown(self) -> None:
+        self.db.close()
         shutil.rmtree(self.folder)
 
 
 TestLifecycle = Lifecycle.TestCase
 # Enough runs to find, fresh each time, both clock bugs a review caught here (a re-parse that reopened a session ahead
-# of the clock, and an untimed one that couldn't reopen), in about 8 s.
+# of the clock, and an untimed one that couldn't reopen), in about 9 s.
 TestLifecycle.settings = settings(max_examples=1000, stateful_step_count=20, deadline=None)
