@@ -951,3 +951,17 @@ def test_a_reparse_doesnt_reopen_a_session_ahead_of_the_clock(db: sqlite3.Connec
     assert t.poll(T0 + 32 * MINUTE) == []
     turn(source, "s1", T0 + timedelta(hours=3, minutes=40), prompt="and now?")  # the same offset, later
     assert kinds(t.poll(T0 + 41 * MINUTE)) == [("reopened", "s1")]
+
+
+def test_a_session_with_no_times_listed_ahead_of_the_clock_reopens_on_a_change(
+    db: sqlite3.Connection, source: Source
+) -> None:
+    source.add("s1", "cursor")
+    source.say("s1", "user", "fix it", None)
+    source.changed("s1", ended_at=T0 + timedelta(hours=3))  # a zone-less local time, 3 h ahead of UTC
+    t = tracker(db, feed(source, "cursor"))
+    t.poll(T0)
+    assert kinds(t.poll(T0 + 31 * MINUTE)) == [("finalized", "s1")]
+    source.say("s1", "user", "and this", None)
+    source.changed("s1", ended_at=T0 + timedelta(hours=3, minutes=40))
+    assert kinds(t.poll(T0 + 40 * MINUTE)) == [("reopened", "s1")]
