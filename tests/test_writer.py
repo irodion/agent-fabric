@@ -329,3 +329,35 @@ def test_a_log_with_no_final_newline_keeps_its_last_line(env: dict[str, str]) ->
         "my line",
         f"2026-11-22 digest {PROJECT} claude a1b2c3d4",
     ]
+
+
+def test_a_project_named_by_its_folder_is_logged_without_the_user_name(env: dict[str, str]) -> None:
+    folder = "/home/alice/code/proj"
+    configure(env, f'[publish]\nallow = ["{folder}"]\n')
+
+    write(Workspace(None), env, NOW, Digest(DIGEST, RELATIVE, folder, headless=False))
+
+    assert git(env, "show", "HEAD:log.md").endswith("2026-11-22 digest ~/code/proj claude a1b2c3d4\n")
+    assert git(env, "log", "-1", "--format=%s") == "digest: ~/code/proj claude a1b2c3d4\n"
+
+
+def test_a_project_id_gitleaks_stops_quarantines_the_digest(env: dict[str, str]) -> None:
+    project = f"github.com/me/{LEAK}"
+    configure(env, f'[publish]\nallow = ["{project}"]\n')
+
+    written = write(Workspace(None), env, NOW, Digest(DIGEST, RELATIVE, project, headless=False))
+
+    assert written.where == "quarantine"
+    assert not wiki(env).exists() or LEAK not in git(env, "log", "--format=%s")
+
+
+def test_a_branch_switched_to_during_the_commit_is_named(env: dict[str, str]) -> None:
+    allow(env)
+    put(env, DIGEST + "first\n")
+    main = git(env, "rev-parse", "main")
+    git(env, "branch", "review")
+    a_stub(wiki(env) / ".git" / "hooks", "pre-commit", "#!/bin/sh\ngit symbolic-ref HEAD refs/heads/review\n")
+
+    with pytest.raises(GitError, match="on refs/heads/review"):
+        put(env)
+    assert git(env, "rev-parse", "main") == main
