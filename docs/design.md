@@ -528,8 +528,9 @@ allow = ["github.com/me/agent-fabric", "github.com/me/billing-api"]   # project 
 headless = []   # allowed projects whose headless runs (§4.3) are published too
 ```
 
-A root's `allow` and `headless` are in its `[[workspace]]` entry, and its local digests and quarantine in its
-`.fabric/`.
+A root's `allow` and `headless` are in its `[[workspace]]` entry, and its local digests and quarantine in kb's data
+folder, `~/.local/share/agent-fabric/workspaces/<name>-<hash>/`, out of its `.fabric/`, which an agent started at the
+root can write.
 
 For every file written into the wiki repo, in order:
 
@@ -544,17 +545,17 @@ For every file written into the wiki repo, in order:
    rewriting it on `main` would make each merge of that branch conflict.
 
 The commit is made in the wiki's own checkout (`writer.py`, 2026-11-22), which is mine too, and only while it's
-clean on `main` with no merge, cherry-pick or revert under way. Otherwise the digest waits, written on a later try:
+clean on `main` with no merge, rebase, `git am`, cherry-pick, revert or bisect under way. Otherwise the digest waits, written on a later try:
 during my review of an ingest branch, say, or while I have a change there uncommitted. So kb never writes over a
 change of mine or into a merge, and a commit that fails, as when a pre-commit hook stops it, is undone and leaves the
-checkout clean. Whether a digest is unchanged is git's byte-for-byte answer, so one holding a carriage return makes
-no commit when written again. `log.md` is dated in UTC, as the digests' paths are.
+checkout clean; where it can't be undone either, the error names what kb left behind. A digest is unchanged when git
+would store what the last commit holds, so one holding a carriage return makes no commit when written again. `log.md` is dated in UTC, as the digests' paths are.
 
 A session's latest digest is in one place: one written to the quarantine or the local folder is removed from the
 other, and one committed to the wiki from both, as when a quarantined digest comes out clean after a reopen, or a
 project is allowed. A copy committed to the wiki before stays there: a reopened session whose new digest is
-quarantined keeps its last clean one in the wiki. Every folder on the way to a digest, from a workspace root down,
-must be a folder and not a link, since agents working in the root can write its `.fabric/`.
+quarantined keeps its last clean one in the wiki. Every folder on the way to a file in a root's wiki must be a
+folder and not a link, checked from the root down.
 
 Local-only digests go through step 1 as well, so `kb` output never shows raw secrets.
 
@@ -1308,7 +1309,7 @@ nothing from it, so hooks and notes don't load it.
 | Path | Contents | In git |
 |---|---|---|
 | `~/.config/agent-fabric/config.toml` | machine settings (hooks, idle timeout, ports, project aliases) and every workspace's: the default's allow list and backend, and a `[[workspace]]` entry per root | no |
-| `<root>/.fabric/` | a workspace root's `inbox/`, `wiki/`, `ingest-wt/`, `local/` and `quarantine/`; its settings are in the machine config (§4.11) | the wiki only, as its own repo |
+| `<root>/.fabric/` | a workspace root's `inbox/`, `wiki/` and `ingest-wt/`; its settings are in the machine config (§4.11) | the wiki only, as its own repo |
 | `~/.local/share/agent-fabric/state.db` | cursors, loops, flags | no (backed up) |
 | `~/.local/share/agent-fabric/index.db` | search index | no (rebuildable) |
 | `~/.local/share/agent-fabric/quarantine/` | digests blocked by gitleaks | no |
@@ -1542,6 +1543,14 @@ reach of an agent working in a root (§4.11). Decided 2026-11-18: `claude` is a 
 aren't, on the versions checked (§4.7). Decided 2026-11-19: Copilot CLI gets its own `CaptureSource` over its
 session files, as Cursor CLI does, since agentsview fails it under a read-only home and the unit can't give it the
 write access to Copilot's folder that would fix it (§4.1); the files also hold the `cwd` agentsview left empty.
+
+Open (2026-11-22):
+
+- A root's wiki is in its `.fabric/`, which an agent started at the root, rather than in a project under it, can
+  write. Such an agent could add a hook or a `core.fsmonitor` to the wiki's git, which ingest and the digest writer
+  then run outside any sandbox, or swap a folder for a link between the writer's check and its write. Whether to
+  move a root's wiki out of the root, or run its git with hooks and fsmonitor off, is to decide for ingest and the
+  writer together.
 
 Open (2026-11-18):
 

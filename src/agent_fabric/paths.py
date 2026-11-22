@@ -1,5 +1,6 @@
 """Where agent-fabric keeps its files (docs/design.md §5), and how paths are shown."""
 
+import hashlib
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -28,6 +29,13 @@ def local_dir(env: Mapping[str, str]) -> Path:
 def quarantine_dir(env: Mapping[str, str]) -> Path:
     """Digests gitleaks stopped on their way to the wiki (docs/design.md §4.5)."""
     return _data_home(env) / "agent-fabric" / "quarantine"
+
+
+def workspace_data(root: Path, env: Mapping[str, str]) -> Path:
+    """A workspace root's own folder in kb's data, out of the root's `.fabric/`, which an agent started at the root
+    can write: its name, and a hash of its whole path to tell two of one name apart."""
+    digest = hashlib.sha256(str(root).encode("utf-8", "surrogateescape")).hexdigest()[:12]
+    return _data_home(env) / "agent-fabric" / "workspaces" / f"{root.name or 'root'}-{digest}"
 
 
 def wiki_dir(env: Mapping[str, str]) -> Path:

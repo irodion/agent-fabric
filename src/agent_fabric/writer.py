@@ -6,8 +6,11 @@ folder. Writing a digest there removes its copy from the other of those two fold
 wiki removes both: a session's latest digest is in one place. A copy committed before stays in the wiki.
 
 The wiki's commit is made in its own checkout, which is mine too, and only while that checkout is clean on `main`
-with no merge, cherry-pick or revert under way: then nothing of mine is in the way, and a commit that fails leaves it
-clean again. Otherwise the digest waits, and the same call later writes it."""
+with nothing under way, such as a merge or a rebase: then nothing of mine is in the way, and a commit that fails
+leaves it clean again. Otherwise the digest waits, and the same call later writes it.
+
+A root's local digests and quarantine are in kb's data folder, out of the root's `.fabric/`, which an agent started
+at the root can write. Its wiki is there, so every folder on the way to a file in it is checked for links."""
 
 import os
 import tempfile
@@ -24,7 +27,15 @@ from agent_fabric.wikirepo import MAIN, Git, GitError, ensure_wiki
 from agent_fabric.workspaces import Workspace
 
 LOG = "log.md"
-UNDER_WAY = {"MERGE_HEAD": "merge", "CHERRY_PICK_HEAD": "cherry-pick", "REVERT_HEAD": "revert"}
+UNDER_WAY = {  # what git keeps while each is under way, in the repo's git folder
+    "MERGE_HEAD": "merge",
+    "CHERRY_PICK_HEAD": "cherry-pick",
+    "REVERT_HEAD": "revert",
+    "sequencer": "cherry-pick or revert",
+    "rebase-merge": "rebase",
+    "rebase-apply": "rebase or git am",
+    "BISECT_LOG": "bisect",
+}
 
 
 @dataclass(frozen=True)
@@ -73,23 +84,33 @@ def write(workspace: Workspace, env: Mapping[str, str], now: datetime, digest: D
 def _commit(wiki: Git, relative: str, text: str, now: datetime, project: str) -> bool:
     _check_clean(wiki)
     written = [relative, LOG]
+    # The checkout is clean, so these are the last commit's bytes: what a failure puts back.
+    before = {path: (wiki.folder / path).read_bytes() if (wiki.folder / path).exists() else None for path in written}
     try:
         target = wiki.folder / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         _replace(target, text)
-        if wiki.ok("cat-file", "-e", f"HEAD:{relative}") and wiki.ok("diff", "--quiet", "HEAD", "--", relative):
-            return False  # byte for byte what the last commit holds, so the checkout is clean again
+        if _at_head(wiki, relative) == wiki("hash-object", "--", relative).strip():
+            return False  # what the last commit holds, as git would store it: the checkout is clean again
         name = PurePosixPath(relative).stem  # <yyyy-mm-dd>-<agent>-<shortid>, whose id has no dash
         agent, short = name[len("yyyy-mm-dd-") :].rsplit("-", 1)
-        log = wiki.folder / LOG
-        before = log.read_text(encoding="utf-8", newline="") if log.exists() else "# Log\n"
-        _replace(log, before + f"{now:%Y-%m-%d} digest {project} {agent} {short}\n")
+        log = (before[LOG] or b"# Log\n").decode("utf-8", "surrogateescape")
+        if not log.endswith("\n"):
+            log += "\n"
+        _replace(wiki.folder / LOG, log + f"{now:%Y-%m-%d} digest {project} {agent} {short}\n")
         wiki("add", "--", *written)
         wiki("commit", "-q", "-m", f"digest: {project} {agent} {short}", "--", *written)
-    except BaseException:
-        _restore(wiki, written)
+    except BaseException as e:
+        if (left := _restore(wiki, before)) and isinstance(e, Exception):
+            raise GitError(f"{e}; and kb couldn't undo its change to {left} in {wiki.folder}: restore it") from e
         raise
     return True
+
+
+def _at_head(wiki: Git, relative: str) -> str | None:
+    """The blob id the last commit has for the file; None where it has none."""
+    found = ("rev-parse", "-q", "--verify", f"HEAD:{relative}")
+    return wiki(*found).strip() if wiki.ok(*found) else None
 
 
 def _check_clean(wiki: Git) -> None:
@@ -97,21 +118,28 @@ def _check_clean(wiki: Git) -> None:
     branch = wiki("symbolic-ref", "-q", "HEAD").strip() if wiki.ok("symbolic-ref", "-q", "HEAD") else ""
     if branch != f"refs/heads/{MAIN}":
         raise GitError(f"{wiki.folder} has {branch or 'a detached HEAD'} checked out; digests wait for {MAIN}")
-    for ref, what in UNDER_WAY.items():
-        if wiki.ok("rev-parse", "-q", "--verify", ref):
-            raise GitError(f"a {what} is under way in {wiki.folder}; digests wait until it's done")
+    found = wiki("rev-parse", *(arg for name in UNDER_WAY for arg in ("--git-path", name))).splitlines()
+    for name, path in zip(UNDER_WAY, found, strict=True):
+        if (wiki.folder / path).exists():
+            raise GitError(f"a {UNDER_WAY[name]} is under way in {wiki.folder}; digests wait until it's done")
     if wiki("status", "--porcelain", "--untracked-files=all"):
         raise GitError(f"{wiki.folder} has changes not committed; digests wait until it's clean")
 
 
-def _restore(wiki: Git, paths: list[str]) -> None:
-    """Each path as the last commit has it, staged or not, or gone where it has none: the checkout was clean."""
-    wiki.ok("reset", "-q", "--", *paths)
-    for path in paths:
-        if wiki.ok("cat-file", "-e", f"HEAD:{path}"):
-            wiki.ok("checkout", "-q", "HEAD", "--", path)
-        else:
-            (wiki.folder / path).unlink(missing_ok=True)
+def _restore(wiki: Git, before: dict[str, bytes | None]) -> str:
+    """Each file back as it was, and unstaged; what couldn't be undone, if anything."""
+    left = []
+    for path, content in before.items():
+        try:
+            if content is None:
+                (wiki.folder / path).unlink(missing_ok=True)
+            else:
+                (wiki.folder / path).write_bytes(content)
+        except OSError:
+            left.append(path)
+    if not wiki.ok("reset", "-q", "--", *before):
+        left.append("what it staged")
+    return ", ".join(left)
 
 
 def _unlinked(workspace: Workspace, folder: Path, relative: str) -> Path:
