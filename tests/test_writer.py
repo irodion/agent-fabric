@@ -261,18 +261,21 @@ def test_writing_a_digest_makes_no_folders_where_it_isnt(env: dict[str, str]) ->
     assert not (data / "quarantine").exists()
 
 
-def test_a_workspace_root_keeps_its_digests_in_its_own_folder(env: dict[str, str], tmp_path: Path) -> None:
+def test_a_workspace_root_keeps_its_digests_out_of_its_fabric_folder(env: dict[str, str], tmp_path: Path) -> None:
     root = tmp_path / "work"
     root.mkdir()
     configure(env, f'[[workspace]]\nroot = "{root}"\n')
 
     written = put(env, workspace=Workspace(root.resolve()))
 
-    assert written.path == root.resolve() / ".fabric" / "local" / RELATIVE
+    data = Path(env["HOME"]) / ".local" / "share" / "agent-fabric" / "workspaces"
+    assert written.path.is_relative_to(data)
+    assert written.path.read_text() == REDACTED
+    assert not (root / ".fabric").exists()
 
 
 @pytest.mark.parametrize("link", [".fabric", ".fabric/wiki"])
-def test_a_link_out_of_a_workspace_root_is_refused_for_the_wiki_too(
+def test_a_link_out_of_a_workspace_root_is_refused_for_the_wiki(
     env: dict[str, str], tmp_path: Path, link: str
 ) -> None:
     root = tmp_path / "work"
@@ -287,14 +290,42 @@ def test_a_link_out_of_a_workspace_root_is_refused_for_the_wiki_too(
     assert not any(elsewhere.iterdir())
 
 
-def test_a_link_out_of_a_workspace_root_is_refused(env: dict[str, str], tmp_path: Path) -> None:
-    root = tmp_path / "work"
-    (root / ".fabric" / "local").mkdir(parents=True)
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    (root / ".fabric" / "local" / "raw").symlink_to(elsewhere)
-    configure(env, f'[[workspace]]\nroot = "{root}"\n')
+@pytest.mark.parametrize("state", ["rebase-apply", "sequencer", "BISECT_LOG"])
+def test_a_digest_waits_out_whatever_git_has_under_way(env: dict[str, str], state: str) -> None:
+    allow(env)
+    put(env, DIGEST + "first\n")
+    path = wiki(env) / ".git" / state
+    path.mkdir() if state != "BISECT_LOG" else path.write_text("")
 
-    with pytest.raises(OSError, match="is a link"):
-        put(env, workspace=Workspace(root.resolve()))
-    assert not any(elsewhere.iterdir())
+    with pytest.raises(GitError, match="under way"):
+        put(env)
+    assert status(env) == ""
+
+
+def test_an_undo_that_fails_too_is_named(env: dict[str, str]) -> None:
+    allow(env)
+    put(env, DIGEST + "first\n")
+    git(env, "rm", "-q", RELATIVE)
+    git(env, "commit", "-qm", "drop it")
+    folder = (wiki(env) / RELATIVE).parent
+    a_stub(wiki(env) / ".git" / "hooks", "pre-commit", f"#!/bin/sh\nchmod a-w '{folder}'\nexit 1\n")
+
+    try:
+        with pytest.raises(GitError, match=f"couldn't undo its change to {RELATIVE}"):
+            put(env)
+    finally:
+        folder.chmod(0o755)
+
+
+def test_a_log_with_no_final_newline_keeps_its_last_line(env: dict[str, str]) -> None:
+    allow(env)
+    put(env, DIGEST + "first\n")
+    (wiki(env) / "log.md").write_text("# Log\nmy line")
+    git(env, "commit", "-qam", "trim")
+
+    put(env)
+
+    assert git(env, "show", "HEAD:log.md").splitlines()[1:] == [
+        "my line",
+        f"2026-11-22 digest {PROJECT} claude a1b2c3d4",
+    ]
