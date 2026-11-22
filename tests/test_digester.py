@@ -3,11 +3,13 @@
 A made-up source's session runs in a real git repo; the tracker polls it, and the digester follows its changes into
 the wiki, the local folder or the quarantine."""
 
+import asyncio
 import logging
 import os
 import shutil
 import sqlite3
 import subprocess
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -18,7 +20,7 @@ from test_tracker import MINUTE, SECOND, T0, Source, feed, turn
 
 from agent_fabric import snapshot
 from agent_fabric.capture import Transcript
-from agent_fabric.digester import BATCH, RETRY, Digester
+from agent_fabric.digester import BATCH, RETRY, Digester, run
 from agent_fabric.tracker import IDLE, Tracker, connect
 from agent_fabric.writer import Written
 
@@ -466,3 +468,30 @@ def test_a_new_finalization_logs_its_reason_again(lab: Lab, caplog: pytest.LogCa
 
 def test_the_state_database_lets_one_connection_read_while_another_writes(tmp_path: Path) -> None:
     assert connect(tmp_path / "state.db").execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+def test_a_cancelled_loop_returns_only_once_its_step_is_done(lab: Lab, monkeypatch: pytest.MonkeyPatch) -> None:
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def slow(self: Digester, now: datetime) -> list[Written]:
+        entered.set()
+        release.wait(5)
+        finished.set()
+        return []
+
+    monkeypatch.setattr(Digester, "step", slow)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(run(lab.digester, every=60))
+        await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()  # again, as a second Ctrl-C would
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert finished.is_set()
+
+    asyncio.run(scenario())

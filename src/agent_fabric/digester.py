@@ -239,12 +239,20 @@ async def run(
     every: float = POLL,
 ) -> NoReturn:
     """A step every `every` seconds, or sooner when `wake` is set, as the tracker's `emit` can, so a turn end's
-    snapshot is taken close to it. Steps run in a worker thread, one at a time, which the database goes with."""
+    snapshot is taken close to it. Steps run in a worker thread, one at a time, which the database goes with.
+    Cancelled during a step, it returns once the step is done: a worker thread can't be stopped, and one still
+    writing the database or committing to a wiki mustn't overlap a step started after."""
     wake = wake or asyncio.Event()
     while True:
         wake.clear()
+        job = asyncio.ensure_future(asyncio.to_thread(lambda: digester.step(clock())))
         try:
-            await asyncio.to_thread(lambda: digester.step(clock()))
+            await asyncio.shield(job)
+        except asyncio.CancelledError:
+            while not job.done():  # cancelled again meanwhile, it still waits
+                with suppress(asyncio.CancelledError):
+                    await asyncio.wait([job])
+            raise
         except Exception:
             log.exception("digester step failed")
         with suppress(TimeoutError):
