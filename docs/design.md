@@ -528,6 +528,9 @@ allow = ["github.com/me/agent-fabric", "github.com/me/billing-api"]   # project 
 headless = []   # allowed projects whose headless runs (§4.3) are published too
 ```
 
+A root's `allow` and `headless` are in its `[[workspace]]` entry, and its local digests and quarantine in its
+`.fabric/`.
+
 For every file written into the wiki repo, in order:
 
 1. Regex redaction: known token shapes (`sk-…`, `ghp_…`, `github_pat_…`, AWS keys, JWTs, `Bearer …`, private key
@@ -535,16 +538,28 @@ For every file written into the wiki repo, in order:
    addresses, `/home/<user>` → `~`.
 2. `gitleaks stdin` on the redacted text. Any finding → write to `~/.local/share/agent-fabric/quarantine/`, show
    a panel notice, do not commit.
-3. Write file, regenerate `index.md`, append to `log.md`, `git add <paths>`, commit (`digest: <project> <agent>
-   <shortid>`). The repo's own gitleaks pre-commit hook is a second backstop; never `--no-verify`.
+3. Write the file, append to `log.md`, `git add <paths>`, commit (`digest: <project> <agent> <shortid>`). The repo's
+   own gitleaks pre-commit hook is a second backstop; never `--no-verify`. A digest the last commit already holds
+   makes no commit. `index.md` stays as it is: it catalogues pages, which ingest files on its branch, and a digest
+   rewriting it on `main` would make each merge of that branch conflict.
+
+The commit is made in the wiki's own checkout (`writer.py`, 2026-11-22), which is mine too, so only the digest and
+`log.md` are committed, and whatever else I have staged stays staged. It's made only while `main` is checked out,
+and git refuses a commit of some paths mid-merge, so a digest waits out my review of an ingest branch and is written
+on a later try. `log.md`'s new line goes on the last commit's copy, so a try that failed after writing logs nothing
+twice.
+
+A digest lives in one place: written to the wiki, the quarantine or the local folder, it's removed from the other two
+folders, as when a quarantined digest comes out clean after a reopen, or a project is allowed.
 
 Local-only digests go through step 1 as well, so `kb` output never shows raw secrets.
 
 What ingest sends to a hosted model goes through steps 1 and 2 first (§4.7). The steps above cover files written, and
 this is another way out of the machine.
 
-Single writer: all commits to `main` go through `fabricd` holding a lock file; ingest writes only to its branch in
-a separate worktree.
+Single writer: the only commits to `main` are fabricd's digester's, one at a time, and mine; ingest writes only to
+its branch in a separate worktree. No lock file: fabricd is one process, and against my own commits in the checkout
+git's index lock and its mid-merge refusal are what count.
 
 ### 4.6 Wiki repo
 
@@ -1205,7 +1220,8 @@ share_machine_notes = false                          # keep this workspace's mac
 - **The default workspace** is the one that existed before v0.7: `~/.local/share/agent-fabric/inbox/`, `~/wiki` and
   the settings in `~/.config/agent-fabric/config.toml`. A machine that registers no root works as it did.
 - **What's per workspace:** the inbox, the wiki, the ingest worktree and lock, the allow list (§4.5) and the backend
-  (§4.7). Later the digests, `state.db` and `index.db` follow the same split, by the session's project.
+  (§4.7), and the digests: its wiki's, its local ones and its quarantine (§4.5), by the session's folder. Later
+  `state.db` and `index.db` follow the same split.
 - **What stays per machine:** `kb` itself, the config, the skill, the hooks and their choice, and the markers. Each
   hook works out its workspace from the session's folder, so one hook entry per agent serves them all. Project ids
   don't change (§4.4): the same repo cloned into two workspaces is two separate memories, which is the point.
@@ -1288,7 +1304,7 @@ nothing from it, so hooks and notes don't load it.
 | Path | Contents | In git |
 |---|---|---|
 | `~/.config/agent-fabric/config.toml` | machine settings (hooks, idle timeout, ports, project aliases) and every workspace's: the default's allow list and backend, and a `[[workspace]]` entry per root | no |
-| `<root>/.fabric/` | a workspace root's `inbox/`, `wiki/` and `ingest-wt/`; its settings are in the machine config (§4.11) | the wiki only, as its own repo |
+| `<root>/.fabric/` | a workspace root's `inbox/`, `wiki/`, `ingest-wt/`, `local/` and `quarantine/`; its settings are in the machine config (§4.11) | the wiki only, as its own repo |
 | `~/.local/share/agent-fabric/state.db` | cursors, loops, flags | no (backed up) |
 | `~/.local/share/agent-fabric/index.db` | search index | no (rebuildable) |
 | `~/.local/share/agent-fabric/quarantine/` | digests blocked by gitleaks | no |
@@ -1426,7 +1442,7 @@ neither agentsview nor fabricd, so a one-week trial in one or two projects runs 
 `kb ingest` and `kb lint` on the `codex` backend follow, for the same reason (§4.7). They are built and first ran on a
 real model on 2026-11-12; their daily timer followed (§5), and `kb lint`'s summary check comes with `kb prune`. Then
 CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.1 (2026-11-19, §4.1); adapter,
-normalizer and tracker (built); digester (the rendering and git snapshots built) with allow list/redaction/gate/commit, for the CLI agents: agentsview for Claude Code,
+normalizer and tracker (built); digester (the rendering, git snapshots and the writer, with allow list/redaction/gate/commit, built), for the CLI agents: agentsview for Claude Code,
 Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI + `kb mcp`; a prototype session
 for the panel layout, then the panel with rules only (incl. open loops and carry-over).
 

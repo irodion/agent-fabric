@@ -6,7 +6,7 @@ from pathlib import Path
 
 from agent_fabric.config import Config, allowed_projects, ingest_backend, read_config, setting, workspace_roots
 from agent_fabric.gitinfo import main_checkout
-from agent_fabric.paths import expand, inbox_dir, ingest_worktree, wiki_dir
+from agent_fabric.paths import expand, inbox_dir, ingest_worktree, local_dir, quarantine_dir, wiki_dir
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,14 @@ class Workspace:
 
     def wiki(self, env: Mapping[str, str]) -> Path:
         return wiki_dir(env) if self.root is None else self.root / ".fabric" / "wiki"
+
+    def local(self, env: Mapping[str, str]) -> Path:
+        """Its digests that stay on the machine (docs/design.md §4.5)."""
+        return local_dir(env) if self.root is None else self.root / ".fabric" / "local"
+
+    def quarantine(self, env: Mapping[str, str]) -> Path:
+        """Its digests gitleaks stopped (docs/design.md §4.5)."""
+        return quarantine_dir(env) if self.root is None else self.root / ".fabric" / "quarantine"
 
     def worktree(self, env: Mapping[str, str]) -> Path:
         """Where `kb ingest` works, so it never touches the wiki's own checkout (docs/design.md §4.7)."""

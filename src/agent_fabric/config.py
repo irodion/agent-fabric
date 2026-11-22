@@ -129,6 +129,13 @@ class Config:
             raise ValueError(f"{setting(self.env, root, 'publish', 'allow')} must be a list of project ids")
         return tuple(allow)
 
+    def headless(self, root: Path | None = None) -> tuple[str, ...]:
+        """The allowed projects whose headless runs are published too (docs/design.md §4.3, §4.5); none by default."""
+        headless = self._settings(root, "publish").get("headless", [])
+        if not isinstance(headless, list) or not all(isinstance(project, str) for project in headless):
+            raise ValueError(f"{setting(self.env, root, 'publish', 'headless')} must be a list of project ids")
+        return tuple(headless)
+
     def backend(self, root: Path | None = None) -> str:
         """The workspace's backend (docs/design.md §4.7): the default's under `[ingest]`; `codex` where none is
         set."""
