@@ -543,14 +543,18 @@ For every file written into the wiki repo, in order:
    makes no commit. `index.md` stays as it is: it catalogues pages, which ingest files on its branch, and a digest
    rewriting it on `main` would make each merge of that branch conflict.
 
-The commit is made in the wiki's own checkout (`writer.py`, 2026-11-22), which is mine too, so only the digest and
-`log.md` are committed, and whatever else I have staged stays staged. It's made only while `main` is checked out,
-and git refuses a commit of some paths mid-merge, so a digest waits out my review of an ingest branch and is written
-on a later try. `log.md`'s new line goes on the last commit's copy, so a try that failed after writing logs nothing
-twice.
+The commit is made in the wiki's own checkout (`writer.py`, 2026-11-22), which is mine too, and only while it's
+clean on `main` with no merge, cherry-pick or revert under way. Otherwise the digest waits, written on a later try:
+during my review of an ingest branch, say, or while I have a change there uncommitted. So kb never writes over a
+change of mine or into a merge, and a commit that fails, as when a pre-commit hook stops it, is undone and leaves the
+checkout clean. Whether a digest is unchanged is git's byte-for-byte answer, so one holding a carriage return makes
+no commit when written again. `log.md` is dated in UTC, as the digests' paths are.
 
-A digest lives in one place: written to the wiki, the quarantine or the local folder, it's removed from the other two
-folders, as when a quarantined digest comes out clean after a reopen, or a project is allowed.
+A session's latest digest is in one place: one written to the quarantine or the local folder is removed from the
+other, and one committed to the wiki from both, as when a quarantined digest comes out clean after a reopen, or a
+project is allowed. A copy committed to the wiki before stays there: a reopened session whose new digest is
+quarantined keeps its last clean one in the wiki. Every folder on the way to a digest, from a workspace root down,
+must be a folder and not a link, since agents working in the root can write its `.fabric/`.
 
 Local-only digests go through step 1 as well, so `kb` output never shows raw secrets.
 

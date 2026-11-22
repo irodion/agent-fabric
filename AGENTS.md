@@ -117,8 +117,7 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   with no clock, so a session renders the same bytes each time; `digest.path` names its file. `snapshot.take` reads
   a session's folder through git, read-only; which commits are the session's is §4.4's Git snapshots.
   `writer.write` redacts a digest and puts it in its workspace's wiki, quarantine or local folder by §4.5's allow
-  list and gitleaks; it commits in the wiki's own checkout, the user's too, only the digest and `log.md`, and only on
-  `main`. Nothing calls it yet: the digester loop over the tracker's changes comes next.
+  list and gitleaks; it commits in the wiki's own checkout, the user's too, only while that is clean on `main`. Nothing calls it yet: the digester loop over the tracker's changes comes next.
 
 These hold across the code:
 
