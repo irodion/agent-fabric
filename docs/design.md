@@ -417,16 +417,15 @@ text of a failed call, which agentsview drops (§4.1). The digest stores an exce
   regeneration is byte-stable.
 - The tracker appends `started`, `turn_end`, `finalized` and `reopened` to a table in `state.db`, numbered, so the
   digester and the panel each read on from their own place and a restart loses none.
-- **The digester** (`digester.py`, 2026-11-22) reads those changes on from its place, on a connection of its own.
-  It snapshots a session's folder (§4.4) at `started` and `turn_end`, once a step however many turns ended since
-  the last, and keeps the first and the latest snapshot with the session. At `finalized` the digest is due: rendered
-  from the whole transcript, read again, and written by §4.5. Its path is fixed at the first write, so a reopened
-  session rewrites its file even if its earliest time moves. A digest that can't be written now (the wiki not clean,
-  gitleaks missing, the source not answering) is tried again a minute later, each new reason logged once; one whose
-  session reopened meanwhile waits for the next finalization, and one its source no longer has is dropped. It steps
-  every 10 s, or when the tracker emits a change, so a turn end's snapshot is taken within a step of it; changes
-  read after an outage are snapshotted as the folder is then. The draft digest at each turn end is left for the
-  panel, which is what shows it.
+- **The digester** (`digester.py`, 2026-11-22) reads those changes on from its own place. It snapshots a session's
+  folder (§4.4) at `started` and `turn_end` while the session is active, and keeps the first and latest. A session
+  that finalized before its turn end was read, as after an outage, isn't snapshotted then: the folder is no longer
+  its alone, and a later session's work would read as its own. Its workspace is found once, when first seen, since a
+  worktree removed when its session ends would place it in the default one; its digest's path is fixed at the first
+  write, so a reopened session rewrites its file. At `finalized` the digest is due, rendered from the transcript
+  read again, and written by §4.5. One that can't be written now waits and is tried again; one whose session
+  reopened waits for the next finalization; one its source no longer has, or no feed reads, is dropped and logged.
+  The draft digest at each turn end is left for the panel, which is what shows it (code review, 2026-11-22).
 
 ### 4.4 Digest
 

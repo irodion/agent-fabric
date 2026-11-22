@@ -239,9 +239,10 @@ class Tracker:
         query = "SELECT * FROM sessions" + (" WHERE state = ?" if state else "") + " ORDER BY id"
         return [_tracked(row) for row in self._db.execute(query, (state,) if state else ())]
 
-    def changes(self, after: int = 0) -> list[tuple[int, Change]]:
-        """The changes recorded after the one numbered `after`, for a consumer that keeps its own place."""
-        rows = self._db.execute("SELECT * FROM changes WHERE id > ? ORDER BY id", (after,))
+    def changes(self, after: int = 0, limit: int = -1) -> list[tuple[int, Change]]:
+        """The changes recorded after the one numbered `after`, for a consumer that keeps its own place; at most
+        `limit` of them, where it's set."""
+        rows = self._db.execute("SELECT * FROM changes WHERE id > ? ORDER BY id LIMIT ?", (after, limit))
         return [
             (row["id"], Change(row["kind"], row["session_id"], row["ordinal"], datetime.fromisoformat(row["at"])))
             for row in rows
