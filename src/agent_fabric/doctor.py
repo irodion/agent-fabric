@@ -10,7 +10,7 @@ from datetime import date, datetime
 from importlib.resources import files
 from pathlib import Path
 
-from agent_fabric import config, hookfiles, timer
+from agent_fabric import config, fabricd_unit, hookfiles, timer
 from agent_fabric.backends import not_ours
 from agent_fabric.config import Config, read_config
 from agent_fabric.lint import findings, summary
@@ -320,8 +320,8 @@ def doctor(
     env: Mapping[str, str], now: datetime, *, fix: bool = False, hooks: tuple[str, ...] | None = None
 ) -> tuple[int, str]:
     """Check the inbox, the skill copies, the sandboxes' write lists, the agents' hooks, Copilot CLI's session sync,
-    what `kb ingest` needs, its timer and the wiki; with `fix`, set up what's missing, except the sync, ingest's tools
-    and the wiki.
+    what `kb ingest` needs, its timer, fabricd's unit and the wiki; with `fix`, set up what's missing, except the
+    sync, ingest's tools and the wiki.
     `hooks` (with `fix`) records which hooks to install."""
     found = agents(env)
     spaces = _workspaces(env)
@@ -363,22 +363,19 @@ def doctor(
             rows.append(hooks_row)
     if found.has_copilot:
         rows.append(_copilot_sync(found.copilot / "settings.json", env))
+    # A bad root leaves the default's.
+    ingest_units = [
+        timer.unit_of(workspace, None if isinstance(spaces.config, Exception) else spaces.config)
+        for workspace in workspaces
+    ]
     rows += [
         *(
             _ingest_tools(env, spaces.config, spaces.registered)
             if spaces.known and isinstance(spaces.config, Config)
             else []
         ),
-        *timer.check(
-            env,
-            spaces.registered,
-            [
-                timer.unit_of(workspace, None if isinstance(spaces.config, Exception) else spaces.config)
-                for workspace in workspaces
-            ],  # a bad root leaves the default's
-            fix=fix,
-            known=spaces.known,
-        ),
+        *timer.check(env, spaces.registered, ingest_units, fix=fix, known=spaces.known),
+        *fabricd_unit.check(env, wanted=any(unit.allowed for unit in ingest_units), fix=fix),
     ]
     rows += [row for workspace in workspaces for row in _wiki(env, now, workspace)]
     return (0 if all(row.status in ("ok", "fixed") for row in rows) else 1), render(rows, fix=fix)

@@ -42,7 +42,7 @@ fi
 # keeps its state in $HOME/systemctl/: `no-bus` makes every call fail as an agent's sandbox does, `enabled` holds the
 # timer's UnitFileState, `stopped` stops it, `active` holds an ActiveState to report instead, `result` is the
 # service's last result and `cannot-enable` makes enabling fail. Like systemd, it prints a unit's properties in its
-# own order.
+# own order. fabricd.service keeps the same files in $HOME/systemctl/fabricd/, apart from the timers'.
 SYSTEMCTL = """#!/bin/sh
 PATH=/usr/bin:/bin  # for its own tools, whatever PATH a test gives kb
 state="$HOME/systemctl"
@@ -52,6 +52,27 @@ if [ -e "$state/no-bus" ]; then
   echo 'Failed to connect to user scope bus via local transport: Operation not permitted' >&2
   exit 1
 fi
+case "$*" in
+  *" fabricd.service")
+    state="$state/fabricd"
+    mkdir -p "$state"
+    case "$*" in
+      "--user show --property=UnitFileState,ActiveState,Result fabricd.service")
+        enabled=$(cat "$state/enabled" 2>/dev/null)
+        active=inactive
+        [ "$enabled" = enabled ] && [ ! -e "$state/stopped" ] && active=active
+        [ -e "$state/active" ] && active=$(cat "$state/active")
+        result=$(cat "$state/result" 2>/dev/null || echo success)
+        printf 'ActiveState=%s\nUnitFileState=%s\nResult=%s\n' "$active" "$enabled" "$result" ;;
+      "--user enable fabricd.service" | "--user enable --now fabricd.service")
+        [ -e "$state/cannot-enable" ] && { echo 'Access denied' >&2; exit 1; }
+        printf enabled > "$state/enabled"
+        [ "$3" = --now ] && rm -f "$state/stopped" ;;
+      "--user restart fabricd.service") rm -f "$state/stopped" ;;
+      *) echo "unexpected: $*" >&2; exit 2 ;;
+    esac
+    exit 0 ;;
+esac
 case "$*" in
   "--user show --property=UnitFileState,ActiveState,Result "*)
     enabled=$(cat "$state/enabled" 2>/dev/null)

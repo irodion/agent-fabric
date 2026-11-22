@@ -6,7 +6,7 @@
 Three parts are built: agent notes (`kb note`, `inbox`, `doctor`, `hook` and the `kb-note` skill), notes into the wiki
 (`kb ingest`, `kb lint`), and the CI that builds and vets agentsview. The agentsview adapter, the first piece of
 capture, is built too, with Copilot CLI's own reader, the normalizer, the tracker, the digester, and `fabricd`, which
-runs the last two. The rest of the design, including fabricd's unit, its panel and the other `kb` commands, is still a
+runs the last two. The rest of the design, including fabricd's panel and the other `kb` commands, is still a
 plan (§9 has the phases).
 
 The design holds decisions, their reasons and dated findings from real agent runs. Details live in code and tests,
@@ -41,7 +41,7 @@ itself.
   settings: ask the user to run it.
 - `kb note` and `kb hook` write to the real inbox and markers, and the inbox is append-only. `kb doctor --fix` edits
   the real agents' settings, and writes and starts a workspace's `fabric-ingest@<workspace>.timer` once a project is
-  allowed there. Tests that run `kb doctor` with an allow list use the `lab` fixture, whose stand-in `systemctl` keeps
+  allowed there, and `fabricd.service` once one is allowed anywhere. Tests that run `kb doctor` with an allow list use the `lab` fixture, whose stand-in `systemctl` keeps
   them off the real user manager. To try a command that writes, with `XDG_DATA_HOME` unset, give it a throwaway home:
   `HOME="$(mktemp -d)" .venv/bin/kb <args>`.
 - `kb ingest` moves notes out of the inbox, writes `~/wiki` and spends model requests through the workspace's backend
@@ -77,7 +77,8 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   workspace that shares machine notes, one copy per inbox with one id, and its resolution into each copy still open.
   `kb ingest` and `kb lint` work on one workspace (`--workspace default|ROOT`, else the current folder's): its inbox,
   wiki, worktree, lock, allow list and backend all come from the `Workspace`. `kb doctor` sets up every workspace: its
-  inbox, the sandboxes' write lists, a timer pair per workspace with a project allowed, and its wiki's rows.
+  inbox, the sandboxes' write lists, a timer pair per workspace with a project allowed, `fabricd.service` once any
+  workspace allows one, and its wiki's rows.
   `kb setup` asks the workspaces' roots, allow lists, backends and machine-note sharing, and the hooks, through an
   `setup.Asker`, then writes them with `config.record_workspaces` and runs `kb doctor --fix`. Tests answer through a
   scripted asker; `asker.py` wraps `questionary`, which only `kb setup` imports.
@@ -93,10 +94,11 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   note's refs, `secretgate.py` redacts and scans, `pages.py` is the page format and `manifests.py` records what each
   branch took. `lint.py` is `kb lint`, and ingest runs it too.
 - **`kb doctor`.** `doctor.py` gathers one `report.Row` per check, with `sandboxes.py` and `hookfiles.py` covering the
-  agents' settings, `timer.py` the systemd units that run `kb ingest` daily, and `report.py` renders one TOON document.
-  It reads kb's config once and hands that `Config` down, so its rows can't disagree over a file edited mid-run; only
-  recording `--hooks` reads it again, to edit the file as it is. It writes TOON by hand: `toon-format` is a dev
-  dependency that tests use as an independent decoder. `questionary` is a runtime dependency only for `kb setup`.
+  agents' settings, `timer.py` the systemd units that run `kb ingest` daily and `fabricd_unit.py` fabricd's, and
+  `report.py` renders one TOON document. It reads kb's config once and hands that `Config` down, so its rows can't
+  disagree over a file edited mid-run; only recording `--hooks` reads it again, to edit the file as it is. It writes
+  TOON by hand: `toon-format` is a dev dependency that tests use as an independent decoder. `questionary` is a runtime
+  dependency only for `kb setup`.
 - **Capture.** `capture.py` is the `CaptureSource` that fabricd reads sessions through, and `AgentsviewSource`
   implements it over agentsview's API, with `httpx`, `httpx-sse` and `pydantic` (§6). Its models keep agentsview's
   fields; `normalize.py` turns them into events (§4.2). The tests serve responses recorded from
@@ -126,7 +128,7 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   until SIGTERM or SIGINT, which waits for the step under way; a second signal ends it at once. The tracker and the
   digester each get their own sources. `serve` runs `tracker.run` and `digester.run` together, each change the tracker records
   waking the digester; either failing stops both, for the service manager to restart. Tests drive `serve` on a fixed
-  clock, and `start` with a made-up feed and a real signal. Nothing installs its unit yet.
+  clock, and `start` with a made-up feed and a real signal. `kb doctor --fix` installs its unit (`fabricd_unit.py`).
 
 These hold across the code:
 
