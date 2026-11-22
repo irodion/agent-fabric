@@ -25,9 +25,10 @@ from typing import Any, NoReturn
 
 from agent_fabric import digest, snapshot, writer
 from agent_fabric.capture import CaptureError
+from agent_fabric.config import read_config
 from agent_fabric.secretgate import GateUnavailable
 from agent_fabric.snapshot import Snapshot
-from agent_fabric.tracker import POLL, Change, Feed, Tracked, Tracker, connect
+from agent_fabric.tracker import IDLE, POLL, Change, Feed, Tracked, Tracker, connect
 from agent_fabric.wikirepo import GitError
 from agent_fabric.workspaces import Workspace, workspace_of
 
@@ -59,8 +60,10 @@ CREATE TABLE IF NOT EXISTS digests (
 
 
 class Digester:
-    def __init__(self, feeds: Sequence[Feed], db: Path, env: Mapping[str, str]) -> None:
-        """`db` is the tracker's `state.db`, which the digester opens on a connection of its own."""
+    def __init__(self, feeds: Sequence[Feed], db: Path, env: Mapping[str, str], *, idle: timedelta = IDLE) -> None:
+        """`db` is the tracker's `state.db`, which the digester opens on a connection of its own; `idle` is the
+        tracker's."""
+        self._idle = idle
         self._db = connect(db)
         self._db.executescript(SCHEMA)
         self._tracker = Tracker(feeds, self._db)  # only read: the sessions and their changes
@@ -105,7 +108,8 @@ class Digester:
             for _, change in changes:
                 if change.kind == "finalized":
                     self._db.execute(
-                        "UPDATE digests SET due = 1, retry_at = NULL, failures = 0 WHERE session_id = ?",
+                        "UPDATE digests SET due = 1, retry_at = NULL, failures = 0, error = NULL"
+                        " WHERE session_id = ?",
                         (change.session_id,),
                     )
             self._db.execute("INSERT OR REPLACE INTO digester (id, place) VALUES (1, ?)", (changes[-1][0],))
@@ -117,9 +121,11 @@ class Digester:
             return
         with suppress(Exception):  # a config that can't be read now: found at the write, which reports it
             self._workspace(session, row)
-        if session.state != "active" or session.cwd is None or not Path(session.cwd).is_dir():
-            # Finalized before this step read its turn end, as after an outage, or first seen already idle, as on
-            # fabricd's first start: the folder is no longer its alone, as a later session may have changed it.
+        # Finalized before this step read its turn end, as after an outage, or idle long enough to be, as one first
+        # seen on fabricd's first start is while the tracker reads the others before settling it: the folder is no
+        # longer its alone, as a later session may have changed it. The test is the tracker's own.
+        idle = now - min(session.active_at, session.changed_at) >= self._idle
+        if session.state != "active" or idle or session.cwd is None or not Path(session.cwd).is_dir():
             return
         taken = snapshot.take(Path(session.cwd), now, datetime.fromisoformat(row["first_seen"]))
         if taken is None:
@@ -134,7 +140,10 @@ class Digester:
         """Found once, while its folder is likeliest still there: a worktree removed when its session ends would
         place it in the default workspace."""
         if row["workspace"] is not None:
-            return Workspace(Path(row["workspace"]) if row["workspace"] != DEFAULT else None)
+            root = Path(row["workspace"]) if row["workspace"] != DEFAULT else None
+            if root is None or root in read_config(self._env).folders:
+                return Workspace(root)
+            # A root no longer registered: found again, as kb no longer keeps that root's wiki.
         found = workspace_of(Path(session.cwd), self._env) if session.cwd else Workspace(None)
         with self._db:
             self._db.execute(
@@ -167,8 +176,9 @@ class Digester:
             meta = feed.source.session(session_id)
             seen = datetime.fromisoformat(row["first_seen"])
             if meta.started_at is None:
-                # No times at all, as Cursor CLI's in agentsview: dated when kb first saw it, file and front matter.
-                meta = meta.model_copy(update={"started_at": seen, "ended_at": meta.ended_at or seen})
+                # No times at all, as Cursor CLI's in agentsview: it began when kb first saw it, and ended at its
+                # last change the tracker saw.
+                meta = meta.model_copy(update={"started_at": seen, "ended_at": meta.ended_at or session.active_at})
             messages = feed.source.messages(session_id, 0).messages
             text = digest.render(
                 meta, messages, _snapshots(row), project=session.project, revision=session.finalizations

@@ -117,8 +117,10 @@ def open_state(env: Mapping[str, str]) -> sqlite3.Connection:
 
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    # `run` uses the tracker in a worker thread, one call at a time, and the database goes with it.
-    db = sqlite3.connect(path, check_same_thread=False)
+    # `run` uses the tracker in a worker thread, one call at a time, and the database goes with it. The digester
+    # writes it on a connection of its own: WAL lets each read while the other writes, and a write waits its turn.
+    db = sqlite3.connect(path, check_same_thread=False, timeout=30)
+    db.execute("PRAGMA journal_mode=WAL")
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA)
     return db
