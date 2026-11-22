@@ -5,7 +5,7 @@
 `docs/design.md` plans a memory shared across coding agents: session digests, a live panel, a wiki, an MCP server.
 Three parts are built: agent notes (`kb note`, `inbox`, `doctor`, `hook` and the `kb-note` skill), notes into the wiki
 (`kb ingest`, `kb lint`), and the CI that builds and vets agentsview. The agentsview adapter, the first piece of
-capture, is built too, with Copilot CLI's own reader, the normalizer, the tracker, and the digest's rendering and writer. The rest of the design, including `fabricd` and the other `kb` commands, is still a plan (§9
+capture, is built too, with Copilot CLI's own reader, the normalizer, the tracker, and the digester. The rest of the design, including `fabricd` and the other `kb` commands, is still a plan (§9
 has the phases).
 
 The design holds decisions, their reasons and dated findings from real agent runs. Details live in code and tests,
@@ -117,7 +117,10 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   with no clock, so a session renders the same bytes each time; `digest.path` names its file. `snapshot.take` reads
   a session's folder through git, read-only; which commits are the session's is §4.4's Git snapshots.
   `writer.write` redacts a digest and puts it in its workspace's wiki, quarantine or local folder by §4.5's allow
-  list and gitleaks; it commits in the wiki's own checkout, the user's too, only while that is clean on `main`. Nothing calls it yet: the digester loop over the tracker's changes comes next.
+  list and gitleaks; it commits in the wiki's own checkout, the user's too, only while that is clean on `main`.
+  `digester.Digester` follows the tracker's changes from its own place in `state.db`: snapshots at a session's start
+  and turn ends, and its digest written at each finalization, retried while it can't be. Like the tracker, nothing
+  starts it yet: fabricd will.
 
 These hold across the code:
 
