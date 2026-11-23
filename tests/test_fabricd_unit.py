@@ -117,7 +117,7 @@ def test_an_old_unit_is_outdated_and_fix_rewrites_and_restarts_it(lab: Lab) -> N
     assert rows(lab.kb, "--fix") == [("fixed", RUNNING)]
     assert the_unit(lab.kb).read_text() == written
     assert calls(lab.kb)[before:] == [
-        "--user show --property=UnitFileState,ActiveState,Result fabricd.service",
+        "--user show --property=UnitFileState,ActiveState,Result,ExecMainStatus fabricd.service",
         *SETUP,
     ]
 
@@ -284,3 +284,77 @@ def test_a_unit_kb_cannot_read_is_a_problem_not_a_crash(lab: Lab) -> None:
     assert status == "problem"
     assert detail.startswith("can't read the unit")
     assert the_unit(lab.kb).read_bytes() == b"\xff\xfe"
+
+
+def test_a_bad_fabricd_setting_is_a_problem_and_no_unit_is_written(lab: Lab) -> None:
+    config = lab.kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.write_text(config.read_text() + "\n[agentsview]\nport = 0\n")
+
+    [(status, detail)] = rows(lab.kb, "--fix")
+
+    assert (status, detail) == ("problem", "can't start: [agentsview] port is a port number, not 0")
+    assert "Fix it in ~/.config/agent-fabric/config.toml, then run kb doctor --fix" in steps(lab.kb)
+    assert not the_unit(lab.kb).exists()
+
+
+def test_a_fabricd_stopped_by_a_bad_config_is_started_once_the_config_reads(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    config = lab.kb.home / ".config" / "agent-fabric" / "config.toml"
+    good = config.read_text()
+    config.write_text(good + "\n[sessions]\nidle_minutes = 0\n")
+    state(lab.kb, "active", "failed")
+    state(lab.kb, "result", "exit-code")
+    state(lab.kb, "status", "2")
+
+    assert rows(lab.kb, "--fix")[0][0] == "problem"
+
+    config.write_text(good)
+    assert rows(lab.kb) == [("missing", "stopped on a config it couldn't read, which reads now")]
+    assert rows(lab.kb, "--fix") == [("fixed", RUNNING)]
+    assert calls(lab.kb)[-1] == "--user enable --now fabricd.service"
+    assert rows(lab.kb) == [("ok", RUNNING)]
+
+
+def test_a_tilde_copilot_home_is_carried_expanded(lab: Lab) -> None:
+    lab.kb.env["COPILOT_HOME"] = "~/moved-copilot"
+
+    lab.kb("doctor", "--fix")
+
+    assert f'Environment="COPILOT_HOME={lab.kb.home}/moved-copilot"\n' in the_unit(lab.kb).read_text()
+
+
+def test_a_stopped_fabricd_with_no_project_allowed_is_ok_and_left_off(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    (lab.kb.home / ".config" / "agent-fabric" / "config.toml").write_text("")
+    state(lab.kb, "stopped")
+    before = len(calls(lab.kb))
+
+    assert rows(lab.kb, "--fix") == [("ok", "installed, not running: no project is allowed, so --fix leaves it off")]
+    assert not any("enable" in call for call in calls(lab.kb)[before:])
+
+
+def test_a_fabricd_service_kb_did_not_write_is_left_as_it_is(lab: Lab) -> None:
+    folder = lab.kb.home / UNITS
+    folder.mkdir(parents=True)
+    the_unit(lab.kb).write_text(mine := "[Service]\nExecStart=/opt/fabricd\n")
+
+    assert rows(lab.kb, "--fix") == [("ok", "yours: kb leaves a unit it didn't write as it is")]
+    assert the_unit(lab.kb).read_text() == mine
+    assert calls(lab.kb) == []
+
+
+def test_a_fabricd_waiting_to_restart_reads_as_restarting(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    state(lab.kb, "active", "activating")
+    state(lab.kb, "result", "exit-code")
+
+    assert rows(lab.kb, "--fix") == [
+        ("problem", "restarting: it failed (exit-code), and systemd starts it again shortly")
+    ]
+
+
+def test_an_installed_unit_is_judged_by_its_saved_path_not_kbs(lab: Lab, tmp_path: Path) -> None:
+    lab.kb("doctor", "--fix")
+    only_on_path(lab, tmp_path, "git", "codex")  # kb now runs from a shell without gitleaks
+
+    assert rows(lab.kb) == [("ok", RUNNING)]

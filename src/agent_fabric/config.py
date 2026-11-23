@@ -10,6 +10,7 @@ import re
 import tomllib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
+from datetime import timedelta
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -184,6 +185,40 @@ class Config:
         """The recorded choice of hooks; both when nothing is recorded."""
         recorded = _hooks_of(self.data)
         return HOOKS if recorded is None else recorded
+
+
+PORT = 8080  # the port agentsview's unit serves on (§4.1)
+IDLE = timedelta(minutes=30)  # how long a session is quiet before it finalizes (§4.3)
+MAX_IDLE_MINUTES = 7 * 24 * 60  # a week: longer is surely a mistake, and far longer can't be a timedelta
+
+
+@dataclass(frozen=True)
+class FabricdSettings:
+    """fabricd's settings (`[agentsview] port`, `[sessions] idle_minutes`), here so that `kb doctor` can check them
+    without loading fabricd."""
+
+    port: int = PORT
+    idle: timedelta = IDLE
+
+
+def fabricd_settings(config: Config) -> FabricdSettings:
+    """fabricd's settings from the config, each its default where it isn't set. ValueError where one is wrong."""
+    port = _fabricd_table(config, "agentsview").get("port", PORT)
+    if type(port) is not int or not 0 < port < 65536:
+        raise ValueError(f"[agentsview] port is a port number, not {port!r}")
+    minutes = _fabricd_table(config, "sessions").get("idle_minutes", IDLE // timedelta(minutes=1))
+    if type(minutes) is not int or not 0 < minutes <= MAX_IDLE_MINUTES:
+        raise ValueError(
+            f"[sessions] idle_minutes is a whole number of minutes from 1 to {MAX_IDLE_MINUTES}, not {minutes!r}"
+        )
+    return FabricdSettings(port, timedelta(minutes=minutes))
+
+
+def _fabricd_table(config: Config, name: str) -> dict[str, object]:
+    found = config.data.get(name, {})
+    if not isinstance(found, dict):
+        raise ValueError(f"[{name}] is not a table")
+    return found
 
 
 def read_config(env: Mapping[str, str]) -> Config:

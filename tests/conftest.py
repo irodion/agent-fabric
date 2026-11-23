@@ -57,18 +57,20 @@ case "$*" in
     state="$state/fabricd"
     mkdir -p "$state"
     case "$*" in
-      "--user show --property=UnitFileState,ActiveState,Result fabricd.service")
+      "--user show --property=UnitFileState,ActiveState,Result,ExecMainStatus fabricd.service")
         enabled=$(cat "$state/enabled" 2>/dev/null)
         active=inactive
         [ "$enabled" = enabled ] && [ ! -e "$state/stopped" ] && active=active
         [ -e "$state/active" ] && active=$(cat "$state/active")
         result=$(cat "$state/result" 2>/dev/null || echo success)
-        printf 'ActiveState=%s\nUnitFileState=%s\nResult=%s\n' "$active" "$enabled" "$result" ;;
+        status=$(cat "$state/status" 2>/dev/null || echo 0)
+        printf 'ActiveState=%s\nUnitFileState=%s\n' "$active" "$enabled"
+        printf 'Result=%s\nExecMainStatus=%s\n' "$result" "$status" ;;
       "--user enable fabricd.service" | "--user enable --now fabricd.service")
         [ -e "$state/cannot-enable" ] && { echo 'Access denied' >&2; exit 1; }
         printf enabled > "$state/enabled"
-        [ "$3" = --now ] && rm -f "$state/stopped" ;;
-      "--user restart fabricd.service") rm -f "$state/stopped" ;;
+        [ "$3" = --now ] && rm -f "$state/stopped" "$state/active" "$state/result" "$state/status" ;;
+      "--user restart fabricd.service") rm -f "$state/stopped" "$state/active" "$state/result" "$state/status" ;;
       *) echo "unexpected: $*" >&2; exit 2 ;;
     esac
     exit 0 ;;

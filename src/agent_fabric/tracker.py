@@ -27,6 +27,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, NoReturn
 
+from agent_fabric import config
 from agent_fabric.capture import CaptureError, CaptureSource, Message, SessionMeta
 from agent_fabric.gitinfo import git_project
 from agent_fabric.paths import state_db
@@ -34,7 +35,7 @@ from agent_fabric.paths import state_db
 log = logging.getLogger(__name__)
 
 WINDOW = timedelta(hours=24)  # how far back a listing asks
-IDLE = timedelta(minutes=30)
+IDLE = config.IDLE  # [sessions] idle_minutes' default
 TURN_QUIET = timedelta(seconds=5)
 POLL = 10.0  # seconds between listings
 
