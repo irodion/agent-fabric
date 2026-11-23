@@ -74,6 +74,7 @@ case "$*" in
         printf enabled > "$state/enabled"
         (cd "$state" && rm -f stopped active result) ;;
       *"restart agentsview.service") (cd "$state" && rm -f stopped active result) ;;
+      *"is-enabled --quiet agentsview.service") [ "$(cat "$state/enabled" 2>/dev/null)" = enabled ] || exit 1 ;;
       *) echo "unexpected: $*" >&2; exit 2 ;;
     esac
     exit 0 ;;
@@ -113,6 +114,7 @@ case "$*" in
     printf 'ActiveState=inactive\nUnitFileState=static\nResult=%s\n' "$result" ;;
   "--user daemon-reload") [ -e "$state/fabricd/cannot-reload" ] && { echo 'Timeout' >&2; exit 1; }
     rm -f "$state/fabricd/need-reload" "$state/agentsview-user/need-reload" ;;
+  daemon-reload) rm -f "$state/agentsview-system/need-reload" ;;  # the system's manager, from the install script
   "--user enable --now "*) [ -e "$state/cannot-enable" ] && { echo 'Access denied' >&2; exit 1; }
     printf enabled > "$state/enabled"; rm -f "$state/stopped" ;;
   "--user disable --now "*) if [ -e "$state/cannot-disable" ]; then echo 'Access denied' >&2; exit 1; fi ;;

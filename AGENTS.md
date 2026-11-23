@@ -42,8 +42,9 @@ itself.
 - `kb note` and `kb hook` write to the real inbox and markers, and the inbox is append-only. `kb doctor --fix` edits
   the real agents' settings, and writes and starts a workspace's `fabric-ingest@<workspace>.timer` once a project is
   allowed there, and `fabricd.service` and `agentsview.service` once one is allowed anywhere. Where a user unit can't
-  sandbox agentsview, it stages a system unit for the user to install with sudo. Tests that run `kb doctor` with an allow list use the `lab` fixture, whose stand-in `systemctl` keeps
-  them off the real user manager. To try a command that writes, with `XDG_DATA_HOME` unset, give it a throwaway home:
+  sandbox agentsview, it stages a system unit, with `install-agentsview.sh` beside it for the user to run with sudo.
+  Tests that run `kb doctor` with an allow list use the `lab` fixture, whose stand-in `systemctl` keeps them off the
+  real user manager. To try a command that writes, with `XDG_DATA_HOME` unset, give it a throwaway home:
   `HOME="$(mktemp -d)" .venv/bin/kb <args>`.
 - `kb ingest` moves notes out of the inbox, writes `~/wiki` and spends model requests through the workspace's backend
   (`codex` or `claude`), so ask first. To try it, use a throwaway home with a stub backend on PATH

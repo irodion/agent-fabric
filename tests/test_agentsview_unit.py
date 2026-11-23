@@ -124,11 +124,10 @@ def test_where_the_sandbox_does_not_hold_fix_stages_a_system_unit_and_says_how_t
     assert f"User={lab.kb.home.owner()}\n" in text
     assert text.endswith("WantedBy=multi-user.target\n")
     assert not the_unit(lab.kb).exists()
-    system = agentsview_unit.SYSTEM_UNITS / "agentsview.service"
-    assert (
-        f"Run sudo install -m 0644 {staged} {system} && sudo systemctl daemon-reload && "
-        "sudo systemctl enable agentsview.service && sudo systemctl restart agentsview.service"
-    ) in steps(lab.kb, "--fix")
+    script = staged.with_name("install-agentsview.sh")
+    assert f"Read ~/.local/share/agent-fabric/install-agentsview.sh, then run sudo sh {script}" in steps(
+        lab.kb, "--fix"
+    )
 
 
 def test_an_installed_system_unit_is_checked_and_its_state_asked(lab: Lab) -> None:
@@ -269,7 +268,7 @@ def test_a_staged_system_unit_keeps_its_sudo_line_without_probing_again(lab: Lab
 
     assert status == "missing"
     assert detail.endswith("; staged at ~/.local/share/agent-fabric/agentsview.service")
-    assert any(step.startswith("Run sudo install -m 0644 ") for step in steps(lab.kb))
+    assert any(step.startswith("Read ~/.local/share/agent-fabric/install-agentsview.sh") for step in steps(lab.kb))
     assert probes(lab.kb) == before
 
 
@@ -526,16 +525,93 @@ def test_a_system_unit_systemd_has_not_reloaded_is_outdated(lab: Lab) -> None:
     assert "Run sudo systemctl daemon-reload && sudo systemctl restart agentsview.service" in steps(lab.kb)
 
 
-def test_an_outdated_system_unit_the_user_disabled_is_only_installed_and_reloaded(lab: Lab) -> None:
+def run_script(kb: Kb) -> subprocess.CompletedProcess[str]:
+    """The install script, as the user's sudo would run it, on the stand-in systemctl."""
+    agentsview_unit.SYSTEM_UNITS.mkdir(parents=True, exist_ok=True)
+    script = kb.home / ".local" / "share" / "agent-fabric" / "install-agentsview.sh"
+    env = {"HOME": str(kb.home), "PATH": kb.env["PATH"]}
+    return subprocess.run(["sh", str(script)], env=env, capture_output=True, text=True, check=False)
+
+
+def test_the_script_installs_enables_and_starts_a_first_system_unit(lab: Lab) -> None:
+    unenforced(lab.kb)
+    lab.kb("doctor", "--fix")
+
+    assert run_script(lab.kb).returncode == 0
+
+    staged = lab.kb.home / ".local" / "share" / "agent-fabric" / "agentsview.service"
+    system = agentsview_unit.SYSTEM_UNITS / "agentsview.service"
+    assert system.read_text() == staged.read_text()
+    assert calls(lab.kb)[-2:] == ["enable agentsview.service", "restart agentsview.service"]
+    assert rows(lab.kb) == [("ok", RUNNING)]
+
+
+def test_the_script_restarts_an_outdated_system_unit_that_is_on(lab: Lab) -> None:
+    unenforced(lab.kb)
+    lab.kb("doctor", "--fix")
+    system = system_unit_installed(lab.kb)
+    system.write_text(system.read_text().replace("--replace", ""))
+    state(lab.kb, "system", "enabled", "enabled")
+    lab.kb("doctor", "--fix")
+
+    assert run_script(lab.kb).returncode == 0
+
+    assert "--replace" in system.read_text()
+    assert calls(lab.kb)[-1] == "restart agentsview.service"
+    assert "enable agentsview.service" not in calls(lab.kb)
+
+
+def test_the_script_only_installs_an_outdated_system_unit_the_user_disabled(lab: Lab) -> None:
     unenforced(lab.kb)
     lab.kb("doctor", "--fix")
     system = system_unit_installed(lab.kb)
     system.write_text(system.read_text().replace("--replace", ""))
     state(lab.kb, "system", "enabled", "disabled")
+    lab.kb("doctor", "--fix")
 
-    [step] = [step for step in steps(lab.kb, "--fix") if step.startswith("Run sudo install")]
+    assert run_script(lab.kb).returncode == 0
 
-    assert step.endswith("&& sudo systemctl daemon-reload")
+    assert "--replace" in system.read_text()
+    assert calls(lab.kb)[-1] == "is-enabled --quiet agentsview.service"
+
+
+def test_the_script_leaves_a_masked_unit_masked(lab: Lab) -> None:
+    unenforced(lab.kb)
+    lab.kb("doctor", "--fix")
+    agentsview_unit.SYSTEM_UNITS.mkdir(parents=True)
+    system = agentsview_unit.SYSTEM_UNITS / "agentsview.service"
+    system.symlink_to("/dev/null")
+
+    done = run_script(lab.kb)
+
+    assert done.returncode == 1
+    assert "is masked" in done.stderr
+    assert system.is_symlink()
+
+
+def test_the_script_leaves_a_unit_kb_did_not_write(lab: Lab) -> None:
+    unenforced(lab.kb)
+    lab.kb("doctor", "--fix")
+    agentsview_unit.SYSTEM_UNITS.mkdir(parents=True)
+    system = agentsview_unit.SYSTEM_UNITS / "agentsview.service"
+    system.write_text("[Service]\nExecStart=/bin/true\n")
+
+    done = run_script(lab.kb)
+
+    assert done.returncode == 1
+    assert "is not kb's" in done.stderr
+    assert system.read_text() == "[Service]\nExecStart=/bin/true\n"
+
+
+def test_a_unit_staged_without_its_script_is_staged_again(lab: Lab) -> None:
+    unenforced(lab.kb)
+    lab.kb("doctor", "--fix")
+    (lab.kb.home / ".local" / "share" / "agent-fabric" / "install-agentsview.sh").unlink()
+
+    assert "Run kb doctor --fix, which sets it up" in steps(lab.kb)
+    assert any(
+        step.startswith("Read ~/.local/share/agent-fabric/install-agentsview.sh") for step in steps(lab.kb, "--fix")
+    )
 
 
 def unlink_fails(monkeypatch: pytest.MonkeyPatch) -> None:

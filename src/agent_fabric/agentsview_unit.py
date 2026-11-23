@@ -89,6 +89,40 @@ def staged(env: Mapping[str, str]) -> Path:
     return state_db(env).parent / NAME
 
 
+def script(env: Mapping[str, str]) -> Path:
+    """Beside the staged unit: what installs it, for the user to run with sudo."""
+    return staged(env).with_name("install-agentsview.sh")
+
+
+def installer(env: Mapping[str, str]) -> str:
+    """The script that installs the staged unit, in an administrator's shell: absolute paths, and the unit's state
+    read when it runs, since the user may turn it off after kb wrote this. A first install is enabled and started;
+    a unit already there is restarted only while it's enabled. It refuses a masked unit and one kb didn't write."""
+    system = shlex.quote(str(SYSTEM_UNITS / NAME))
+    first = shlex.quote(HEADER.splitlines()[0])
+    return (
+        "#!/bin/sh\n"
+        f"{HEADER}"
+        "# Installs the agentsview unit staged beside it. Run it as an administrator:\n"
+        f"#   sudo sh {shlex.quote(str(script(env)))}\n"
+        "set -eu\n"
+        f"unit={system}\n"
+        'if [ -L "$unit" ]; then echo "$unit is masked: unmask it first, if you want it on" >&2; exit 1; fi\n'
+        f'if [ -e "$unit" ] && [ "$(head -n 1 "$unit")" != {first} ]; then\n'
+        "  echo \"$unit is not kb's: move it away first, for kb's own unit\" >&2; exit 1\n"
+        "fi\n"
+        '[ -e "$unit" ] && new=no || new=yes\n'
+        f'install -m 0644 {shlex.quote(str(staged(env)))} "$unit"\n'
+        "systemctl daemon-reload\n"
+        'if [ "$new" = yes ]; then\n'
+        f"  systemctl enable {NAME}\n"
+        f"  systemctl restart {NAME}\n"
+        f"elif systemctl is-enabled --quiet {NAME}; then\n"
+        f"  systemctl restart {NAME}\n"
+        "fi\n"
+    )
+
+
 def _user_name() -> str:
     """The user kb runs as, whom the system unit runs agentsview as; the uid where it has no name."""
     try:
@@ -285,15 +319,15 @@ ANSWERS: dict[int, bool | str] = {
 
 def _staged_current(env: Mapping[str, str], port: int) -> bool:
     try:
-        return staged(env).read_text(encoding="utf-8") == unit(env, port, system=True)
+        current = staged(env).read_text(encoding="utf-8") == unit(env, port, system=True)
+        return current and script(env).read_text(encoding="utf-8") == installer(env)
     except (OSError, UnicodeDecodeError):
         return False
 
 
-def _stage(env: Mapping[str, str], port: int, said: tuple[str, str], *, fix: bool, keep_off: bool = False) -> Row:
-    """The system unit, written where the user can install it from, with the command that does: absolute paths, as
-    it runs in an administrator's shell. `said`: the row's status and detail. `keep_off`: a unit the user turned
-    off, or one whose state kb can't ask, which the command only installs and reloads."""
+def _stage(env: Mapping[str, str], port: int, said: tuple[str, str], *, fix: bool) -> Row:
+    """The system unit, written where the user can install it from, with the script that does. `said`: the row's
+    status and detail."""
     status, why = said
     shown = str(SYSTEM_UNITS / NAME)
     if fix:
@@ -301,15 +335,14 @@ def _stage(env: Mapping[str, str], port: int, said: tuple[str, str], *, fix: boo
             data_dir(env).mkdir(exist_ok=True)
             staged(env).parent.mkdir(parents=True, exist_ok=True)
             staged(env).write_text(unit(env, port, system=True), encoding="utf-8")
+            script(env).write_text(installer(env), encoding="utf-8")
         except OSError as e:
             step = f"Make {tilde(staged(env).parent, env)} writable, then run kb doctor --fix again"
             return Row("problem", "agentsview", shown, f"can't stage the unit ({e.strerror or e})", step=step)
     elif not _staged_current(env, port):
         return Row(status, "agentsview", shown, why, step="Run kb doctor --fix, which stages the unit to install")
-    install = f"sudo install -m 0644 {shlex.quote(str(staged(env)))} {shown} && sudo systemctl daemon-reload"
-    if not keep_off:
-        install += f" && sudo systemctl enable {NAME} && sudo systemctl restart {NAME}"
-    return Row(status, "agentsview", shown, f"{why}; staged at {tilde(staged(env), env)}", step=f"Run {install}")
+    step = f"Read {tilde(script(env), env)}, then run sudo sh {shlex.quote(str(script(env)))}"
+    return Row(status, "agentsview", shown, f"{why}; staged at {tilde(staged(env), env)}", step=step)
 
 
 def _system(env: Mapping[str, str], current: str | None, port: int | None, *, fix: bool, wanted: bool) -> Row:
@@ -325,7 +358,7 @@ def _system(env: Mapping[str, str], current: str | None, port: int | None, *, fi
     state = _state(asked, shown, SYSTEM_STEPS, wanted=wanted)
     if wanted and port is not None and current != unit(env, port, system=True):
         why = f"outdated: it runs from an old unit; {state.detail}"
-        return _stage(env, port, ("outdated", why), fix=fix, keep_off=asked is None or _off(asked) is not None)
+        return _stage(env, port, ("outdated", why), fix=fix)
     if (asked or {}).get("NeedDaemonReload") == "yes":
         step = f"Run sudo systemctl daemon-reload && sudo systemctl restart {NAME}"
         if asked is None or _off(asked):  # turned off: reloaded, not started
