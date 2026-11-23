@@ -219,8 +219,11 @@ def test_a_units_folder_kb_cannot_read_is_not_a_crash(
     finally:
         folder.chmod(0o700)
 
-    [(status, detail)] = rows
-    assert (status, detail.split(" (")[0]) == ("problem", "can't read the units")
+    if allowed:
+        [(status, detail)] = rows
+        assert (status, detail.split(" (")[0]) == ("problem", "can't read the units")
+    else:  # a notes-only machine, as fabricd's check: no units to read
+        assert rows == []
 
 
 def test_the_units_go_where_systemd_looks_whatever_kbs_config_folder(lab: Lab, tmp_path: Path) -> None:
