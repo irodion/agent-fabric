@@ -191,6 +191,23 @@ def test_a_unit_kb_cannot_read_is_a_problem_not_a_crash(lab: Lab) -> None:
     assert any(step.startswith("Look at ~/.config/systemd/user/fabric-ingest@default.*") for step in steps(lab.kb))
 
 
+@pytest.mark.parametrize("allowed", [True, False])
+def test_a_units_folder_kb_cannot_read_is_not_a_crash(lab: Lab, allowed: bool) -> None:
+    # Python 3.13's Path.exists raises PermissionError here, where 3.14's says False.
+    if not allowed:
+        (lab.kb.home / ".config" / "agent-fabric" / "config.toml").write_text("")
+    folder = lab.kb.home / UNITS
+    folder.mkdir(parents=True)
+    folder.chmod(0o000)
+    try:
+        rows = timer_rows(lab.kb, "--fix")
+    finally:
+        folder.chmod(0o700)
+
+    [(status, detail)] = rows
+    assert (status, detail.split(" (")[0]) == ("problem", "can't read the units")
+
+
 def test_the_units_go_where_systemd_looks_whatever_kbs_config_folder(lab: Lab, tmp_path: Path) -> None:
     moved = tmp_path / "cfg"
     (moved / "agent-fabric").mkdir(parents=True)
