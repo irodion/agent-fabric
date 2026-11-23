@@ -195,7 +195,11 @@ _START = f"Run systemctl --user daemon-reload && systemctl --user enable --now {
 def _ask(command: str, env: Mapping[str, str]) -> dict[str, str] | None:
     """The unit's state and its last result; None where systemd can't be asked, as from an agent's sandbox."""
     done = _systemctl(
-        command, env, "show", "--property=UnitFileState,ActiveState,Result,ExecMainStatus,NeedDaemonReload", NAME
+        command,
+        env,
+        "show",
+        "--property=UnitFileState,ActiveState,Result,ExecMainCode,ExecMainStatus,NeedDaemonReload",
+        NAME,
     )
     if done is None or done.returncode:
         return None
@@ -224,9 +228,11 @@ def _state(command: str, env: Mapping[str, str], path: Path, *, fix: bool, wante
     asked = _ask(command, env)
     if asked is None:
         return Row("ok", "fabricd", shown, "installed; can't ask systemd from here whether it runs")
-    if wanted and asked.get("NeedDaemonReload") == "yes":
+    settled = _settled(asked, shown, wanted=wanted)
+    # Only a unit kb would run or start: one turned off or failed keeps its row, and a restart wouldn't help it.
+    if wanted and asked.get("NeedDaemonReload") == "yes" and (settled is None or settled.detail == RUNNING):
         return _reloaded(command, env, path, fix=fix)
-    if (settled := _settled(asked, shown, wanted=wanted)) is not None:
+    if settled is not None:
         return settled
     detail = (
         "stopped on a config it couldn't read, which reads now"
@@ -252,7 +258,13 @@ def _reloaded(command: str, env: Mapping[str, str], path: Path, *, fix: bool) ->
 
 def _config_failed(asked: dict[str, str]) -> bool:
     """Whether it stopped on a config it couldn't read (exit 2), which systemd doesn't restart."""
-    return asked.get("Result", "success") != "success" and asked.get("ExecMainStatus") == str(BAD_CONFIG)
+    return asked.get("Result", "success") != "success" and _exited(asked, BAD_CONFIG)
+
+
+def _exited(asked: dict[str, str], code: int) -> bool:
+    """Whether fabricd exited with `code`: ExecMainCode 1 (CLD_EXITED), since after a signal ExecMainStatus is the
+    signal's number."""
+    return asked.get("ExecMainCode") == "1" and asked.get("ExecMainStatus") == str(code)
 
 
 def _settled(asked: dict[str, str], shown: str, *, wanted: bool) -> Row | None:
@@ -284,7 +296,7 @@ def _kept_off(off: str, active: str, shown: str) -> Row:
 
 def _failed(asked: dict[str, str], shown: str) -> Row:
     restart = f"systemctl --user restart {NAME}"
-    if asked.get("ExecMainStatus") == str(LOCKED):
+    if _exited(asked, LOCKED):
         detail = "stopped: another fabricd runs on its data folder"
         return Row("problem", "fabricd", shown, detail, step=f"Stop the other fabricd, then {restart}")
     result = asked.get("Result", "success")

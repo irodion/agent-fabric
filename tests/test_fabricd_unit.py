@@ -118,7 +118,8 @@ def test_an_old_unit_is_outdated_and_fix_rewrites_and_restarts_it(lab: Lab) -> N
     assert rows(lab.kb, "--fix") == [("fixed", RUNNING)]
     assert the_unit(lab.kb).read_text() == written
     assert calls(lab.kb)[before:] == [
-        "--user show --property=UnitFileState,ActiveState,Result,ExecMainStatus,NeedDaemonReload fabricd.service",
+        "--user show --property=UnitFileState,ActiveState,Result,ExecMainCode,ExecMainStatus,NeedDaemonReload"
+        " fabricd.service",
         *SETUP,
     ]
 
@@ -407,3 +408,44 @@ def test_a_units_folder_kb_cannot_read_is_no_row_where_no_project_is_allowed(lab
         assert rows(lab.kb, "--fix") == []
     finally:
         folder.chmod(0o700)
+
+
+def test_a_disabled_unit_that_needs_a_reload_stays_off_and_ok(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    state(lab.kb, "enabled", "disabled")
+    state(lab.kb, "stopped")
+    state(lab.kb, "need-reload")
+    off = "turned off (disabled); systemctl --user enable --now fabricd.service turns it back on"
+
+    assert rows(lab.kb) == [("ok", off)]
+    before = len(calls(lab.kb))
+    assert rows(lab.kb, "--fix") == [("ok", off)]
+    assert not any("restart" in call or "enable" in call for call in calls(lab.kb)[before:])
+
+
+def test_a_fabricd_stopped_by_another_is_not_restarted_for_a_reload(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    state(lab.kb, "active", "failed")
+    state(lab.kb, "result", "exit-code")
+    state(lab.kb, "status", "3")
+    state(lab.kb, "need-reload")
+    before = len(calls(lab.kb))
+
+    assert rows(lab.kb, "--fix") == [("problem", "stopped: another fabricd runs on its data folder")]
+    assert not any("restart" in call or "enable" in call for call in calls(lab.kb)[before:])
+
+
+def test_a_fabricd_killed_by_a_signal_is_a_failure_whatever_its_number(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    state(lab.kb, "active", "failed")
+    state(lab.kb, "result", "core-dump")
+    state(lab.kb, "code", "3")  # CLD_DUMPED, with the signal's number as its status
+    state(lab.kb, "status", "3")
+
+    assert rows(lab.kb, "--fix") == [("problem", "stopped: it failed (core-dump)")]
+
+    state(lab.kb, "result", "signal")
+    state(lab.kb, "code", "2")  # CLD_KILLED
+    state(lab.kb, "status", "2")
+
+    assert rows(lab.kb, "--fix") == [("problem", "stopped: it failed (signal)")]
