@@ -129,7 +129,8 @@ if [ -e "$HOME/systemctl/no-bus" ]; then
   echo 'Failed to connect to user scope bus via local transport: Operation not permitted' >&2
   exit 1
 fi
-exit "$(cat "$HOME/systemd-run/exit" 2>/dev/null || echo 0)"
+case "$*" in *" filter") answer=exit-filter ;; *) answer=exit ;; esac  # the network filter's probe, or the sandbox's
+exit "$(cat "$HOME/systemd-run/$answer" 2>/dev/null || echo 0)"
 """
 
 

@@ -14,7 +14,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,38 +45,31 @@ MOVED = (("CODEX_HOME", "auth.json"), ("CLAUDE_CONFIG_DIR", ".credentials.json")
 RUNNING = "running sandboxed: fabricd reads Claude Code's and Codex's sessions through it"
 PROBE_TIMEOUT = 30  # seconds for the probe's transient unit
 
-# Run in a transient unit with SANDBOX. 0 where the sandbox holds; 10 where the home is writable, 11 where an address
-# other than loopback is reachable, 12 where loopback isn't, 13 where there's no other address to try, 14 where the
-# write failed for another reason than a read-only home. It sends
-# nothing off the machine: the other address is the machine's own, and the UDP connect that finds it sends no packet.
+# Run in a transient unit, in one of two ways, sending nothing off the machine. "sandbox", with SANDBOX: 0 where
+# the home is read-only and loopback works; 10 where the home is writable, 12 where loopback is blocked, 14 where the
+# write failed for another reason than a read-only home. "filter", with IPAddressDeny=any alone: 0 where loopback is
+# blocked, so the filter is applied; 11 where it isn't.
 PROBE = """
-import os, socket, sys
-import errno
-try:
-    os.close(os.open(sys.argv[1], os.O_CREAT | os.O_EXCL | os.O_WRONLY))
-    os.unlink(sys.argv[1])
-    sys.exit(10)
-except OSError as e:
-    if e.errno not in (errno.EROFS, errno.EACCES, errno.EPERM):
-        sys.exit(14)
-def reach(host):
+import errno, os, socket, sys
+def reach():
     server = socket.socket()
-    server.bind((host, 0))
+    server.bind(("127.0.0.1", 0))
     server.listen()
     try:
         socket.create_connection(server.getsockname(), timeout=2).close()
         return True
     except OSError:
         return False
-if not reach("127.0.0.1"):
-    sys.exit(12)
+if sys.argv[1] == "filter":
+    sys.exit(11 if reach() else 0)
 try:
-    finder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    finder.connect(("192.0.2.1", 9))
-    own = finder.getsockname()[0]
-except OSError:
-    sys.exit(13)
-sys.exit(11 if reach(own) else 0)
+    os.close(os.open(sys.argv[2], os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    os.unlink(sys.argv[2])
+    sys.exit(10)
+except OSError as e:
+    if e.errno not in (errno.EROFS, errno.EACCES, errno.EPERM):
+        sys.exit(14)
+sys.exit(0 if reach() else 12)
 """
 
 
@@ -104,12 +97,16 @@ def _user_name() -> str:
 
 
 def _hidden(env: Mapping[str, str]) -> list[Path]:
-    """The credentials it never reads: the defaults, and Codex's and Claude Code's where their homes moved."""
+    """The credentials it never reads: the defaults, and Codex's, Claude Code's and gh's where their folders moved."""
     home = Path(env["HOME"])
     paths = [home / path for path in HIDDEN]
     for variable, name in MOVED:
         if (moved := expand(env.get(variable) or "", env)).is_absolute():
             paths.append(moved / name)
+    if Path(gh := env.get("GH_CONFIG_DIR") or "").is_absolute():  # gh's own setting, else XDG's
+        paths.append(Path(gh))
+    elif Path(config := env.get("XDG_CONFIG_HOME") or "").is_absolute():
+        paths.append(Path(config) / "gh")
     return list(dict.fromkeys(paths))
 
 
@@ -118,13 +115,19 @@ def unit(env: Mapping[str, str], port: int, *, system: bool) -> str:
     would be root's home."""
     user = f"User={_user_name()}\n" if system else ""
     hidden = "".join(f"InaccessiblePaths=-{_quoted(str(path))}\n" for path in _hidden(env))
+    moved = [(variable, expand(env.get(variable) or "", env)) for variable, _ in MOVED]
+    # Where the agents keep their sessions, if moved: a unit gets none of a shell's variables. Whether agentsview
+    # reads these is unconfirmed (§11); passed anyway, they cost nothing.
+    environment = "".join(
+        f"Environment={_quoted(f'{variable}={path}')}\n" for variable, path in moved if path.is_absolute()
+    )
     sandbox = "".join(f"{setting}\n" for setting in SANDBOX)
     command = (
         f"{_quoted(str(binary(env)), command=True)} serve --no-browser --no-update-check --port {port} --replace"
     )
     return (
         f"{HEADER}[Unit]\nDescription=agentsview: the agents' sessions, for fabricd (sandboxed)\n\n"
-        f"[Service]\n{user}ExecStart={command}\nEnvironment=AGENTSVIEW_TELEMETRY_ENABLED=0\n"
+        f"[Service]\n{user}ExecStart={command}\nEnvironment=AGENTSVIEW_TELEMETRY_ENABLED=0\n{environment}"
         f"Restart=on-failure\nRestartSec=30\n{sandbox}ReadWritePaths={_quoted(str(data_dir(env)))}\n{hidden}\n"
         f"[Install]\nWantedBy={'multi-user.target' if system else 'default.target'}\n"
     )
@@ -136,9 +139,13 @@ def check(env: Mapping[str, str], config: Config | Exception, *, wanted: bool, f
     gives no new unit: fabricd's row says what's wrong with it."""
     user_path, system_path = units_dir(env) / NAME, SYSTEM_UNITS / NAME
     try:
-        user_unit, system_unit = _read(user_path), _read(system_path)
+        user_unit = _read(user_path)
     except (OSError, UnicodeDecodeError) as e:
         return [_unreadable(e, env)] if wanted else []
+    try:
+        system_unit = _read(system_path)
+    except (OSError, UnicodeDecodeError):  # kb's own is 0644: one only root reads is the user's
+        system_unit = "unreadable"
     try:
         port = agentsview_port(config) if isinstance(config, Config) else None
     except ValueError:
@@ -158,7 +165,7 @@ def check(env: Mapping[str, str], config: Config | Exception, *, wanted: bool, f
 def _unreadable(e: Exception, env: Mapping[str, str]) -> Row:
     reason = e.strerror if isinstance(e, OSError) and e.strerror else e
     shown = tilde(units_dir(env) / NAME, env)
-    step = f"Look at {shown} and {SYSTEM_UNITS / NAME}: kb checks them once it can read them"
+    step = f"Look at {shown}: kb checks it once it can read it"
     return Row("problem", "agentsview", shown, f"can't read the unit ({reason})", step=step)
 
 
@@ -215,46 +222,38 @@ NO_BUS = "no bus"
 
 
 def _probe(env: Mapping[str, str]) -> bool | str:
-    """Whether a user unit gets the sandbox, else why kb can't tell: NO_BUS where systemd can't be asked. Only the
-    probe's own answers say no; any other failure, such as a systemd that doesn't know a setting, can't tell."""
+    """Whether a user unit gets the sandbox, else why kb can't tell: NO_BUS where systemd can't be asked. Two
+    transient units: the unit's settings, then the network filter alone, which must block even loopback. Only their
+    answers, and systemd failing to set up the unit's namespaces, say no."""
     command = shutil.which("systemd-run", path=env.get("PATH", ""))
     if command is None:
-        return NO_BUS
+        return "systemd-run isn't on PATH"
     probe = data_dir(env).parent / f".kb-agentsview-probe-{os.getpid()}"
     probe.unlink(missing_ok=True)  # one a killed run left, which would fail the write for another reason
-    settings = [arg for setting in (*SANDBOX, f"RuntimeMaxSec={PROBE_TIMEOUT}") for arg in ("-p", setting)]
+    try:
+        sandboxed = _transient(command, env, SANDBOX, "sandbox", str(probe))
+    finally:
+        probe.unlink(missing_ok=True)  # where the home was writable after all
+    if sandboxed is not True:
+        return sandboxed
+    return _transient(command, env, ("IPAddressDeny=any",), "filter")
+
+
+def _transient(command: str, env: Mapping[str, str], settings: Sequence[str], *args: str) -> bool | str:
+    """The probe in a transient user unit with these settings; it stops itself at RuntimeMaxSec."""
+    properties = [arg for setting in (*settings, f"RuntimeMaxSec={PROBE_TIMEOUT}") for arg in ("-p", setting)]
+    run = [command, "--user", "--wait", "--quiet", "--collect", *properties, sys.executable, "-I", "-c", PROBE, *args]
     try:
         done = subprocess.run(
-            [
-                command,
-                "--user",
-                "--wait",
-                "--quiet",
-                "--collect",
-                *settings,
-                sys.executable,
-                "-I",
-                "-c",
-                PROBE,
-                str(probe),
-            ],
-            env=dict(env),
-            capture_output=True,
-            text=True,
-            timeout=PROBE_TIMEOUT + 10,  # the unit stops itself at RuntimeMaxSec
-            check=False,
+            run, env=dict(env), capture_output=True, text=True, timeout=PROBE_TIMEOUT + 10, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         return f"systemd-run didn't finish ({e})"
-    finally:
-        probe.unlink(missing_ok=True)  # where the home was writable after all
-    said = done.stderr.strip().splitlines()[-1] if done.stderr.strip() else f"exit {done.returncode}"
     if done.returncode in ANSWERS:
         return ANSWERS[done.returncode]
-    if done.returncode in SETUP_FAILED:
-        return False
     if done.returncode == 1 and "bus" in done.stderr:
         return NO_BUS
+    said = done.stderr.strip().splitlines()[-1] if done.stderr.strip() else f"exit {done.returncode}"
     return f"systemd-run failed ({said})"
 
 
@@ -263,12 +262,9 @@ ANSWERS: dict[int, bool | str] = {
     10: False,
     11: False,
     12: "loopback is blocked too, which a system unit's filter would block as well",
-    13: "it has no address but loopback to try (offline?)",
     14: "its write in the home failed for another reason than a read-only home",
+    226: False,  # systemd's 226/NAMESPACE: a user manager that can't set up the unit's namespaces
 }
-# systemd's own exits where it couldn't set up the unit's process (200-243, such as 226 for its namespaces): what
-# a user manager without user namespaces gives, so a user unit can't sandbox it.
-SETUP_FAILED = range(200, 244)
 
 
 def _staged_current(env: Mapping[str, str], port: int) -> bool:
@@ -307,9 +303,16 @@ def _system(env: Mapping[str, str], current: str | None, port: int | None, *, fi
         return Row("ok", "agentsview", shown, f"turned off (masked); sudo systemctl unmask {NAME} turns it back on")
     if current is None or not current.startswith(HEADER):
         return Row("ok", "agentsview", shown, "yours: kb leaves a unit it didn't write as it is")
+    asked = _ask(env, system=True)
+    state = _state(asked, shown, SYSTEM_STEPS, wanted=wanted)
     if wanted and port is not None and current != unit(env, port, system=True):
-        return _stage(env, port, fix=fix, status="outdated", why="outdated: it runs from an old unit")
-    return _state(_ask(env, system=True), shown, SYSTEM_STEPS, wanted=wanted)
+        why = f"outdated: it runs from an old unit; {state.detail}"
+        return _stage(env, port, fix=fix, status="outdated", why=why)
+    if (asked or {}).get("NeedDaemonReload") == "yes":
+        step = f"Run sudo systemctl daemon-reload && sudo systemctl restart {NAME}"
+        detail = "systemd runs it from the unit as it was before it was installed"
+        return Row("outdated", "agentsview", shown, detail, step=step)
+    return state
 
 
 def _user(env: Mapping[str, str], current: str | None, port: int | None, *, fix: bool, wanted: bool) -> Row:
@@ -396,7 +399,13 @@ def _write_user(env: Mapping[str, str], port: int, *, off: str | None) -> Row:
                 path.unlink(missing_ok=True)
                 _run(env, "--user", "daemon-reload")
                 said += "; removed the unit, so --fix tries again"
-            step = f"Run systemctl --user daemon-reload && systemctl --user enable --now {NAME}, and fix what it says"
+            step = (
+                "Fix what systemctl says, then run kb doctor --fix again"
+                if not installed
+                else "Run systemctl --user daemon-reload, and fix what it says"
+                if off
+                else f"Run systemctl --user daemon-reload && systemctl --user restart {NAME}, and fix what it says"
+            )
             return Row("problem", "agentsview", shown, f"systemctl {args[0]} failed: {said}", step=step)
     return Row("fixed", "agentsview", shown, f"rewrote the unit; {off}" if off else RUNNING)
 
