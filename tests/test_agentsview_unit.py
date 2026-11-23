@@ -1,6 +1,10 @@
 """agentsview.service, which `kb doctor --fix` sets up once a project is allowed (docs/design.md §4.1, §5): a user
 unit where a probe shows the sandbox holds, else a system unit kb stages for the user to install."""
 
+import os
+import pwd
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -137,7 +141,7 @@ def test_an_installed_system_unit_is_checked_and_its_state_asked(lab: Lab) -> No
 
     assert rows(lab.kb) == [("missing", "installed but not running")]
     assert "Run sudo systemctl enable --now agentsview.service" in steps(lab.kb)
-    assert calls(lab.kb)[-1] == "show --property=UnitFileState,ActiveState,Result agentsview.service"
+    assert calls(lab.kb)[-1] == "show --property=UnitFileState,ActiveState,Result,NeedDaemonReload agentsview.service"
 
     state(lab.kb, "system", "enabled", "enabled")
     before = len(calls(lab.kb))
@@ -273,7 +277,8 @@ def test_a_staged_system_unit_keeps_its_sudo_line_without_probing_again(lab: Lab
     [
         ("13", "it has no address but loopback to try (offline?)"),
         ("1", "systemd-run failed (exit 1)"),  # say, a systemd that doesn't know a setting
-        ("226", "systemd-run failed (exit 226)"),
+        ("12", "loopback is blocked too, which a system unit's filter would block as well"),
+        ("14", "its write in the home failed for another reason than a read-only home"),
     ],
 )
 def test_a_probe_that_cannot_tell_stages_nothing(lab: Lab, exit: str, why: str) -> None:
@@ -346,3 +351,86 @@ def test_a_masked_system_unit_is_turned_off_not_yours(lab: Lab) -> None:
     [(status, detail)] = rows(lab.kb, "--fix")
 
     assert (status, detail.split(";")[0]) == ("ok", "turned off (masked)")
+
+
+def test_a_rewrite_systemd_has_not_reloaded_is_outdated_and_fix_reloads_it(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    state(lab.kb, "user", "need-reload")  # the file is current, but a reload failed after kb wrote it
+
+    assert rows(lab.kb) == [("outdated", "systemd runs it from the unit as it was before kb rewrote it")]
+    assert rows(lab.kb, "--fix") == [("fixed", RUNNING)]
+    assert calls(lab.kb)[-2:] == ["--user enable agentsview.service", "--user restart agentsview.service"]
+    assert rows(lab.kb) == [("ok", RUNNING)]
+
+
+@pytest.mark.parametrize("exit", ["226", "200", "243"])
+def test_a_probe_systemd_could_not_set_up_needs_a_system_unit(lab: Lab, exit: str) -> None:
+    (lab.kb.home / "systemd-run").mkdir()
+    (lab.kb.home / "systemd-run" / "exit").write_text(exit)  # 226: no namespaces for a user manager
+
+    [(status, detail)] = rows(lab.kb, "--fix")
+
+    assert status == "missing"
+    assert detail.startswith("not installed: a user unit can't sandbox it here, so it needs a system unit")
+
+
+def test_moved_codex_and_claude_homes_have_their_credentials_hidden(lab: Lab, tmp_path: Path) -> None:
+    lab.kb.env["CODEX_HOME"] = str(tmp_path / "codex")
+    lab.kb.env["CLAUDE_CONFIG_DIR"] = "~/claude-moved"
+
+    lab.kb("doctor", "--fix")
+
+    text = the_unit(lab.kb).read_text()
+    assert f'InaccessiblePaths=-"{tmp_path}/codex/auth.json"\n' in text
+    assert f'InaccessiblePaths=-"{lab.kb.home}/claude-moved/.credentials.json"\n' in text
+    assert f'InaccessiblePaths=-"{lab.kb.home}/.codex/auth.json"\n' in text  # the default stays hidden too
+
+
+def test_a_unit_disabled_without_now_still_runs_and_doctor_says_how_to_stop_it(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    state(lab.kb, "user", "enabled", "disabled")
+    state(lab.kb, "user", "active", "active")
+
+    [(status, detail)] = rows(lab.kb)
+
+    assert (status, detail) == (
+        "ok",
+        "turned off (disabled), so fabricd captures no Claude Code or Codex session, but it still runs",
+    )
+    assert "Run systemctl --user stop agentsview.service, or it runs until the next reboot" in steps(lab.kb)
+
+
+def test_the_system_unit_runs_as_the_user_kb_runs_as_not_the_homes_owner(
+    lab: Lab, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_name(self: Path) -> str:
+        raise KeyError("a uid with no passwd entry")
+
+    monkeypatch.setattr(Path, "owner", no_name)
+    unenforced(lab.kb)
+    lab.kb("doctor", "--fix")
+
+    staged = (lab.kb.home / ".local" / "share" / "agent-fabric" / "agentsview.service").read_text()
+    assert f"User={pwd.getpwuid(os.getuid()).pw_name}\n" in staged
+
+
+def test_a_rewrite_where_systemd_cannot_say_whether_it_is_on_only_reloads(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    the_unit(lab.kb).write_text(the_unit(lab.kb).read_text().replace("--replace", ""))
+    state(lab.kb, "user", "cannot-show")
+    before = len(calls(lab.kb))
+
+    assert rows(lab.kb, "--fix") == [
+        ("fixed", "rewrote the unit; can't ask systemd from here whether it's on, so kb only reloaded it")
+    ]
+    assert not any("enable" in call or "restart" in call for call in calls(lab.kb)[before:])
+
+
+def test_the_probe_reads_only_a_read_only_home_as_protected(tmp_path: Path) -> None:
+    def probe(path: Path) -> int:
+        return subprocess.run([sys.executable, "-I", "-c", agentsview_unit.PROBE, str(path)], check=False).returncode
+
+    assert probe(tmp_path / "new") == 10  # writable
+    assert not (tmp_path / "new").exists()
+    (tmp_path / "left").write_text("")
+    assert probe(tmp_path / "left") == 14  # a file a killed run left: it says nothing of the home

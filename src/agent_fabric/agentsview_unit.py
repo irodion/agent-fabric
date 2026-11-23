@@ -9,15 +9,17 @@ command that installs it, then checks it like any other. A unit the user turned 
 doesn't start with kb's header is the user's own, left as it is."""
 
 import os
+import pwd
 import shlex
 import shutil
 import subprocess
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from agent_fabric.config import Config, agentsview_port
-from agent_fabric.paths import state_db, tilde, units_dir
+from agent_fabric.paths import expand, state_db, tilde, units_dir
 from agent_fabric.report import Row
 from agent_fabric.timer import HEADER, OFF, STATE_TIMEOUT, _masked, _quoted, _read
 
@@ -39,20 +41,24 @@ HIDDEN = (
     ".codex/auth.json",
     ".claude/.credentials.json",
 )  # credentials it never reads
+MOVED = (("CODEX_HOME", "auth.json"), ("CLAUDE_CONFIG_DIR", ".credentials.json"))
 RUNNING = "running sandboxed: fabricd reads Claude Code's and Codex's sessions through it"
 PROBE_TIMEOUT = 30  # seconds for the probe's transient unit
 
 # Run in a transient unit with SANDBOX. 0 where the sandbox holds; 10 where the home is writable, 11 where an address
-# other than loopback is reachable, 12 where loopback isn't, 13 where there's no other address to try. It sends
+# other than loopback is reachable, 12 where loopback isn't, 13 where there's no other address to try, 14 where the
+# write failed for another reason than a read-only home. It sends
 # nothing off the machine: the other address is the machine's own, and the UDP connect that finds it sends no packet.
 PROBE = """
 import os, socket, sys
+import errno
 try:
     os.close(os.open(sys.argv[1], os.O_CREAT | os.O_EXCL | os.O_WRONLY))
     os.unlink(sys.argv[1])
     sys.exit(10)
-except OSError:
-    pass
+except OSError as e:
+    if e.errno not in (errno.EROFS, errno.EACCES, errno.EPERM):
+        sys.exit(14)
 def reach(host):
     server = socket.socket()
     server.bind((host, 0))
@@ -89,12 +95,29 @@ def staged(env: Mapping[str, str]) -> Path:
     return state_db(env).parent / NAME
 
 
+def _user_name() -> str:
+    """The user kb runs as, whom the system unit runs agentsview as; the uid where it has no name."""
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        return str(os.getuid())
+
+
+def _hidden(env: Mapping[str, str]) -> list[Path]:
+    """The credentials it never reads: the defaults, and Codex's and Claude Code's where their homes moved."""
+    home = Path(env["HOME"])
+    paths = [home / path for path in HIDDEN]
+    for variable, name in MOVED:
+        if (moved := expand(env.get(variable) or "", env)).is_absolute():
+            paths.append(moved / name)
+    return list(dict.fromkeys(paths))
+
+
 def unit(env: Mapping[str, str], port: int, *, system: bool) -> str:
     """The unit as kb would write it now: as a system unit, run as the user. Absolute paths, as a system unit's %h
     would be root's home."""
-    home = Path(env["HOME"])
-    user = f"User={home.owner()}\n" if system else ""
-    hidden = "".join(f"InaccessiblePaths=-{_quoted(str(home / path))}\n" for path in HIDDEN)
+    user = f"User={_user_name()}\n" if system else ""
+    hidden = "".join(f"InaccessiblePaths=-{_quoted(str(path))}\n" for path in _hidden(env))
     sandbox = "".join(f"{setting}\n" for setting in SANDBOX)
     command = (
         f"{_quoted(str(binary(env)), command=True)} serve --no-browser --no-update-check --port {port} --replace"
@@ -198,6 +221,7 @@ def _probe(env: Mapping[str, str]) -> bool | str:
     if command is None:
         return NO_BUS
     probe = data_dir(env).parent / f".kb-agentsview-probe-{os.getpid()}"
+    probe.unlink(missing_ok=True)  # one a killed run left, which would fail the write for another reason
     settings = [arg for setting in (*SANDBOX, f"RuntimeMaxSec={PROBE_TIMEOUT}") for arg in ("-p", setting)]
     try:
         done = subprocess.run(
@@ -227,13 +251,24 @@ def _probe(env: Mapping[str, str]) -> bool | str:
     said = done.stderr.strip().splitlines()[-1] if done.stderr.strip() else f"exit {done.returncode}"
     if done.returncode in ANSWERS:
         return ANSWERS[done.returncode]
+    if done.returncode in SETUP_FAILED:
+        return False
     if done.returncode == 1 and "bus" in done.stderr:
         return NO_BUS
     return f"systemd-run failed ({said})"
 
 
-ANSWERS: dict[int, bool | str] = {0: True, 10: False, 11: False, 12: False}
-ANSWERS[13] = "it has no address but loopback to try (offline?)"
+ANSWERS: dict[int, bool | str] = {
+    0: True,
+    10: False,
+    11: False,
+    12: "loopback is blocked too, which a system unit's filter would block as well",
+    13: "it has no address but loopback to try (offline?)",
+    14: "its write in the home failed for another reason than a read-only home",
+}
+# systemd's own exits where it couldn't set up the unit's process (200-243, such as 226 for its namespaces): what
+# a user manager without user namespaces gives, so a user unit can't sandbox it.
+SETUP_FAILED = range(200, 244)
 
 
 def _staged_current(env: Mapping[str, str], port: int) -> bool:
@@ -274,9 +309,7 @@ def _system(env: Mapping[str, str], current: str | None, port: int | None, *, fi
         return Row("ok", "agentsview", shown, "yours: kb leaves a unit it didn't write as it is")
     if wanted and port is not None and current != unit(env, port, system=True):
         return _stage(env, port, fix=fix, status="outdated", why="outdated: it runs from an old unit")
-    journal = f"Read journalctl -u {NAME} and fix the cause; sudo systemctl restart {NAME}"
-    start = f"Run sudo systemctl enable --now {NAME}"
-    return _state(_ask(env, system=True), shown, journal=journal, start=start, wanted=wanted)
+    return _state(_ask(env, system=True), shown, SYSTEM_STEPS, wanted=wanted)
 
 
 def _user(env: Mapping[str, str], current: str | None, port: int | None, *, fix: bool, wanted: bool) -> Row:
@@ -287,13 +320,16 @@ def _user(env: Mapping[str, str], current: str | None, port: int | None, *, fix:
     if (left := _left(env, path, current)) is not None:
         return left
     asked = _ask(env, system=False)
-    if wanted and port is not None and current != unit(env, port, system=False):
+    if wanted and port is not None and (stale := _stale(current, asked, env, port)):
         if not fix:
-            return Row("outdated", "agentsview", shown, "it runs from an old unit")
-        return _write_user(env, port, off=_off(asked))
-    journal = f"Read journalctl --user -u {NAME} and fix the cause; systemctl --user restart {NAME}"
-    start = f"Run systemctl --user enable --now {NAME}"
-    row = _state(asked, shown, journal=journal, start=start, wanted=wanted)
+            return Row("outdated", "agentsview", shown, stale)
+        kept = (
+            _off(asked)
+            if asked is not None
+            else "can't ask systemd from here whether it's on, so kb only reloaded it"
+        )
+        return _write_user(env, port, off=kept)
+    row = _state(asked, shown, USER_STEPS, wanted=wanted)
     if row.status != "missing" or not fix:
         return row
     done = _run(env, "--user", "enable", "--now", NAME)
@@ -301,6 +337,16 @@ def _user(env: Mapping[str, str], current: str | None, port: int | None, *, fix:
         said = done.stderr.strip() if done else "no answer"
         return Row("problem", "agentsview", shown, f"systemctl enable failed: {said}", step=row.step)
     return Row("fixed", "agentsview", shown, RUNNING)
+
+
+def _stale(current: str | None, asked: dict[str, str] | None, env: Mapping[str, str], port: int) -> str | None:
+    """Why the user unit isn't kb's as it runs now: an old file, or a new one systemd hasn't reloaded, as after a
+    reload that failed."""
+    if current != unit(env, port, system=False):
+        return "it runs from an old unit"
+    if (asked or {}).get("NeedDaemonReload") == "yes":
+        return "systemd runs it from the unit as it was before kb rewrote it"
+    return None
 
 
 def _left(env: Mapping[str, str], path: Path, current: str | None) -> Row | None:
@@ -371,24 +417,46 @@ def _run(env: Mapping[str, str], *args: str) -> subprocess.CompletedProcess[str]
 
 def _ask(env: Mapping[str, str], *, system: bool) -> dict[str, str] | None:
     manager = () if system else ("--user",)
-    done = _run(env, *manager, "show", "--property=UnitFileState,ActiveState,Result", NAME)
+    done = _run(env, *manager, "show", "--property=UnitFileState,ActiveState,Result,NeedDaemonReload", NAME)
     if done is None or done.returncode:
         return None
     return dict(line.split("=", 1) for line in done.stdout.splitlines() if "=" in line)
 
 
-def _state(asked: dict[str, str] | None, shown: str, *, journal: str, start: str, wanted: bool) -> Row:
+@dataclass(frozen=True)
+class Steps:
+    """The user's steps for one service manager: the user's, or the system's through sudo."""
+
+    journal: str
+    start: str
+    stop: str
+
+
+USER_STEPS = Steps(
+    journal=f"Read journalctl --user -u {NAME} and fix the cause; systemctl --user restart {NAME}",
+    start=f"Run systemctl --user enable --now {NAME}",
+    stop=f"Run systemctl --user stop {NAME}, or it runs until the next reboot",
+)
+SYSTEM_STEPS = Steps(
+    journal=f"Read journalctl -u {NAME} and fix the cause; sudo systemctl restart {NAME}",
+    start=f"Run sudo systemctl enable --now {NAME}",
+    stop=f"Run sudo systemctl stop {NAME}, or it runs until the next reboot",
+)
+
+
+def _state(asked: dict[str, str] | None, shown: str, steps: Steps, *, wanted: bool) -> Row:
     """Its row from systemd's answer: `missing` only for a unit on but stopped while a project is allowed, which
     `start` starts."""
     if asked is None:
         return Row("ok", "agentsview", shown, "installed; can't ask systemd from here whether it runs")
     active, result = asked.get("ActiveState", ""), asked.get("Result", "success")
     if off := _off(asked):
-        return Row("ok", "agentsview", shown, off)
+        detail = f"{off}, but it still runs" if active == "active" else off  # disabled without --now
+        return Row("ok", "agentsview", shown, detail, step=steps.stop if active == "active" else None)
     if active == "active" or (active == "activating" and result == "success"):
         return Row("ok", "agentsview", shown, RUNNING if active == "active" else "starting")
     if not wanted:
         return Row("ok", "agentsview", shown, "installed, not running: no project is allowed, so --fix leaves it off")
     if active in ("failed", "activating") or result != "success":
-        return Row("problem", "agentsview", shown, f"stopped: it failed ({result})", step=journal)
-    return Row("missing", "agentsview", shown, "installed but not running", step=start)
+        return Row("problem", "agentsview", shown, f"stopped: it failed ({result})", step=steps.journal)
+    return Row("missing", "agentsview", shown, "installed but not running", step=steps.start)
