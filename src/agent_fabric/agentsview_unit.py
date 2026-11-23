@@ -139,10 +139,12 @@ def check(env: Mapping[str, str], config: Config | Exception, *, wanted: bool, f
     a project; while none does, an installed unit is checked but never written or started. A port kb can't read
     gives no new unit: fabricd's row says what's wrong with it."""
     user_path, system_path = units_dir(env) / NAME, SYSTEM_UNITS / NAME
+    rows, unreadable = [], False
     try:
         user_unit = _read(user_path)
-    except (OSError, UnicodeDecodeError) as e:
-        return [_unreadable(e, env)] if wanted else []
+    except (OSError, UnicodeDecodeError) as e:  # still checked: the system unit
+        rows += [_unreadable(e, env)] if wanted else []
+        user_unit, unreadable = None, True
     try:
         system_unit = _read(system_path)
     except (OSError, UnicodeDecodeError):  # kb's own is 0644: one only root reads is the user's
@@ -152,9 +154,12 @@ def check(env: Mapping[str, str], config: Config | Exception, *, wanted: bool, f
     except ValueError:
         port = None
     if system_unit is not None or system_path.is_symlink():
-        rows = [_system(env, system_unit, port, fix=fix, wanted=wanted)]
-        if user_unit is not None and user_unit.startswith(HEADER):
+        rows.append(_system(env, system_unit, port, fix=fix, wanted=wanted))
+        kbs = system_unit is not None and system_unit.startswith(HEADER) and not _masked(system_path)
+        if kbs and user_unit is not None and user_unit.startswith(HEADER):  # two of kb's, on one port
             rows.append(_leftover(env))
+        return rows
+    if unreadable:
         return rows
     if user_unit is not None or user_path.is_symlink():
         return [_user(env, user_unit, port, fix=fix, wanted=wanted)]
@@ -314,7 +319,8 @@ def _system(env: Mapping[str, str], current: str | None, port: int | None, *, fi
     if _masked(path):
         return Row("ok", "agentsview", shown, f"turned off (masked); sudo systemctl unmask {NAME} turns it back on")
     if current is None or not current.startswith(HEADER):
-        return Row("ok", "agentsview", shown, "yours: kb leaves a unit it didn't write as it is")
+        step = f"Move {shown} away with sudo, then run kb doctor --fix, for kb's own sandboxed unit"
+        return Row("ok", "agentsview", shown, "yours: kb leaves a unit it didn't write as it is", step=step)
     asked = _ask(env, system=True)
     state = _state(asked, shown, SYSTEM_STEPS, wanted=wanted)
     if wanted and port is not None and current != unit(env, port, system=True):
@@ -372,7 +378,8 @@ def _left(env: Mapping[str, str], path: Path, current: str | None) -> Row | None
     if _masked(path):
         return Row("ok", "agentsview", shown, f"turned off (masked); systemctl --user unmask {NAME} turns it back on")
     if current is None or not current.startswith(HEADER):
-        return Row("ok", "agentsview", shown, "yours: kb leaves a unit it didn't write as it is")
+        step = f"Move {shown} away and run kb doctor --fix, for kb's own sandboxed unit"
+        return Row("ok", "agentsview", shown, "yours: kb leaves a unit it didn't write as it is", step=step)
     if shutil.which("systemctl", path=env.get("PATH", "")) is None:
         return Row("ok", "agentsview", shown, "installed; no systemd here to run it")
     return None
