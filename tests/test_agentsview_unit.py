@@ -80,12 +80,13 @@ def test_where_the_sandbox_holds_fix_installs_and_starts_a_user_unit(lab: Lab) -
 
 
 def test_the_probe_runs_with_the_units_sandbox(lab: Lab) -> None:
-    lab.kb("doctor")
+    lab.kb("doctor", "--fix")
 
     probe = (lab.kb.home / "systemd-run.log").read_text()
     for setting in agentsview_unit.SANDBOX:
         assert f"-p {setting} " in probe
     assert probe.startswith("--user --wait")
+    assert f"-p RuntimeMaxSec={agentsview_unit.PROBE_TIMEOUT} " in probe  # a probe that hangs stops itself
 
 
 def test_the_user_unit_runs_the_vetted_binary_sandboxed_on_the_configured_port(lab: Lab) -> None:
@@ -110,8 +111,6 @@ def test_the_user_unit_runs_the_vetted_binary_sandboxed_on_the_configured_port(l
 def test_where_the_sandbox_does_not_hold_fix_stages_a_system_unit_and_says_how_to_install_it(lab: Lab) -> None:
     unenforced(lab.kb)
     why = "not installed: a user unit can't sandbox it here, so it needs a system unit"
-
-    assert rows(lab.kb) == [("missing", why)]
 
     [(status, detail)] = rows(lab.kb, "--fix")
 
@@ -156,7 +155,7 @@ def test_an_old_system_unit_is_outdated_and_fix_stages_the_new_one(lab: Lab) -> 
     system.write_text(staged.read_text().replace("--replace", ""))
     staged.unlink()
 
-    assert rows(lab.kb)[0][1] == "outdated: it runs from an old unit"
+    assert rows(lab.kb)[0] == ("outdated", "outdated: it runs from an old unit")
     lab.kb("doctor", "--fix")
     assert "--replace" in staged.read_text()
 
@@ -240,3 +239,110 @@ def test_a_first_install_systemd_would_not_start_is_removed_so_fix_probes_again(
         "systemctl enable failed: Access denied; removed the unit, so --fix tries again",
     )
     assert not the_unit(lab.kb).exists()
+
+
+def system_unit_installed(kb: Kb) -> Path:
+    """The staged system unit, installed as the user's sudo line would."""
+    system = agentsview_unit.SYSTEM_UNITS / "agentsview.service"
+    system.parent.mkdir(parents=True, exist_ok=True)
+    system.write_text((kb.home / ".local" / "share" / "agent-fabric" / "agentsview.service").read_text())
+    return system
+
+
+def test_a_plain_doctor_does_not_probe_and_points_at_fix(lab: Lab) -> None:
+    assert rows(lab.kb) == [("missing", "not running, so fabricd captures no Claude Code or Codex session")]
+    assert "Run kb doctor --fix, which sets it up" in steps(lab.kb)
+    assert probes(lab.kb) == 0
+
+
+def test_a_staged_system_unit_keeps_its_sudo_line_without_probing_again(lab: Lab) -> None:
+    unenforced(lab.kb)
+    lab.kb("doctor", "--fix")
+    before = probes(lab.kb)
+
+    [(status, detail)] = rows(lab.kb)
+
+    assert status == "missing"
+    assert detail.endswith("; staged at ~/.local/share/agent-fabric/agentsview.service")
+    assert any(step.startswith("Run sudo install -m 0644 ") for step in steps(lab.kb))
+    assert probes(lab.kb) == before
+
+
+@pytest.mark.parametrize(
+    ("exit", "why"),
+    [
+        ("13", "it has no address but loopback to try (offline?)"),
+        ("1", "systemd-run failed (exit 1)"),  # say, a systemd that doesn't know a setting
+        ("226", "systemd-run failed (exit 226)"),
+    ],
+)
+def test_a_probe_that_cannot_tell_stages_nothing(lab: Lab, exit: str, why: str) -> None:
+    (lab.kb.home / "systemd-run").mkdir()
+    (lab.kb.home / "systemd-run" / "exit").write_text(exit)
+
+    assert rows(lab.kb, "--fix") == [("problem", f"can't tell whether a user unit can sandbox it: {why}")]
+    assert not (lab.kb.home / ".local" / "share" / "agent-fabric" / "agentsview.service").exists()
+    assert not the_unit(lab.kb).exists()
+
+
+def test_an_outdated_user_unit_the_user_disabled_is_rewritten_but_stays_off(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    state(lab.kb, "user", "enabled", "disabled")
+    state(lab.kb, "user", "stopped")
+    the_unit(lab.kb).write_text(the_unit(lab.kb).read_text().replace("--replace", ""))
+    before = len(calls(lab.kb))
+
+    [(status, detail)] = rows(lab.kb, "--fix")
+
+    assert (status, detail) == (
+        "fixed",
+        "rewrote the unit; turned off (disabled), so fabricd captures no Claude Code or Codex session",
+    )
+    assert not any("enable" in call or "restart" in call for call in calls(lab.kb)[before:])
+    assert "--replace" in the_unit(lab.kb).read_text()
+
+
+def test_with_no_project_allowed_an_installed_unit_is_checked_but_not_written_or_started(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    (lab.kb.home / ".config" / "agent-fabric" / "config.toml").write_text("")
+    the_unit(lab.kb).write_text(old := the_unit(lab.kb).read_text().replace("--replace", ""))
+    state(lab.kb, "user", "stopped")
+    before = len(calls(lab.kb))
+
+    assert rows(lab.kb, "--fix") == [("ok", "installed, not running: no project is allowed, so --fix leaves it off")]
+    assert the_unit(lab.kb).read_text() == old
+    assert all(" show " in f" {call} " for call in calls(lab.kb)[before:])
+
+
+def test_a_user_unit_left_beside_the_system_unit_is_a_problem(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")  # a user unit, while the sandbox held
+    unenforced(lab.kb)
+    the_unit(lab.kb).rename(the_unit(lab.kb).with_suffix(".kept"))
+    lab.kb("doctor", "--fix")  # stages the system unit
+    the_unit(lab.kb).with_suffix(".kept").rename(the_unit(lab.kb))
+    system_unit_installed(lab.kb)
+
+    assert rows(lab.kb)[1] == (
+        "problem",
+        "a user unit of kb's beside the system unit: the two take the port from each other",
+    )
+    assert any(
+        step.startswith("Run systemctl --user disable --now agentsview.service && rm ") for step in steps(lab.kb)
+    )
+
+
+def test_a_bad_idle_setting_does_not_stop_agentsview_which_needs_only_the_port(lab: Lab) -> None:
+    config = lab.kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.write_text(config.read_text() + "\n[sessions]\nidle_minutes = 0\n")
+
+    assert rows(lab.kb, "--fix") == [("fixed", RUNNING)]
+
+
+def test_a_masked_system_unit_is_turned_off_not_yours(lab: Lab) -> None:
+    system = agentsview_unit.SYSTEM_UNITS / "agentsview.service"
+    system.parent.mkdir(parents=True)
+    system.symlink_to("/dev/null")
+
+    [(status, detail)] = rows(lab.kb, "--fix")
+
+    assert (status, detail.split(";")[0]) == ("ok", "turned off (masked)")
