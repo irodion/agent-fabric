@@ -235,7 +235,7 @@ def test_a_second_fabricd_on_one_data_folder_doesnt_start(
     with open(folder / "fabricd.lock", "a") as held:
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-        assert start(env, feeds=lambda env, port: pytest.fail("started")) == 1
+        assert start(env, feeds=lambda env, port: pytest.fail("started")) == 3
 
     assert capsys.readouterr().err == "fabricd: another fabricd is running on ~/.local/share/agent-fabric\n"
     assert not state_db(env).exists()

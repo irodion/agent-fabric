@@ -9,7 +9,7 @@ import shutil
 from collections.abc import Mapping
 from pathlib import Path
 
-from agent_fabric.config import Config, fabricd_settings
+from agent_fabric.config import BAD_CONFIG, LOCKED, Config, fabricd_settings
 from agent_fabric.paths import config_file, expand, tilde, units_dir, uv_tool_dir
 from agent_fabric.report import Row
 from agent_fabric.timer import (
@@ -29,7 +29,6 @@ NAME = "fabricd.service"
 TOOLS = ("gitleaks", "git")  # what a digest's write runs (§4.5), in the order PATH searches them
 HOMES = ("COPILOT_HOME",)  # where Copilot CLI's sessions are, when moved
 RUNNING = "running: it follows the agents' sessions and writes their digests"
-CONFIG = 2  # fabricd's exit for a config it can't read, which restarting won't fix
 
 
 def installed_fabricd(env: Mapping[str, str]) -> Path:
@@ -47,7 +46,8 @@ def _path(env: Mapping[str, str]) -> str:
 def unit(env: Mapping[str, str]) -> str:
     """The unit as kb would write it now. A stop signals fabricd alone (`KillMode=mixed`): it waits for the step under
     way, and the git or gitleaks run of that step mustn't be killed with it (§5). A config it can't read stops it
-    until the user fixes it and `kb doctor --fix` starts it again; any other failure restarts it."""
+    until the user fixes it and `kb doctor --fix` starts it again, and so does another fabricd on its data folder; any
+    other failure restarts it."""
     named = [(name, env.get(name) or "") for name in CARRIED] + [
         (name, str(expand(env.get(name) or "", env)))
         for name in HOMES  # `~` expanded, as Copilot's reader does
@@ -60,7 +60,7 @@ def unit(env: Mapping[str, str]) -> str:
         f"{HEADER}[Unit]\nDescription=fabricd: digests of the agents' sessions\n\n"
         f"[Service]\nType=exec\n{environment}"
         f"ExecStart={_quoted(str(installed_fabricd(env)), command=True)}\n"
-        f"Restart=on-failure\nRestartSec=30\nRestartPreventExitStatus={CONFIG}\nKillMode=mixed\n\n"
+        f"Restart=on-failure\nRestartSec=30\nRestartPreventExitStatus={BAD_CONFIG} {LOCKED}\nKillMode=mixed\n\n"
         "[Install]\nWantedBy=default.target\n"
     )
 
@@ -74,9 +74,7 @@ def check(env: Mapping[str, str], config: Config | Exception, *, wanted: bool, f
     try:
         current = _read(path)
     except (OSError, UnicodeDecodeError) as e:
-        reason = e.strerror if isinstance(e, OSError) and e.strerror else e
-        step = f"Look at {shown}: kb checks and rewrites it once it can read it"
-        return [Row("problem", "fabricd", shown, f"can't read the unit ({reason})", step=step)]
+        return [_unreadable(e, env, path)] if wanted else []  # a notes-only machine has no unit to read
     if not wanted and current is None and not path.is_symlink():
         return []
     if (left := _left(env, path, current, config)) is not None:
@@ -86,8 +84,15 @@ def check(env: Mapping[str, str], config: Config | Exception, *, wanted: bool, f
         detail = "no systemd here, so fabricd runs only when you start it"
         return [Row("ok", "fabricd", shown, detail, step="Run fabricd in a terminal of its own")]
     if not wanted:  # checked, never written
-        return [_state(command, env, shown, fix=False, wanted=False)]
+        return [_state(command, env, path, fix=False, wanted=False)]
     return [_wanted(command, env, path, current, fix=fix)]
+
+
+def _unreadable(e: Exception, env: Mapping[str, str], path: Path) -> Row:
+    shown = tilde(path, env)
+    reason = e.strerror if isinstance(e, OSError) and e.strerror else e
+    step = f"Look at {shown}: kb checks and rewrites it once it can read it"
+    return Row("problem", "fabricd", shown, f"can't read the unit ({reason})", step=step)
 
 
 def _left(env: Mapping[str, str], path: Path, current: str | None, config: Config | Exception) -> Row | None:
@@ -123,10 +128,15 @@ def _wanted(command: str, env: Mapping[str, str], path: Path, current: str | Non
         detail = f"the unit would run {tilde(installed_fabricd(env), env)}, which isn't there"
         return Row("problem", "fabricd", shown, detail, step="Run scripts/install.sh, which installs that fabricd")
     if (stale := _stale(current, env)) is None:
-        return _state(command, env, shown, fix=fix, wanted=True)
+        return _state(command, env, path, fix=fix, wanted=True)
     if missing := [tool for tool in TOOLS if not shutil.which(tool, path=env.get("PATH", ""))]:
-        detail = f"not installed: it needs {' and '.join(missing)} on PATH"
-        return Row("missing", "fabricd", shown, detail, step=f"Install {missing[0]}, then run kb doctor --fix")
+        step = f"Install {missing[0]}, then run kb doctor --fix"
+        if current is None:
+            return Row(
+                "missing", "fabricd", shown, f"not installed: it needs {' and '.join(missing)} on PATH", step=step
+            )
+        detail = f"{stale}, which kb rewrites once {' and '.join(missing)} is on PATH"
+        return Row("outdated", "fabricd", shown, detail, step=step)
     if not fix:
         return Row("outdated" if current is not None else "missing", "fabricd", shown, stale)
     return _write(command, env, path, installed=current is not None)
@@ -159,7 +169,12 @@ def _write(command: str, env: Mapping[str, str], path: Path, *, installed: bool)
         temporary.unlink(missing_ok=True)
         step = f"Make {tilde(path.parent, env)} writable, then run kb doctor --fix again"
         return Row("problem", "fabricd", shown, f"can't write it ({e.strerror or e})", step=step)
-    steps = [("daemon-reload",)] if off else [("daemon-reload",), ("enable", NAME), ("restart", NAME)]
+    if off:
+        steps: list[tuple[str, ...]] = [("daemon-reload",)]
+    elif installed:
+        steps = [("daemon-reload",), ("enable", NAME), ("restart", NAME)]
+    else:  # in one step, so that a failure leaves it neither enabled nor running
+        steps = [("daemon-reload",), ("enable", "--now", NAME)]
     for args in steps:
         done = _systemctl(command, env, *args)
         if done is None or done.returncode:
@@ -179,7 +194,9 @@ _START = f"Run systemctl --user daemon-reload && systemctl --user enable --now {
 
 def _ask(command: str, env: Mapping[str, str]) -> dict[str, str] | None:
     """The unit's state and its last result; None where systemd can't be asked, as from an agent's sandbox."""
-    done = _systemctl(command, env, "show", "--property=UnitFileState,ActiveState,Result,ExecMainStatus", NAME)
+    done = _systemctl(
+        command, env, "show", "--property=UnitFileState,ActiveState,Result,ExecMainStatus,NeedDaemonReload", NAME
+    )
     if done is None or done.returncode:
         return None
     return dict(line.split("=", 1) for line in done.stdout.splitlines() if "=" in line)
@@ -198,13 +215,17 @@ def _turned_off(state: str) -> str:
     return f"turned off ({state}); systemctl --user enable --now {NAME} turns it back on"
 
 
-def _state(command: str, env: Mapping[str, str], shown: str, *, fix: bool, wanted: bool) -> Row:
+def _state(command: str, env: Mapping[str, str], path: Path, *, fix: bool, wanted: bool) -> Row:
     """Whether systemd has fabricd on and running, and with `fix` starts it if it should run. One that failed is left
     for the user to read why, since started again it would fail again, unless it stopped on a config that now reads.
-    While no project is allowed, kb doesn't start it."""
+    While no project is allowed, kb doesn't start it. A unit systemd hasn't reloaded since kb wrote it, as when the
+    reload failed, is written and reloaded again."""
+    shown = tilde(path, env)
     asked = _ask(command, env)
     if asked is None:
         return Row("ok", "fabricd", shown, "installed; can't ask systemd from here whether it runs")
+    if wanted and asked.get("NeedDaemonReload") == "yes":
+        return _reloaded(command, env, path, fix=fix)
     if (settled := _settled(asked, shown, wanted=wanted)) is not None:
         return settled
     detail = (
@@ -221,9 +242,17 @@ def _state(command: str, env: Mapping[str, str], shown: str, *, fix: bool, wante
     return Row("fixed", "fabricd", shown, RUNNING)
 
 
+def _reloaded(command: str, env: Mapping[str, str], path: Path, *, fix: bool) -> Row:
+    if not fix:
+        return Row(
+            "outdated", "fabricd", tilde(path, env), "systemd runs it from the unit as it was before kb rewrote it"
+        )
+    return _write(command, env, path, installed=True)
+
+
 def _config_failed(asked: dict[str, str]) -> bool:
     """Whether it stopped on a config it couldn't read (exit 2), which systemd doesn't restart."""
-    return asked.get("Result", "success") != "success" and asked.get("ExecMainStatus") == str(CONFIG)
+    return asked.get("Result", "success") != "success" and asked.get("ExecMainStatus") == str(BAD_CONFIG)
 
 
 def _settled(asked: dict[str, str], shown: str, *, wanted: bool) -> Row | None:
@@ -234,13 +263,12 @@ def _settled(asked: dict[str, str], shown: str, *, wanted: bool) -> Row | None:
         return _kept_off(off, active, shown)
     if active == "activating":  # starting, or waiting out RestartSec after a failure
         return _activating(result, shown)
-    if (active == "failed" or result != "success") and not _config_failed(asked):
-        detail = f"stopped: it failed ({result if result != 'success' else active})"
-        return Row("problem", "fabricd", shown, detail, step=f"{_JOURNAL}; systemctl --user restart {NAME}")
     if (asked.get("UnitFileState"), active) == ("enabled", "active"):
         return Row("ok", "fabricd", shown, RUNNING)
-    if not wanted:
+    if not wanted:  # stopped, failed or not, as kb would leave it
         return Row("ok", "fabricd", shown, "installed, not running: no project is allowed, so --fix leaves it off")
+    if (active == "failed" or result != "success") and not _config_failed(asked):
+        return _failed(asked, shown)
     return None
 
 
@@ -252,6 +280,16 @@ def _kept_off(off: str, active: str, shown: str) -> Row:
         step = f"Run systemctl --user stop {NAME}, or it runs until the next reboot"
         return Row("ok", "fabricd", shown, f"{off}, but it still runs", step=step)
     return Row("ok", "fabricd", shown, off)
+
+
+def _failed(asked: dict[str, str], shown: str) -> Row:
+    restart = f"systemctl --user restart {NAME}"
+    if asked.get("ExecMainStatus") == str(LOCKED):
+        detail = "stopped: another fabricd runs on its data folder"
+        return Row("problem", "fabricd", shown, detail, step=f"Stop the other fabricd, then {restart}")
+    result = asked.get("Result", "success")
+    detail = f"stopped: it failed ({result if result != 'success' else asked.get('ActiveState', '')})"
+    return Row("problem", "fabricd", shown, detail, step=f"{_JOURNAL}; {restart}")
 
 
 def _activating(result: str, shown: str) -> Row:

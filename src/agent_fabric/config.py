@@ -192,6 +192,10 @@ IDLE = timedelta(minutes=30)  # how long a session is quiet before it finalizes 
 MAX_IDLE_MINUTES = 7 * 24 * 60  # a week: longer is surely a mistake, and far longer can't be a timedelta
 
 
+BAD_CONFIG = 2  # fabricd's exit for a config it can't read, which a restart won't fix
+LOCKED = 3  # fabricd's exit when another holds its data folder, which a restart won't fix either
+
+
 @dataclass(frozen=True)
 class FabricdSettings:
     """fabricd's settings (`[agentsview] port`, `[sessions] idle_minutes`), here so that `kb doctor` can check them
