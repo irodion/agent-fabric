@@ -316,7 +316,9 @@ def check(
     units, and so does every root while the config can't be read (`known` false)."""
     folder = units_dir(env)
     command = shutil.which("systemctl", path=env.get("PATH", ""))
-    old = [name for name in OLD if (folder / name).exists() or (folder / name).is_symlink()]
+    # lexists: a link too, even a broken one, and False where the folder can't be read, which Path.exists raises on
+    # before Python 3.14; each unit's own row then says what kb can't read.
+    old = [name for name in OLD if os.path.lexists(folder / name)]
     gone = _instances(folder) - {_instance(workspace) for workspace in registered} if known else set()
     if command is None:
         if old or any(_wanted(env, unit) for unit in present) or _instances(folder):
