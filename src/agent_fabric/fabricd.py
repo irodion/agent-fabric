@@ -25,48 +25,18 @@ import sqlite3
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, closing
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import NoReturn
 
 from agent_fabric import digester, tracker
 from agent_fabric.capture import AgentsviewSource
-from agent_fabric.config import Config, read_config
+from agent_fabric.config import fabricd_settings, read_config
 from agent_fabric.copilot import AGENT as COPILOT
 from agent_fabric.copilot import CopilotSource
 from agent_fabric.paths import config_file, state_db, tilde
-from agent_fabric.tracker import IDLE, POLL, TURN_QUIET, Change, Feed, Tracker
+from agent_fabric.tracker import POLL, TURN_QUIET, Change, Feed, Tracker
 
 log = logging.getLogger(__name__)
-
-PORT = 8080
-MAX_IDLE_MINUTES = 7 * 24 * 60  # a week: longer is surely a mistake, and far longer can't be a timedelta
-
-
-@dataclass(frozen=True)
-class Settings:
-    port: int = PORT
-    idle: timedelta = IDLE
-
-
-def settings(config: Config) -> Settings:
-    """fabricd's settings from the config, each its default where it isn't set. ValueError where one is wrong."""
-    port = _table(config, "agentsview").get("port", PORT)
-    if type(port) is not int or not 0 < port < 65536:
-        raise ValueError(f"[agentsview] port is a port number, not {port!r}")
-    minutes = _table(config, "sessions").get("idle_minutes", IDLE // timedelta(minutes=1))
-    if type(minutes) is not int or not 0 < minutes <= MAX_IDLE_MINUTES:
-        raise ValueError(
-            f"[sessions] idle_minutes is a whole number of minutes from 1 to {MAX_IDLE_MINUTES}, not {minutes!r}"
-        )
-    return Settings(port, timedelta(minutes=minutes))
-
-
-def _table(config: Config, name: str) -> dict[str, object]:
-    found = config.data.get(name, {})
-    if not isinstance(found, dict):
-        raise ValueError(f"[{name}] is not a table")
-    return found
 
 
 def capture_feeds(env: Mapping[str, str], port: int) -> list[Feed]:
@@ -116,7 +86,7 @@ def start(
     taken, 2 if the config can't be read. `feeds` is called once for the tracker and once for the digester, so that
     neither uses the other's sources from its worker thread."""
     try:
-        chosen = settings(read_config(env))
+        chosen = fabricd_settings(read_config(env))
     except (OSError, ValueError) as error:
         print(f"fabricd: {tilde(config_file(env), env)}: {error}", file=sys.stderr)
         return 2

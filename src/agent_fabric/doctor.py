@@ -375,7 +375,7 @@ def doctor(
             else []
         ),
         *timer.check(env, spaces.registered, ingest_units, fix=fix, known=spaces.known),
-        *fabricd_unit.check(env, wanted=any(unit.allowed for unit in ingest_units), fix=fix),
+        *fabricd_unit.check(env, spaces.config, wanted=any(unit.allowed for unit in ingest_units), fix=fix),
     ]
     rows += [row for workspace in workspaces for row in _wiki(env, now, workspace)]
     return (0 if all(row.status in ("ok", "fixed") for row in rows) else 1), render(rows, fix=fix)

@@ -25,10 +25,10 @@ from test_tracker import SECOND, T0, Source, feed, turn
 
 from agent_fabric import digester
 from agent_fabric.capture import AgentsviewSource, SessionMeta
-from agent_fabric.config import Config
+from agent_fabric.config import Config, FabricdSettings, fabricd_settings
 from agent_fabric.copilot import CopilotSource
 from agent_fabric.digester import Digester
-from agent_fabric.fabricd import Settings, capture_feeds, serve, settings, start
+from agent_fabric.fabricd import capture_feeds, serve, start
 from agent_fabric.paths import local_dir, state_db
 from agent_fabric.tracker import IDLE, Feed, Tracker, connect
 
@@ -177,8 +177,8 @@ def test_a_loop_that_fails_stops_the_other(
 
 
 def test_settings_default_to_agentsviews_port_and_a_30_minute_timeout(env: dict[str, str]) -> None:
-    assert settings(Config.parse("", env)) == Settings(8080, IDLE)
-    chosen = settings(Config.parse("[agentsview]\nport = 8123\n[sessions]\nidle_minutes = 45\n", env))
+    assert fabricd_settings(Config.parse("", env)) == FabricdSettings(8080, IDLE)
+    chosen = fabricd_settings(Config.parse("[agentsview]\nport = 8123\n[sessions]\nidle_minutes = 45\n", env))
     assert (chosen.port, chosen.idle.total_seconds()) == (8123, 45 * 60)
 
 
@@ -197,7 +197,7 @@ def test_settings_default_to_agentsviews_port_and_a_30_minute_timeout(env: dict[
 )
 def test_a_wrong_setting_is_refused(env: dict[str, str], text: str, message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        settings(Config.parse(text, env))
+        fabricd_settings(Config.parse(text, env))
 
 
 def test_each_agent_is_read_through_one_source(env: dict[str, str]) -> None:
