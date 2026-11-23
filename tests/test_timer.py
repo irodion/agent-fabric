@@ -1,5 +1,7 @@
 """fabric-ingest@default.timer, which `kb doctor --fix` installs and `kb doctor` checks (docs/design.md §5)."""
 
+import errno
+import os
 from pathlib import Path
 from typing import Any
 
@@ -191,9 +193,22 @@ def test_a_unit_kb_cannot_read_is_a_problem_not_a_crash(lab: Lab) -> None:
     assert any(step.startswith("Look at ~/.config/systemd/user/fabric-ingest@default.*") for step in steps(lab.kb))
 
 
+def _exists_as_in_313(self: Path, *, follow_symlinks: bool = True) -> bool:
+    """Path.exists before Python 3.14: only a missing path reads as False, and a folder kb can't search raises."""
+    try:
+        os.stat(self, follow_symlinks=follow_symlinks)
+    except OSError as e:
+        if e.errno not in (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP):
+            raise
+        return False
+    return True
+
+
 @pytest.mark.parametrize("allowed", [True, False])
-def test_a_units_folder_kb_cannot_read_is_not_a_crash(lab: Lab, allowed: bool) -> None:
-    # Python 3.13's Path.exists raises PermissionError here, where 3.14's says False.
+def test_a_units_folder_kb_cannot_read_is_not_a_crash(
+    lab: Lab, allowed: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "exists", _exists_as_in_313)  # so the test shows the crash on any Python
     if not allowed:
         (lab.kb.home / ".config" / "agent-fabric" / "config.toml").write_text("")
     folder = lab.kb.home / UNITS
