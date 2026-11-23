@@ -602,3 +602,46 @@ def test_a_unit_folder_that_turns_out_read_only_is_a_problem_not_a_crash(
     written = {row["check"]: row["detail"] for row in checks if row["check"] in ("timer", "fabricd", "agentsview")}
     assert set(written) == {"timer", "fabricd", "agentsview"}
     assert all(detail == "can't write it (Read-only file system)" for detail in written.values())
+
+
+@pytest.mark.parametrize("system", ["masked", "yours"])
+def test_a_user_unit_beside_a_system_unit_that_isnt_kbs_is_no_conflict(lab: Lab, system: str) -> None:
+    lab.kb("doctor", "--fix")  # kb's user unit
+    path = agentsview_unit.SYSTEM_UNITS / "agentsview.service"
+    path.parent.mkdir(parents=True)
+    if system == "masked":
+        path.symlink_to("/dev/null")
+    else:
+        path.write_text("[Service]\nExecStart=/opt/agentsview serve\n")
+
+    assert [status for status, _ in rows(lab.kb)] == ["ok"]
+    assert not any("disable --now" in step for step in steps(lab.kb))
+
+
+def test_a_unit_kb_did_not_write_says_how_to_get_kbs(lab: Lab) -> None:
+    (lab.kb.home / UNITS).mkdir(parents=True)
+    the_unit(lab.kb).write_text("[Service]\nExecStart=/opt/agentsview serve\n")
+    system = agentsview_unit.SYSTEM_UNITS / "agentsview.service"
+
+    assert (
+        "Move ~/.config/systemd/user/agentsview.service away and run kb doctor --fix, for kb's own sandboxed unit"
+        in steps(lab.kb)
+    )
+
+    system.parent.mkdir(parents=True)
+    system.write_text("[Service]\nExecStart=/opt/agentsview serve\n")
+    assert f"Move {system} away with sudo, then run kb doctor --fix, for kb's own sandboxed unit" in steps(lab.kb)
+
+
+def test_an_unreadable_user_unit_still_has_the_system_unit_checked(lab: Lab) -> None:
+    unenforced(lab.kb)
+    lab.kb("doctor", "--fix")
+    system_unit_installed(lab.kb)
+    state(lab.kb, "system", "enabled", "enabled")
+    state(lab.kb, "system", "active", "failed")
+    state(lab.kb, "system", "result", "exit-code")
+    (lab.kb.home / UNITS).mkdir(parents=True)
+    the_unit(lab.kb).write_bytes(b"\xff\xfe")
+
+    assert [status for status, _ in rows(lab.kb)] == ["problem", "problem"]
+    assert ("problem", "stopped: it failed (exit-code)") in rows(lab.kb)
