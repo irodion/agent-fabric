@@ -10,7 +10,7 @@ from datetime import date, datetime
 from importlib.resources import files
 from pathlib import Path
 
-from agent_fabric import config, fabricd_unit, hookfiles, timer
+from agent_fabric import agentsview_unit, config, fabricd_unit, hookfiles, timer
 from agent_fabric.backends import not_ours
 from agent_fabric.config import Config, read_config
 from agent_fabric.lint import findings, summary
@@ -375,6 +375,7 @@ def doctor(
             else []
         ),
         *timer.check(env, spaces.registered, ingest_units, fix=fix, known=spaces.known),
+        *agentsview_unit.check(env, spaces.config, wanted=any(unit.allowed for unit in ingest_units), fix=fix),
         *fabricd_unit.check(env, spaces.config, wanted=any(unit.allowed for unit in ingest_units), fix=fix),
     ]
     rows += [row for workspace in workspaces for row in _wiki(env, now, workspace)]

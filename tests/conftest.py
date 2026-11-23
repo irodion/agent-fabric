@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_fabric import agentsview_unit
 from agent_fabric.backends import Backend, Question
 from agent_fabric.cli import Result, run_in
 from agent_fabric.context import Context
@@ -53,6 +54,26 @@ if [ -e "$state/no-bus" ]; then
   exit 1
 fi
 case "$*" in
+  *" agentsview.service")
+    # --user first for the user's manager, none for the system's
+    if [ "$1" = --user ]; then state="$state/agentsview-user"; else state="$state/agentsview-system"; fi
+    mkdir -p "$state"
+    case "$*" in
+      *"show --property=UnitFileState,ActiveState,Result agentsview.service")
+        enabled=$(cat "$state/enabled" 2>/dev/null)
+        active=inactive
+        [ "$enabled" = enabled ] && [ ! -e "$state/stopped" ] && active=active
+        [ -e "$state/active" ] && active=$(cat "$state/active")
+        result=$(cat "$state/result" 2>/dev/null || echo success)
+        printf 'ActiveState=%s\nUnitFileState=%s\nResult=%s\n' "$active" "$enabled" "$result" ;;
+      *"enable agentsview.service" | *"enable --now agentsview.service")
+        [ -e "$state/cannot-enable" ] && { echo 'Access denied' >&2; exit 1; }
+        printf enabled > "$state/enabled"
+        (cd "$state" && rm -f stopped active result) ;;
+      *"restart agentsview.service") (cd "$state" && rm -f stopped active result) ;;
+      *) echo "unexpected: $*" >&2; exit 2 ;;
+    esac
+    exit 0 ;;
   *" fabricd.service")
     state="$state/fabricd"
     mkdir -p "$state"
@@ -97,6 +118,18 @@ esac
 """
 
 
+# systemd-run for agentsview's probe: as if the sandbox held, unless $HOME/systemd-run/exit holds another exit.
+SYSTEMD_RUN = """#!/bin/sh
+PATH=/usr/bin:/bin
+echo "$*" >> "$HOME/systemd-run.log"
+if [ -e "$HOME/systemctl/no-bus" ]; then
+  echo 'Failed to connect to user scope bus via local transport: Operation not permitted' >&2
+  exit 1
+fi
+exit "$(cat "$HOME/systemd-run/exit" 2>/dev/null || echo 0)"
+"""
+
+
 def a_stub(folder: Path, name: str, script: str) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / name
@@ -123,7 +156,9 @@ class Kb:
 
 
 @pytest.fixture
-def kb(tmp_path: Path) -> Kb:
+def kb(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Kb:
+    # The system's units folder, which kb only reads, in the test's own tmp_path, so a unit there can't leak in.
+    monkeypatch.setattr(agentsview_unit, "SYSTEM_UNITS", tmp_path / "etc" / "systemd" / "system")
     home = tmp_path / "home"
     cwd = home / "code" / "scratch"
     cwd.mkdir(parents=True)
@@ -206,6 +241,7 @@ def lab(kb: Kb, tmp_path: Path) -> Lab:
     # For `kb doctor`, whatever codex this machine has: in ingest, the fake model answers instead.
     a_stub(stubs, "codex", "#!/bin/sh\nexit 1\n")
     a_stub(stubs, "systemctl", SYSTEMCTL)
+    a_stub(stubs, "systemd-run", SYSTEMD_RUN)
     kb.env.update(
         PATH=f"{stubs}:{os.environ['PATH']}",
         GIT_AUTHOR_NAME="Test",
