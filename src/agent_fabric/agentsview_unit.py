@@ -8,6 +8,7 @@ unit has to be a system unit with `User=`, which needs root once: kb stages it i
 command that installs it, then checks it like any other. A unit the user turned off stays off, and a unit that
 doesn't start with kb's header is the user's own, left as it is."""
 
+import contextlib
 import os
 import pwd
 import shlex
@@ -190,7 +191,7 @@ def _new(env: Mapping[str, str], port: int, *, fix: bool) -> Row:
     if enforced is True:
         return _write_user(env, port, off=None)
     if enforced is False:
-        return _stage(env, port, fix=True, status="missing", why=NEEDS_SYSTEM)
+        return _stage(env, port, ("missing", NEEDS_SYSTEM), fix=True)
     if enforced == NO_BUS:
         return Row("ok", "agentsview", shown, "can't ask systemd from here whether it can sandbox agentsview")
     step = "Run kb doctor --fix again once that's settled"
@@ -212,7 +213,7 @@ def _unprobed(env: Mapping[str, str], port: int, *, fix: bool) -> Row | None:
     if fix:
         return None
     if _staged_current(env, port):  # an earlier --fix's verdict, waiting for the user's sudo
-        return _stage(env, port, fix=False, status="missing", why=NEEDS_SYSTEM)
+        return _stage(env, port, ("missing", NEEDS_SYSTEM), fix=False)
     detail = "not running, so fabricd captures no Claude Code or Codex session"
     return Row("missing", "agentsview", shown, detail, step="Run kb doctor --fix, which sets it up")
 
@@ -229,14 +230,24 @@ def _probe(env: Mapping[str, str]) -> bool | str:
     if command is None:
         return "systemd-run isn't on PATH"
     probe = data_dir(env).parent / f".kb-agentsview-probe-{os.getpid()}"
-    probe.unlink(missing_ok=True)  # one a killed run left, which would fail the write for another reason
+    try:  # one a killed run left, which would fail the write for another reason
+        _remove(probe)
+    except OSError as e:
+        return f"it can't remove {tilde(probe, env)} ({e.strerror or e})"
     try:
         sandboxed = _transient(command, env, SANDBOX, "sandbox", str(probe))
     finally:
-        probe.unlink(missing_ok=True)  # where the home was writable after all
+        with contextlib.suppress(OSError):
+            _remove(probe)  # where the home was writable after all
     if sandboxed is not True:
         return sandboxed
     return _transient(command, env, ("IPAddressDeny=any",), "filter")
+
+
+def _remove(path: Path) -> None:
+    """Only a file that's there: in a read-only home, as an agent's sandbox has, unlink fails even on none."""
+    if os.path.lexists(path):
+        path.unlink()
 
 
 def _transient(command: str, env: Mapping[str, str], settings: Sequence[str], *args: str) -> bool | str:
@@ -274,9 +285,11 @@ def _staged_current(env: Mapping[str, str], port: int) -> bool:
         return False
 
 
-def _stage(env: Mapping[str, str], port: int, *, fix: bool, status: str, why: str) -> Row:
+def _stage(env: Mapping[str, str], port: int, said: tuple[str, str], *, fix: bool, keep_off: bool = False) -> Row:
     """The system unit, written where the user can install it from, with the command that does: absolute paths, as
-    it runs in an administrator's shell."""
+    it runs in an administrator's shell. `said`: the row's status and detail. `keep_off`: a unit the user turned
+    off, or one whose state kb can't ask, which the command only installs and reloads."""
+    status, why = said
     shown = str(SYSTEM_UNITS / NAME)
     if fix:
         try:
@@ -288,10 +301,9 @@ def _stage(env: Mapping[str, str], port: int, *, fix: bool, status: str, why: st
             return Row("problem", "agentsview", shown, f"can't stage the unit ({e.strerror or e})", step=step)
     elif not _staged_current(env, port):
         return Row(status, "agentsview", shown, why, step="Run kb doctor --fix, which stages the unit to install")
-    install = (
-        f"sudo install -m 0644 {shlex.quote(str(staged(env)))} {shown} && sudo systemctl daemon-reload && "
-        f"sudo systemctl enable {NAME} && sudo systemctl restart {NAME}"
-    )
+    install = f"sudo install -m 0644 {shlex.quote(str(staged(env)))} {shown} && sudo systemctl daemon-reload"
+    if not keep_off:
+        install += f" && sudo systemctl enable {NAME} && sudo systemctl restart {NAME}"
     return Row(status, "agentsview", shown, f"{why}; staged at {tilde(staged(env), env)}", step=f"Run {install}")
 
 
@@ -307,7 +319,7 @@ def _system(env: Mapping[str, str], current: str | None, port: int | None, *, fi
     state = _state(asked, shown, SYSTEM_STEPS, wanted=wanted)
     if wanted and port is not None and current != unit(env, port, system=True):
         why = f"outdated: it runs from an old unit; {state.detail}"
-        return _stage(env, port, fix=fix, status="outdated", why=why)
+        return _stage(env, port, ("outdated", why), fix=fix, keep_off=asked is None or _off(asked) is not None)
     if (asked or {}).get("NeedDaemonReload") == "yes":
         step = f"Run sudo systemctl daemon-reload && sudo systemctl restart {NAME}"
         detail = "systemd runs it from the unit as it was before it was installed"

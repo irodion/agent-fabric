@@ -524,3 +524,46 @@ def test_a_system_unit_systemd_has_not_reloaded_is_outdated(lab: Lab) -> None:
 
     assert rows(lab.kb) == [("outdated", "systemd runs it from the unit as it was before it was installed")]
     assert "Run sudo systemctl daemon-reload && sudo systemctl restart agentsview.service" in steps(lab.kb)
+
+
+def test_an_outdated_system_unit_the_user_disabled_is_only_installed_and_reloaded(lab: Lab) -> None:
+    unenforced(lab.kb)
+    lab.kb("doctor", "--fix")
+    system = system_unit_installed(lab.kb)
+    system.write_text(system.read_text().replace("--replace", ""))
+    state(lab.kb, "system", "enabled", "disabled")
+
+    [step] = [step for step in steps(lab.kb, "--fix") if step.startswith("Run sudo install")]
+
+    assert step.endswith("&& sudo systemctl daemon-reload")
+
+
+def unlink_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """unlink as in a read-only home, such as an agent's sandbox: it fails even where there's no file."""
+
+    def read_only(self: Path, missing_ok: bool = False) -> None:
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(Path, "unlink", read_only)
+
+
+def test_a_read_only_home_without_a_leftover_probe_file_still_probes(
+    lab: Lab, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unlink_fails(monkeypatch)
+
+    assert rows(lab.kb, "--fix") == [("fixed", RUNNING)]
+
+
+def test_a_leftover_probe_file_kb_cannot_remove_cannot_tell(lab: Lab, monkeypatch: pytest.MonkeyPatch) -> None:
+    (lab.kb.home / f".kb-agentsview-probe-{os.getpid()}").write_text("")
+    unlink_fails(monkeypatch)
+
+    assert rows(lab.kb, "--fix") == [
+        (
+            "problem",
+            "can't tell whether a user unit can sandbox it: it can't remove "
+            f"~/.kb-agentsview-probe-{os.getpid()} (Read-only file system)",
+        )
+    ]
+    assert probes(lab.kb) == 0
