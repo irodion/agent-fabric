@@ -317,7 +317,7 @@ def check(
     folder = units_dir(env)
     command = shutil.which("systemctl", path=env.get("PATH", ""))
     # lexists: a link too, even a broken one, and False where the folder can't be read, which Path.exists raises on
-    # before Python 3.14. Where systemd is, each workspace's row then says kb can't read its units.
+    # before Python 3.14. Where systemd is, each workspace with a project allowed then says kb can't read its units.
     old = [name for name in OLD if os.path.lexists(folder / name)]
     gone = _instances(folder) - {_instance(workspace) for workspace in registered} if known else set()
     if command is None:
@@ -434,6 +434,8 @@ def _one(command: str, env: Mapping[str, str], unit: Unit, *, fix: bool) -> list
     try:
         current = {name: _read(folder / name) for name in names}
     except (OSError, UnicodeDecodeError) as e:
+        if not unit.allowed and unit.moved_off is None:  # as fabricd's: a notes-only machine has no units to read
+            return []
         reason = e.strerror if isinstance(e, OSError) and e.strerror else e
         step = (
             f"Look at {tilde(folder, env)}/fabric-ingest@{unit.instance}.*: kb checks and rewrites them once it can"
