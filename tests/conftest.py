@@ -57,7 +57,7 @@ case "$*" in
     state="$state/fabricd"
     mkdir -p "$state"
     case "$*" in
-      "--user show --property=UnitFileState,ActiveState,Result,ExecMainStatus fabricd.service")
+      "--user show --property=UnitFileState,ActiveState,Result,ExecMainStatus,NeedDaemonReload fabricd.service")
         enabled=$(cat "$state/enabled" 2>/dev/null)
         active=inactive
         [ "$enabled" = enabled ] && [ ! -e "$state/stopped" ] && active=active
@@ -65,7 +65,9 @@ case "$*" in
         result=$(cat "$state/result" 2>/dev/null || echo success)
         status=$(cat "$state/status" 2>/dev/null || echo 0)
         printf 'ActiveState=%s\nUnitFileState=%s\n' "$active" "$enabled"
-        printf 'Result=%s\nExecMainStatus=%s\n' "$result" "$status" ;;
+        printf 'Result=%s\nExecMainStatus=%s\n' "$result" "$status"
+        [ -e "$state/need-reload" ] && reload=yes || reload=no
+        printf 'NeedDaemonReload=%s\n' "$reload" ;;
       "--user enable fabricd.service" | "--user enable --now fabricd.service")
         [ -e "$state/cannot-enable" ] && { echo 'Access denied' >&2; exit 1; }
         printf enabled > "$state/enabled"
@@ -84,7 +86,8 @@ case "$*" in
     printf 'ActiveState=%s\nUnitFileState=%s\nResult=success\n\n' "$active" "$enabled"
     result=$(cat "$state/result" 2>/dev/null || echo success)
     printf 'ActiveState=inactive\nUnitFileState=static\nResult=%s\n' "$result" ;;
-  "--user daemon-reload") ;;
+  "--user daemon-reload") [ -e "$state/fabricd/cannot-reload" ] && { echo 'Timeout' >&2; exit 1; }
+    rm -f "$state/fabricd/need-reload" ;;
   "--user enable --now "*) [ -e "$state/cannot-enable" ] && { echo 'Access denied' >&2; exit 1; }
     printf enabled > "$state/enabled"; rm -f "$state/stopped" ;;
   "--user disable --now "*) if [ -e "$state/cannot-disable" ]; then echo 'Access denied' >&2; exit 1; fi ;;

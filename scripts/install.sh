@@ -59,8 +59,10 @@ pins=$(mktemp)
 trap 'rm -f "$pins"' EXIT
 uv export --directory "$root" --frozen --no-dev --no-emit-project --no-hashes --quiet -o "$pins"
 uv tool install --reinstall --quiet --constraints "$pins" "$root"
-# A fabricd that's running goes on with the code it started with: restart it on the new, and leave one that isn't.
-if command -v systemctl >/dev/null; then
+# A fabricd that's running goes on with the code it started with: restart it on the new, and leave one that isn't,
+# or a unit kb didn't write.
+if command -v systemctl >/dev/null &&
+	head -n 1 "$HOME/.config/systemd/user/fabricd.service" 2>/dev/null | grep -q '^# Written by kb doctor --fix'; then
 	systemctl --user try-restart fabricd.service >/dev/null 2>&1 || true
 fi
 kb="$(uv tool dir --bin)/kb"

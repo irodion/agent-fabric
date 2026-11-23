@@ -13,7 +13,8 @@ Its settings are read once, at start, from `~/.config/agent-fabric/config.toml`:
     [sessions]
     idle_minutes = 30    # how long a session is quiet before it finalizes (§4.3)
 
-Each workspace's allow list is read at each write, so a change to it needs no restart.
+Restart it after changing them (`systemctl --user restart fabricd.service`). Each workspace's allow list is read at
+each write, so a change to it needs no restart.
 """
 
 import asyncio
@@ -30,7 +31,7 @@ from typing import NoReturn
 
 from agent_fabric import digester, tracker
 from agent_fabric.capture import AgentsviewSource
-from agent_fabric.config import fabricd_settings, read_config
+from agent_fabric.config import BAD_CONFIG, LOCKED, fabricd_settings, read_config
 from agent_fabric.copilot import AGENT as COPILOT
 from agent_fabric.copilot import CopilotSource
 from agent_fabric.paths import config_file, state_db, tilde
@@ -82,14 +83,14 @@ def start(
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     poll: float = POLL,
 ) -> int:
-    """fabricd itself: 0 once stopped by SIGTERM or SIGINT, 1 if it failed, another is running or the lock can't be
-    taken, 2 if the config can't be read. `feeds` is called once for the tracker and once for the digester, so that
+    """fabricd itself: 0 once stopped by SIGTERM or SIGINT, 1 if it failed or the lock can't be taken, 2 if the config
+    can't be read, 3 if another is running. `feeds` is called once for the tracker and once for the digester, so that
     neither uses the other's sources from its worker thread."""
     try:
         chosen = fabricd_settings(read_config(env))
     except (OSError, ValueError) as error:
         print(f"fabricd: {tilde(config_file(env), env)}: {error}", file=sys.stderr)
-        return 2
+        return BAD_CONFIG
     path = state_db(env)
     lock_path = path.parent / "fabricd.lock"
     try:
@@ -102,7 +103,7 @@ def start(
             fcntl.flock(stack.enter_context(open(lock_path, "a")), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             print(f"fabricd: another fabricd is running on {tilde(path.parent, env)}", file=sys.stderr)
-            return 1
+            return LOCKED
         except OSError as error:
             print(f"fabricd: can't lock {tilde(lock_path, env)}: {error.strerror or error}", file=sys.stderr)
             return 1

@@ -11,6 +11,7 @@ from conftest import Kb, Lab, a_stub
 UNITS = Path(".config") / "systemd" / "user"
 RUNNING = "running: it follows the agents' sessions and writes their digests"
 SETUP = ["--user daemon-reload", "--user enable fabricd.service", "--user restart fabricd.service"]
+FIRST = ["--user daemon-reload", "--user enable --now fabricd.service"]
 
 
 def installed_fabricd(kb: Kb, tool_dir: Path | None = None) -> Path:
@@ -76,7 +77,7 @@ def test_doctor_reports_a_missing_unit_and_fix_installs_and_starts_it(lab: Lab) 
     assert lab.kb("doctor").exit_code == 1
 
     assert rows(lab.kb, "--fix") == [("fixed", RUNNING)]
-    assert calls(lab.kb)[-3:] == SETUP
+    assert calls(lab.kb)[-2:] == FIRST
 
     assert rows(lab.kb) == [("ok", RUNNING)]
 
@@ -89,7 +90,7 @@ def test_the_unit_runs_the_installed_fabricd_and_stops_it_alone(lab: Lab, tmp_pa
     assert f'ExecStart="{fabricd}"\n' in text
     # gitleaks is the stub here, git the system's: a unit's PATH has none of a shell's additions.
     assert f'Environment="PATH={tmp_path / "stubs"}:' in text
-    for line in ("Type=exec", "KillMode=mixed", "Restart=on-failure", "RestartPreventExitStatus=2"):
+    for line in ("Type=exec", "KillMode=mixed", "Restart=on-failure", "RestartPreventExitStatus=2 3"):
         assert f"\n{line}\n" in text
     assert text.endswith("[Install]\nWantedBy=default.target\n")
 
@@ -117,7 +118,7 @@ def test_an_old_unit_is_outdated_and_fix_rewrites_and_restarts_it(lab: Lab) -> N
     assert rows(lab.kb, "--fix") == [("fixed", RUNNING)]
     assert the_unit(lab.kb).read_text() == written
     assert calls(lab.kb)[before:] == [
-        "--user show --property=UnitFileState,ActiveState,Result,ExecMainStatus fabricd.service",
+        "--user show --property=UnitFileState,ActiveState,Result,ExecMainStatus,NeedDaemonReload fabricd.service",
         *SETUP,
     ]
 
@@ -253,9 +254,11 @@ def test_an_installed_unit_is_still_checked_once_no_project_is_allowed(lab: Lab)
     lab.kb("doctor", "--fix")
     (lab.kb.home / ".config" / "agent-fabric" / "config.toml").write_text("")
     the_unit(lab.kb).write_text(old := the_unit(lab.kb).read_text().replace("KillMode=mixed\n", ""))
+    state(lab.kb, "active", "failed")
     state(lab.kb, "result", "exit-code")
 
-    assert rows(lab.kb, "--fix") == [("problem", "stopped: it failed (exit-code)")]
+    # Failed, but stopped as kb would leave it: no step to restart a daemon the user may mean to turn off.
+    assert rows(lab.kb, "--fix") == [("ok", "installed, not running: no project is allowed, so --fix leaves it off")]
     assert the_unit(lab.kb).read_text() == old  # checked, never written
 
 
@@ -358,3 +361,49 @@ def test_an_installed_unit_is_judged_by_its_saved_path_not_kbs(lab: Lab, tmp_pat
     only_on_path(lab, tmp_path, "git", "codex")  # kb now runs from a shell without gitleaks
 
     assert rows(lab.kb) == [("ok", RUNNING)]
+
+
+def test_a_unit_systemd_has_not_reloaded_is_outdated_and_fix_reloads_and_restarts_it(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    the_unit(lab.kb).write_text(the_unit(lab.kb).read_text().replace("KillMode=mixed\n", ""))
+    (lab.kb.home / "systemctl" / "fabricd" / "cannot-reload").write_text("")
+    assert rows(lab.kb, "--fix")[0] == ("problem", "systemctl daemon-reload failed: Timeout")
+    (lab.kb.home / "systemctl" / "fabricd" / "cannot-reload").unlink()
+    state(lab.kb, "need-reload")  # the file is kb's as it would write it now, but systemd runs the old one
+
+    assert rows(lab.kb) == [("outdated", "systemd runs it from the unit as it was before kb rewrote it")]
+    before = len(calls(lab.kb))
+    assert rows(lab.kb, "--fix") == [("fixed", RUNNING)]
+    assert calls(lab.kb)[before:][-3:] == SETUP
+    assert rows(lab.kb) == [("ok", RUNNING)]
+
+
+def test_a_fabricd_stopped_because_another_runs_says_so(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    state(lab.kb, "active", "failed")
+    state(lab.kb, "result", "exit-code")
+    state(lab.kb, "status", "3")
+
+    assert rows(lab.kb, "--fix") == [("problem", "stopped: another fabricd runs on its data folder")]
+    assert "Stop the other fabricd, then systemctl --user restart fabricd.service" in steps(lab.kb)
+
+
+def test_an_old_unit_that_cannot_be_rewritten_without_gitleaks_is_outdated(lab: Lab, tmp_path: Path) -> None:
+    lab.kb("doctor", "--fix")
+    the_unit(lab.kb).write_text(the_unit(lab.kb).read_text().replace("KillMode=mixed\n", ""))
+    only_on_path(lab, tmp_path, "git", "codex")
+
+    assert rows(lab.kb, "--fix") == [
+        ("outdated", "fabricd runs from an old unit, which kb rewrites once gitleaks is on PATH")
+    ]
+
+
+def test_a_units_folder_kb_cannot_read_is_no_row_where_no_project_is_allowed(lab: Lab) -> None:
+    (lab.kb.home / ".config" / "agent-fabric" / "config.toml").write_text("")
+    folder = lab.kb.home / UNITS
+    folder.mkdir(parents=True)
+    folder.chmod(0o000)
+    try:
+        assert rows(lab.kb, "--fix") == []
+    finally:
+        folder.chmod(0o700)
