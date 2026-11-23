@@ -205,11 +205,17 @@ class FabricdSettings:
     idle: timedelta = IDLE
 
 
-def fabricd_settings(config: Config) -> FabricdSettings:
-    """fabricd's settings from the config, each its default where it isn't set. ValueError where one is wrong."""
+def agentsview_port(config: Config) -> int:
+    """`[agentsview] port`, which agentsview's unit serves on and fabricd reads from. ValueError where it's wrong."""
     port = _fabricd_table(config, "agentsview").get("port", PORT)
     if type(port) is not int or not 0 < port < 65536:
         raise ValueError(f"[agentsview] port is a port number, not {port!r}")
+    return port
+
+
+def fabricd_settings(config: Config) -> FabricdSettings:
+    """fabricd's settings from the config, each its default where it isn't set. ValueError where one is wrong."""
+    port = agentsview_port(config)
     minutes = _fabricd_table(config, "sessions").get("idle_minutes", IDLE // timedelta(minutes=1))
     if type(minutes) is not int or not 0 < minutes <= MAX_IDLE_MINUTES:
         raise ValueError(
