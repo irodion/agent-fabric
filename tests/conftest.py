@@ -59,13 +59,16 @@ case "$*" in
     if [ "$1" = --user ]; then state="$state/agentsview-user"; else state="$state/agentsview-system"; fi
     mkdir -p "$state"
     case "$*" in
-      *"show --property=UnitFileState,ActiveState,Result agentsview.service")
+      *"show --property=UnitFileState,ActiveState,Result,NeedDaemonReload agentsview.service")
+        [ -e "$state/cannot-show" ] && { echo 'Timeout' >&2; exit 1; }
         enabled=$(cat "$state/enabled" 2>/dev/null)
         active=inactive
         [ "$enabled" = enabled ] && [ ! -e "$state/stopped" ] && active=active
         [ -e "$state/active" ] && active=$(cat "$state/active")
         result=$(cat "$state/result" 2>/dev/null || echo success)
-        printf 'ActiveState=%s\nUnitFileState=%s\nResult=%s\n' "$active" "$enabled" "$result" ;;
+        [ -e "$state/need-reload" ] && reload=yes || reload=no
+        printf 'ActiveState=%s\nUnitFileState=%s\n' "$active" "$enabled"
+        printf 'Result=%s\nNeedDaemonReload=%s\n' "$result" "$reload" ;;
       *"enable agentsview.service" | *"enable --now agentsview.service")
         [ -e "$state/cannot-enable" ] && { echo 'Access denied' >&2; exit 1; }
         printf enabled > "$state/enabled"
@@ -109,7 +112,7 @@ case "$*" in
     result=$(cat "$state/result" 2>/dev/null || echo success)
     printf 'ActiveState=inactive\nUnitFileState=static\nResult=%s\n' "$result" ;;
   "--user daemon-reload") [ -e "$state/fabricd/cannot-reload" ] && { echo 'Timeout' >&2; exit 1; }
-    rm -f "$state/fabricd/need-reload" ;;
+    rm -f "$state/fabricd/need-reload" "$state/agentsview-user/need-reload" ;;
   "--user enable --now "*) [ -e "$state/cannot-enable" ] && { echo 'Access denied' >&2; exit 1; }
     printf enabled > "$state/enabled"; rm -f "$state/stopped" ;;
   "--user disable --now "*) if [ -e "$state/cannot-disable" ]; then echo 'Access denied' >&2; exit 1; fi ;;
