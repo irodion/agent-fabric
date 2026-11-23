@@ -49,7 +49,7 @@ def calls(kb: Kb) -> list[str]:
 
 def probes(kb: Kb) -> int:
     log = kb.home / "systemd-run.log"
-    return len(log.read_text().splitlines()) if log.exists() else 0
+    return log.read_text().count("--user --wait") if log.exists() else 0
 
 
 def unenforced(kb: Kb) -> None:
@@ -159,7 +159,8 @@ def test_an_old_system_unit_is_outdated_and_fix_stages_the_new_one(lab: Lab) -> 
     system.write_text(staged.read_text().replace("--replace", ""))
     staged.unlink()
 
-    assert rows(lab.kb)[0] == ("outdated", "outdated: it runs from an old unit")
+    [(status, detail)] = rows(lab.kb)
+    assert (status, detail) == ("outdated", "outdated: it runs from an old unit; installed but not running")
     lab.kb("doctor", "--fix")
     assert "--replace" in staged.read_text()
 
@@ -275,7 +276,6 @@ def test_a_staged_system_unit_keeps_its_sudo_line_without_probing_again(lab: Lab
 @pytest.mark.parametrize(
     ("exit", "why"),
     [
-        ("13", "it has no address but loopback to try (offline?)"),
         ("1", "systemd-run failed (exit 1)"),  # say, a systemd that doesn't know a setting
         ("12", "loopback is blocked too, which a system unit's filter would block as well"),
         ("14", "its write in the home failed for another reason than a read-only home"),
@@ -363,10 +363,13 @@ def test_a_rewrite_systemd_has_not_reloaded_is_outdated_and_fix_reloads_it(lab: 
     assert rows(lab.kb) == [("ok", RUNNING)]
 
 
-@pytest.mark.parametrize("exit", ["226", "200", "243"])
-def test_a_probe_systemd_could_not_set_up_needs_a_system_unit(lab: Lab, exit: str) -> None:
+@pytest.mark.parametrize(
+    ("answer", "exit"),
+    [("exit", "226"), ("exit-filter", "11")],  # no namespaces for a user manager; a filter that isn't applied
+)
+def test_a_probe_that_says_no_needs_a_system_unit(lab: Lab, answer: str, exit: str) -> None:
     (lab.kb.home / "systemd-run").mkdir()
-    (lab.kb.home / "systemd-run" / "exit").write_text(exit)  # 226: no namespaces for a user manager
+    (lab.kb.home / "systemd-run" / answer).write_text(exit)
 
     [(status, detail)] = rows(lab.kb, "--fix")
 
@@ -428,9 +431,96 @@ def test_a_rewrite_where_systemd_cannot_say_whether_it_is_on_only_reloads(lab: L
 
 def test_the_probe_reads_only_a_read_only_home_as_protected(tmp_path: Path) -> None:
     def probe(path: Path) -> int:
-        return subprocess.run([sys.executable, "-I", "-c", agentsview_unit.PROBE, str(path)], check=False).returncode
+        command = [sys.executable, "-I", "-c", agentsview_unit.PROBE, "sandbox", str(path)]
+        return subprocess.run(command, check=False).returncode
 
     assert probe(tmp_path / "new") == 10  # writable
     assert not (tmp_path / "new").exists()
     (tmp_path / "left").write_text("")
     assert probe(tmp_path / "left") == 14  # a file a killed run left: it says nothing of the home
+
+
+def test_another_setup_failure_cannot_tell(lab: Lab) -> None:
+    (lab.kb.home / "systemd-run").mkdir()
+    (lab.kb.home / "systemd-run" / "exit").write_text("203")  # 203/EXEC: the probe's Python, not the sandbox
+
+    assert rows(lab.kb, "--fix") == [
+        ("problem", "can't tell whether a user unit can sandbox it: systemd-run failed (exit 203)")
+    ]
+
+
+def test_without_systemd_run_nothing_is_decided_and_doctor_says_so(lab: Lab, tmp_path: Path) -> None:
+    (tmp_path / "stubs" / "systemd-run").unlink()
+    lab.kb.env["PATH"] = str(tmp_path / "stubs")  # no system systemd-run either
+
+    assert rows(lab.kb, "--fix") == [
+        ("problem", "can't tell whether a user unit can sandbox it: systemd-run isn't on PATH")
+    ]
+
+
+def test_the_probes_run_the_sandbox_then_the_filter_alone(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+
+    # Each run's arguments, the probe's own lines included.
+    sandbox, network = (lab.kb.home / "systemd-run.log").read_text().split("--user --wait")[1:]
+    assert "-p ProtectHome=read-only " in sandbox
+    assert " sandbox " in sandbox
+    assert network.rstrip().endswith(" filter")
+    assert "-p IPAddressDeny=any " in network
+    assert "IPAddressAllow" not in network
+    assert "ProtectHome" not in network
+
+
+def test_a_moved_gh_config_is_hidden(lab: Lab, tmp_path: Path) -> None:
+    lab.kb.env["XDG_CONFIG_HOME"] = str(tmp_path / "cfg")
+    (tmp_path / "cfg" / "agent-fabric").mkdir(parents=True)
+    (tmp_path / "cfg" / "agent-fabric" / "config.toml").write_text(
+        (lab.kb.home / ".config" / "agent-fabric" / "config.toml").read_text()
+    )
+    lab.kb("doctor", "--fix")
+    assert f'InaccessiblePaths=-"{tmp_path}/cfg/gh"\n' in the_unit(lab.kb).read_text()
+
+    lab.kb.env["GH_CONFIG_DIR"] = str(tmp_path / "gh-own")
+    lab.kb("doctor", "--fix")
+    text = the_unit(lab.kb).read_text()
+    assert f'InaccessiblePaths=-"{tmp_path}/gh-own"\n' in text
+    assert f'InaccessiblePaths=-"{lab.kb.home}/.config/gh"\n' in text
+
+
+def test_moved_agent_homes_are_passed_to_agentsview(lab: Lab, tmp_path: Path) -> None:
+    lab.kb.env["CODEX_HOME"] = "~/work/codex"
+
+    lab.kb("doctor", "--fix")
+
+    assert f'Environment="CODEX_HOME={lab.kb.home}/work/codex"\n' in the_unit(lab.kb).read_text()
+    assert "CLAUDE_CONFIG_DIR" not in the_unit(lab.kb).read_text()
+
+
+def test_a_failed_first_install_says_to_run_fix_again_not_to_start_a_removed_unit(lab: Lab) -> None:
+    state(lab.kb, "user", "cannot-enable")
+
+    lab.kb("doctor", "--fix")
+
+    assert "Fix what systemctl says, then run kb doctor --fix again" in steps(lab.kb, "--fix")
+
+
+def test_a_system_unit_only_root_can_read_is_the_users(lab: Lab) -> None:
+    system = agentsview_unit.SYSTEM_UNITS / "agentsview.service"
+    system.parent.mkdir(parents=True)
+    system.write_text("[Service]\n")
+    system.chmod(0o000)
+    try:
+        assert rows(lab.kb, "--fix") == [("ok", "yours: kb leaves a unit it didn't write as it is")]
+    finally:
+        system.chmod(0o600)
+
+
+def test_a_system_unit_systemd_has_not_reloaded_is_outdated(lab: Lab) -> None:
+    unenforced(lab.kb)
+    lab.kb("doctor", "--fix")
+    system_unit_installed(lab.kb)
+    state(lab.kb, "system", "enabled", "enabled")
+    state(lab.kb, "system", "need-reload")
+
+    assert rows(lab.kb) == [("outdated", "systemd runs it from the unit as it was before it was installed")]
+    assert "Run sudo systemctl daemon-reload && sudo systemctl restart agentsview.service" in steps(lab.kb)
