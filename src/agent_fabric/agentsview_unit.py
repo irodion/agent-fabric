@@ -322,6 +322,8 @@ def _system(env: Mapping[str, str], current: str | None, port: int | None, *, fi
         return _stage(env, port, ("outdated", why), fix=fix, keep_off=asked is None or _off(asked) is not None)
     if (asked or {}).get("NeedDaemonReload") == "yes":
         step = f"Run sudo systemctl daemon-reload && sudo systemctl restart {NAME}"
+        if asked is None or _off(asked):  # turned off: reloaded, not started
+            step = "Run sudo systemctl daemon-reload"
         detail = "systemd runs it from the unit as it was before it was installed"
         return Row("outdated", "agentsview", shown, detail, step=step)
     return state
@@ -394,7 +396,8 @@ def _write_user(env: Mapping[str, str], port: int, *, off: str | None) -> Row:
         temporary.write_text(unit(env, port, system=False), encoding="utf-8")
         temporary.replace(path)
     except OSError as e:
-        temporary.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):  # best effort: in a read-only folder, unlink fails even on no file
+            temporary.unlink(missing_ok=True)
         step = f"Make {tilde(path.parent, env)} writable, then run kb doctor --fix again"
         return Row("problem", "agentsview", shown, f"can't write it ({e.strerror or e})", step=step)
     if off:

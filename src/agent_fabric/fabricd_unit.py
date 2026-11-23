@@ -4,6 +4,7 @@ and a machine that only takes notes gets no daemon. A unit the user turned off s
 still checked once no project is allowed, but only written or started while one is. A `fabricd.service` that
 doesn't start with kb's header is the user's own, and kb leaves it as it is."""
 
+import contextlib
 import shlex
 import shutil
 from collections.abc import Mapping
@@ -170,7 +171,8 @@ def _write(command: str, env: Mapping[str, str], path: Path, *, installed: bool)
         temporary.write_text(unit(env), encoding="utf-8")
         temporary.replace(path)
     except OSError as e:
-        temporary.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):  # best effort: in a read-only folder, unlink fails even on no file
+            temporary.unlink(missing_ok=True)
         step = f"Make {tilde(path.parent, env)} writable, then run kb doctor --fix again"
         return Row("problem", "fabricd", shown, f"can't write it ({e.strerror or e})", step=step)
     if off:

@@ -4,6 +4,7 @@ decides whether there's work, so a daily run costs no more than a weekly one. Ea
 instance of a template: a template's instance that the user disabled leaves no trace, and kb keeps a timer the user
 turned off."""
 
+import contextlib
 import os
 import re
 import shlex
@@ -221,7 +222,8 @@ def _write(command: str, env: Mapping[str, str], unit: Unit, *, installed: bool)
             temporary[name].replace(folder / name)
     except OSError as e:
         for path in temporary.values():
-            path.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):  # best effort: in a read-only folder, unlink fails even on no file
+                path.unlink(missing_ok=True)
         step = f"Make {tilde(folder, env)} writable, then run kb doctor --fix again"
         return Row("problem", "timer", shown, f"can't write it ({e.strerror or e})", step=step)
     if off:

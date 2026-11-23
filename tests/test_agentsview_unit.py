@@ -567,3 +567,38 @@ def test_a_leftover_probe_file_kb_cannot_remove_cannot_tell(lab: Lab, monkeypatc
         )
     ]
     assert probes(lab.kb) == 0
+
+
+def test_a_disabled_system_unit_systemd_has_not_reloaded_is_only_reloaded(lab: Lab) -> None:
+    unenforced(lab.kb)
+    lab.kb("doctor", "--fix")
+    system_unit_installed(lab.kb)
+    state(lab.kb, "system", "enabled", "disabled")
+    state(lab.kb, "system", "need-reload")
+
+    assert "Run sudo systemctl daemon-reload" in steps(lab.kb)
+
+
+def test_a_unit_folder_that_turns_out_read_only_is_a_problem_not_a_crash(
+    lab: Lab, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each unit kb writes, as from a sandbox whose units folder is read-only: unlink fails even where the temporary
+    file was never made, which mustn't hide the write's own failure."""
+    tools = lab.kb.home / ".local" / "share" / "uv" / "tools" / "agent-fabric" / "bin"
+    a_stub(tools, "kb", "#!/bin/sh\n")
+    a_stub(tools, "fabricd", "#!/bin/sh\n")
+    write_text = Path.write_text
+
+    def read_only_units(self: Path, *args: Any, **kwargs: Any) -> int:
+        if self.name.endswith(".kb-new"):
+            raise OSError(30, "Read-only file system")
+        return write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", read_only_units)
+    unlink_fails(monkeypatch)
+
+    checks = doctor(lab.kb, "--fix")["checks"]
+
+    written = {row["check"]: row["detail"] for row in checks if row["check"] in ("timer", "fabricd", "agentsview")}
+    assert set(written) == {"timer", "fabricd", "agentsview"}
+    assert all(detail == "can't write it (Read-only file system)" for detail in written.values())
