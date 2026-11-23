@@ -28,6 +28,9 @@ from agent_fabric.timer import (
 NAME = "fabricd.service"
 TOOLS = ("gitleaks", "git")  # what a digest's write runs (§4.5), in the order PATH searches them
 HOMES = ("COPILOT_HOME",)  # where Copilot CLI's sessions are, when moved
+# How long a stop waits before it kills: past a digest write's gitleaks scan (60 s) and wiki commit (120 s, for its
+# hooks), with room for the step's git reads; systemd's default, 90 s, would kill a commit halfway.
+STOP_WAIT = 300
 RUNNING = "running: it follows the agents' sessions and writes their digests"
 
 
@@ -60,7 +63,8 @@ def unit(env: Mapping[str, str]) -> str:
         f"{HEADER}[Unit]\nDescription=fabricd: digests of the agents' sessions\n\n"
         f"[Service]\nType=exec\n{environment}"
         f"ExecStart={_quoted(str(installed_fabricd(env)), command=True)}\n"
-        f"Restart=on-failure\nRestartSec=30\nRestartPreventExitStatus={BAD_CONFIG} {LOCKED}\nKillMode=mixed\n\n"
+        f"Restart=on-failure\nRestartSec=30\nRestartPreventExitStatus={BAD_CONFIG} {LOCKED}\n"
+        f"KillMode=mixed\nTimeoutStopSec={STOP_WAIT}\n\n"
         "[Install]\nWantedBy=default.target\n"
     )
 

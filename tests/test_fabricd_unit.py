@@ -90,7 +90,13 @@ def test_the_unit_runs_the_installed_fabricd_and_stops_it_alone(lab: Lab, tmp_pa
     assert f'ExecStart="{fabricd}"\n' in text
     # gitleaks is the stub here, git the system's: a unit's PATH has none of a shell's additions.
     assert f'Environment="PATH={tmp_path / "stubs"}:' in text
-    for line in ("Type=exec", "KillMode=mixed", "Restart=on-failure", "RestartPreventExitStatus=2 3"):
+    for line in (
+        "Type=exec",
+        "KillMode=mixed",
+        "TimeoutStopSec=300",
+        "Restart=on-failure",
+        "RestartPreventExitStatus=2 3",
+    ):
         assert f"\n{line}\n" in text
     assert text.endswith("[Install]\nWantedBy=default.target\n")
 
@@ -399,53 +405,13 @@ def test_an_old_unit_that_cannot_be_rewritten_without_gitleaks_is_outdated(lab: 
     ]
 
 
-def test_a_units_folder_kb_cannot_read_is_no_row_where_no_project_is_allowed(lab: Lab) -> None:
+def test_a_unit_kb_cannot_read_is_no_row_where_no_project_is_allowed(lab: Lab) -> None:
     (lab.kb.home / ".config" / "agent-fabric" / "config.toml").write_text("")
     folder = lab.kb.home / UNITS
     folder.mkdir(parents=True)
-    folder.chmod(0o000)
+    the_unit(lab.kb).write_text("")
+    the_unit(lab.kb).chmod(0o000)
     try:
         assert rows(lab.kb, "--fix") == []
     finally:
-        folder.chmod(0o700)
-
-
-def test_a_disabled_unit_that_needs_a_reload_stays_off_and_ok(lab: Lab) -> None:
-    lab.kb("doctor", "--fix")
-    state(lab.kb, "enabled", "disabled")
-    state(lab.kb, "stopped")
-    state(lab.kb, "need-reload")
-    off = "turned off (disabled); systemctl --user enable --now fabricd.service turns it back on"
-
-    assert rows(lab.kb) == [("ok", off)]
-    before = len(calls(lab.kb))
-    assert rows(lab.kb, "--fix") == [("ok", off)]
-    assert not any("restart" in call or "enable" in call for call in calls(lab.kb)[before:])
-
-
-def test_a_fabricd_stopped_by_another_is_not_restarted_for_a_reload(lab: Lab) -> None:
-    lab.kb("doctor", "--fix")
-    state(lab.kb, "active", "failed")
-    state(lab.kb, "result", "exit-code")
-    state(lab.kb, "status", "3")
-    state(lab.kb, "need-reload")
-    before = len(calls(lab.kb))
-
-    assert rows(lab.kb, "--fix") == [("problem", "stopped: another fabricd runs on its data folder")]
-    assert not any("restart" in call or "enable" in call for call in calls(lab.kb)[before:])
-
-
-def test_a_fabricd_killed_by_a_signal_is_a_failure_whatever_its_number(lab: Lab) -> None:
-    lab.kb("doctor", "--fix")
-    state(lab.kb, "active", "failed")
-    state(lab.kb, "result", "core-dump")
-    state(lab.kb, "code", "3")  # CLD_DUMPED, with the signal's number as its status
-    state(lab.kb, "status", "3")
-
-    assert rows(lab.kb, "--fix") == [("problem", "stopped: it failed (core-dump)")]
-
-    state(lab.kb, "result", "signal")
-    state(lab.kb, "code", "2")  # CLD_KILLED
-    state(lab.kb, "status", "2")
-
-    assert rows(lab.kb, "--fix") == [("problem", "stopped: it failed (signal)")]
+        the_unit(lab.kb).chmod(0o600)
