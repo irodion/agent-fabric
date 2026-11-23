@@ -317,7 +317,7 @@ def check(
     folder = units_dir(env)
     command = shutil.which("systemctl", path=env.get("PATH", ""))
     # lexists: a link too, even a broken one, and False where the folder can't be read, which Path.exists raises on
-    # before Python 3.14; each unit's own row then says what kb can't read.
+    # before Python 3.14. Where systemd is, each workspace's row then says kb can't read its units.
     old = [name for name in OLD if os.path.lexists(folder / name)]
     gone = _instances(folder) - {_instance(workspace) for workspace in registered} if known else set()
     if command is None:
