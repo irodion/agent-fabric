@@ -1357,6 +1357,25 @@ workspace chooses one as its backend (§4.7). `kb setup` uses `questionary` (§4
 Dev: ruff, mypy, pytest, pinned per project. CI: GitHub Actions with the `vet` gate (§4.1) and `lint` (shellcheck,
 shfmt, actionlint, zizmor; ruff, mypy and pytest on Python 3.13 and 3.14).
 
+**Moving to Go (decided 2026-11-24).** The language wasn't chosen on purpose, and Go fits what kb has become better
+than Python does: one static binary instead of `uv tool install` with the lock's pins passed as constraints and
+`exclude-newer` holding PyPI back (AGENTS.md, Dependencies); one version instead of the gap between 3.13 and 3.14
+that only CI's 3.13 job catches; and the toolchain agentsview already needs (§4.1). Speed is not the reason: `kb hook
+start` takes about 90 ms on the devbox (2026-11-24, five runs), of which about 10 ms is Python starting, and it runs
+twice a session. Nothing in the systemd work (§5) depends on the language.
+
+The port goes one piece at a time, and the Python code stays until a piece's Go version replaces it. Each piece keeps
+its command line, its exit codes and its files byte for byte (the inbox's notes, the markers, `state.db`, digests,
+units, TOON), so the two versions are compared on the same inputs, and the Python tests that drive a command through
+its arguments run against the Go binary too before the Python piece is removed. The order:
+
+1. `kb hook`: the smallest piece with a fixed contract (each agent's events and output, the markers, exit 0 on any
+   error), so it sets up the Go module, its build and install, CI and the vet gate for Go's own dependencies first.
+2. `fabricd` with the capture, normalizer, tracker and digester under it: the long-running process.
+3. The rest of `kb`: `note` and `inbox`, then `doctor` and `setup`, then `ingest` and `lint`.
+
+New components (the panel, `kb mcp`) are written in Go from the start once step 1 has set the module up.
+
 ## 7. Security and privacy
 
 - Everything binds to 127.0.0.1. No auth needed while loopback-only; agentsview's `--require-auth` if that changes.
@@ -1476,6 +1495,9 @@ CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.1 (2026
 normalizer and tracker (built); digester (the rendering, git snapshots, the writer with allow list/redaction/gate/commit, and the loop over the tracker's changes, built; turn-end drafts come with the panel); `fabricd` running the tracker and the digester, and its unit (built), for the CLI agents: agentsview for Claude Code,
 Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI + `kb mcp`; a prototype session
 for the panel layout, then the panel with rules only (incl. open loops and carry-over).
+
+**Go port.** Alongside phase 1 and after it, in §6's order; each step lands when the Go piece passes the same tests
+and replaces the Python one.
 
 **Phase 2 — models.** SLM bullets in the panel after it passes the eval (§10); `kb ingest` takes digests too (§11);
 the comparison with the `local` backend, then nightly on it (§10); `kb prune` and `kb retro`.
