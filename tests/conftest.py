@@ -74,6 +74,8 @@ case "$*" in
         printf enabled > "$state/enabled"
         (cd "$state" && rm -f stopped active result) ;;
       *"restart agentsview.service") (cd "$state" && rm -f stopped active result) ;;
+      *"is-enabled agentsview.service") cat "$state/enabled" 2>/dev/null || { echo not-found; exit 1; }
+        [ "$(cat "$state/enabled")" = enabled ] || exit 1 ;;
       *"is-enabled --quiet agentsview.service") [ "$(cat "$state/enabled" 2>/dev/null)" = enabled ] || exit 1 ;;
       *) echo "unexpected: $*" >&2; exit 2 ;;
     esac

@@ -125,9 +125,8 @@ def test_where_the_sandbox_does_not_hold_fix_stages_a_system_unit_and_says_how_t
     assert text.endswith("WantedBy=multi-user.target\n")
     assert not the_unit(lab.kb).exists()
     script = staged.with_name("install-agentsview.sh")
-    assert f"Read ~/.local/share/agent-fabric/install-agentsview.sh, then run sudo sh {script}" in steps(
-        lab.kb, "--fix"
-    )
+    [step] = [step for step in steps(lab.kb, "--fix") if "install-agentsview.sh" in step]
+    assert step == f"Read ~/.local/share/agent-fabric/install-agentsview.sh, then run sudo sh {script}"
 
 
 def test_an_installed_system_unit_is_checked_and_its_state_asked(lab: Lab) -> None:
@@ -259,7 +258,7 @@ def test_a_plain_doctor_does_not_probe_and_points_at_fix(lab: Lab) -> None:
     assert probes(lab.kb) == 0
 
 
-def test_a_staged_system_unit_keeps_its_sudo_line_without_probing_again(lab: Lab) -> None:
+def test_a_staged_system_unit_keeps_its_install_step_without_probing_again(lab: Lab) -> None:
     unenforced(lab.kb)
     lab.kb("doctor", "--fix")
     before = probes(lab.kb)
@@ -529,7 +528,7 @@ def run_script(kb: Kb) -> subprocess.CompletedProcess[str]:
     """The install script, as the user's sudo would run it, on the stand-in systemctl."""
     agentsview_unit.SYSTEM_UNITS.mkdir(parents=True, exist_ok=True)
     script = kb.home / ".local" / "share" / "agent-fabric" / "install-agentsview.sh"
-    env = {"HOME": str(kb.home), "PATH": kb.env["PATH"]}
+    env = {"HOME": str(kb.home), "PATH": kb.env["PATH"], "TMPDIR": os.environ.get("TMPDIR", "/tmp")}
     return subprocess.run(["sh", str(script)], env=env, capture_output=True, text=True, check=False)
 
 
@@ -601,6 +600,46 @@ def test_the_script_leaves_a_unit_kb_did_not_write(lab: Lab) -> None:
     assert done.returncode == 1
     assert "is not kb's" in done.stderr
     assert system.read_text() == "[Service]\nExecStart=/bin/true\n"
+
+
+def test_the_script_honours_a_runtime_mask(lab: Lab) -> None:
+    unenforced(lab.kb)
+    lab.kb("doctor", "--fix")
+    state(lab.kb, "system", "enabled", "masked-runtime")
+
+    done = run_script(lab.kb)
+
+    assert done.returncode == 1
+    assert "is masked" in done.stderr
+    assert not (agentsview_unit.SYSTEM_UNITS / "agentsview.service").exists()
+
+
+def test_the_script_replaces_a_link_to_an_old_unit_of_kbs(lab: Lab, tmp_path: Path) -> None:
+    unenforced(lab.kb)
+    lab.kb("doctor", "--fix")
+    staged = lab.kb.home / ".local" / "share" / "agent-fabric" / "agentsview.service"
+    old = tmp_path / "linked.service"
+    old.write_text(staged.read_text().replace("--replace", ""))
+    agentsview_unit.SYSTEM_UNITS.mkdir(parents=True)
+    system = agentsview_unit.SYSTEM_UNITS / "agentsview.service"
+    system.symlink_to(old)
+
+    assert run_script(lab.kb).returncode == 0
+
+    assert system.read_text() == staged.read_text()
+
+
+def test_the_script_refuses_a_staged_unit_changed_after_kb_wrote_it(lab: Lab) -> None:
+    unenforced(lab.kb)
+    lab.kb("doctor", "--fix")
+    staged = lab.kb.home / ".local" / "share" / "agent-fabric" / "agentsview.service"
+    staged.write_text(staged.read_text().replace("User=", "User=root\n# was User="))
+
+    done = run_script(lab.kb)
+
+    assert done.returncode == 1
+    assert "changed since kb wrote this script" in done.stderr
+    assert not (agentsview_unit.SYSTEM_UNITS / "agentsview.service").exists()
 
 
 def test_a_unit_staged_without_its_script_is_staged_again(lab: Lab) -> None:
