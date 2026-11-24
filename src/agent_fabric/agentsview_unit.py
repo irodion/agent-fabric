@@ -4,11 +4,12 @@
 The sandbox is enforced only where the service manager can apply it: a user unit needs unprivileged user namespaces
 and cgroup BPF, which a distribution may deny it (§4.1). So, before any unit is written, a transient user unit with
 the same settings probes whether they hold. Where they do, kb writes and starts a user unit. Where they don't, the
-unit has to be a system unit with `User=`, which needs root once: kb stages it in its data folder and gives the
-command that installs it, then checks it like any other. A unit the user turned off stays off, and a unit that
-doesn't start with kb's header is the user's own, left as it is."""
+unit has to be a system unit with `User=`, which needs root once: kb stages it in its data folder with a script that
+installs it, for the user to run with sudo, then checks it like any other. A unit the user turned off stays off, and
+a unit that doesn't start with kb's header is the user's own, left as it is."""
 
 import contextlib
+import hashlib
 import os
 import pwd
 import shlex
@@ -94,25 +95,36 @@ def script(env: Mapping[str, str]) -> Path:
     return staged(env).with_name("install-agentsview.sh")
 
 
-def installer(env: Mapping[str, str]) -> str:
+def installer(env: Mapping[str, str], port: int) -> str:
     """The script that installs the staged unit, in an administrator's shell: absolute paths, and the unit's state
     read when it runs, since the user may turn it off after kb wrote this. A first install is enabled and started;
-    a unit already there is restarted only while it's enabled. It refuses a masked unit and one kb didn't write."""
-    system = shlex.quote(str(SYSTEM_UNITS / NAME))
+    a unit already there is restarted only while it's enabled. It refuses a masked unit, one kb didn't write, and a
+    staged unit that isn't the one kb wrote with it: the unit is copied where only root can write, then checked by
+    its hash, since anything running as the user can write where kb staged it."""
+    staged_hash = hashlib.sha256(unit(env, port, system=True).encode()).hexdigest()
     first = shlex.quote(HEADER.splitlines()[0])
     return (
         "#!/bin/sh\n"
         f"{HEADER}"
-        "# Installs the agentsview unit staged beside it. Run it as an administrator:\n"
-        f"#   sudo sh {shlex.quote(str(script(env)))}\n"
+        "# Installs the agentsview unit staged beside it. Run it with sudo sh, as kb doctor says.\n"
         "set -eu\n"
-        f"unit={system}\n"
-        'if [ -L "$unit" ]; then echo "$unit is masked: unmask it first, if you want it on" >&2; exit 1; fi\n'
+        f"unit={shlex.quote(str(SYSTEM_UNITS / NAME))}\n"
+        f"state=$(systemctl is-enabled {NAME} 2>/dev/null) || true\n"
+        'case "$(readlink -f "$unit") $state" in\n'
+        '  "/dev/null "* | *" masked" | *" masked-runtime")\n'
+        '    echo "$unit is masked: unmask it first, if you want it on" >&2; exit 1 ;;\n'
+        "esac\n"
         f'if [ -e "$unit" ] && [ "$(head -n 1 "$unit")" != {first} ]; then\n'
         "  echo \"$unit is not kb's: move it away first, for kb's own unit\" >&2; exit 1\n"
         "fi\n"
+        "copy=$(mktemp)\n"
+        "trap 'rm -f \"$copy\"' EXIT\n"
+        f'cat {shlex.quote(str(staged(env)))} > "$copy"\n'
+        f'if [ "$(sha256sum < "$copy" | cut -d " " -f 1)" != {staged_hash} ]; then\n'
+        '  echo "the staged unit changed since kb wrote this script: run kb doctor --fix again" >&2; exit 1\n'
+        "fi\n"
         '[ -e "$unit" ] && new=no || new=yes\n'
-        f'install -m 0644 {shlex.quote(str(staged(env)))} "$unit"\n'
+        'install -m 0644 "$copy" "$unit"\n'
         "systemctl daemon-reload\n"
         'if [ "$new" = yes ]; then\n'
         f"  systemctl enable {NAME}\n"
@@ -320,7 +332,7 @@ ANSWERS: dict[int, bool | str] = {
 def _staged_current(env: Mapping[str, str], port: int) -> bool:
     try:
         current = staged(env).read_text(encoding="utf-8") == unit(env, port, system=True)
-        return current and script(env).read_text(encoding="utf-8") == installer(env)
+        return current and script(env).read_text(encoding="utf-8") == installer(env, port)
     except (OSError, UnicodeDecodeError):
         return False
 
@@ -335,7 +347,7 @@ def _stage(env: Mapping[str, str], port: int, said: tuple[str, str], *, fix: boo
             data_dir(env).mkdir(exist_ok=True)
             staged(env).parent.mkdir(parents=True, exist_ok=True)
             staged(env).write_text(unit(env, port, system=True), encoding="utf-8")
-            script(env).write_text(installer(env), encoding="utf-8")
+            script(env).write_text(installer(env, port), encoding="utf-8")
         except OSError as e:
             step = f"Make {tilde(staged(env).parent, env)} writable, then run kb doctor --fix again"
             return Row("problem", "agentsview", shown, f"can't stage the unit ({e.strerror or e})", step=step)
