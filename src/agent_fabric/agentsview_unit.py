@@ -20,8 +20,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_fabric.config import Config, agentsview_port
-from agent_fabric.paths import expand, state_db, tilde, units_dir
+from agent_fabric.config import Config, agentsview_hidden, agentsview_port
+from agent_fabric.paths import config_file, expand, state_db, tilde, units_dir
 from agent_fabric.report import Row
 from agent_fabric.timer import HEADER, OFF, STATE_TIMEOUT, _masked, _quoted, _read
 
@@ -80,6 +80,14 @@ def binary(env: Mapping[str, str]) -> Path:
     return Path(env["HOME"]) / ".local" / "bin" / "agentsview"
 
 
+@dataclass(frozen=True)
+class Settings:
+    """What the config says of agentsview's unit: its port, and the paths it hides beyond kb's own."""
+
+    port: int
+    hidden: tuple[Path, ...] = ()
+
+
 def data_dir(env: Mapping[str, str]) -> Path:
     """agentsview's own folder, the one place the sandbox lets it write."""
     return Path(env["HOME"]) / ".agentsview"
@@ -95,13 +103,13 @@ def script(env: Mapping[str, str]) -> Path:
     return staged(env).with_name("install-agentsview.sh")
 
 
-def installer(env: Mapping[str, str], port: int) -> str:
+def installer(env: Mapping[str, str], settings: Settings) -> str:
     """The script that installs the staged unit, in an administrator's shell: absolute paths, and the unit's state
     read when it runs, since the user may turn it off after kb wrote this. A first install is enabled and started;
     a unit already there is restarted only while it's enabled. It refuses a masked unit, one kb didn't write, and a
     staged unit that isn't the one kb wrote with it: the unit is copied where only root can write, then checked by
     its hash, since anything running as the user can write where kb staged it."""
-    staged_hash = hashlib.sha256(unit(env, port, system=True).encode()).hexdigest()
+    staged_hash = hashlib.sha256(unit(env, settings, system=True).encode()).hexdigest()
     first = shlex.quote(HEADER.splitlines()[0])
     return (
         "#!/bin/sh\n"
@@ -143,8 +151,9 @@ def _user_name() -> str:
         return str(os.getuid())
 
 
-def _hidden(env: Mapping[str, str]) -> list[Path]:
-    """The credentials it never reads: the defaults, and Codex's, Claude Code's and gh's where their folders moved."""
+def _hidden(env: Mapping[str, str], settings: Settings) -> list[Path]:
+    """The credentials it never reads: the defaults, Codex's, Claude Code's and gh's where their folders moved, and
+    the config's own."""
     home = Path(env["HOME"])
     paths = [home / path for path in HIDDEN]
     for variable, name in MOVED:
@@ -154,14 +163,14 @@ def _hidden(env: Mapping[str, str]) -> list[Path]:
         paths.append(Path(gh))
     elif Path(config := env.get("XDG_CONFIG_HOME") or "").is_absolute():
         paths.append(Path(config) / "gh")
-    return list(dict.fromkeys(paths))
+    return list(dict.fromkeys([*paths, *settings.hidden]))
 
 
-def unit(env: Mapping[str, str], port: int, *, system: bool) -> str:
+def unit(env: Mapping[str, str], settings: Settings, *, system: bool) -> str:
     """The unit as kb would write it now: as a system unit, run as the user. Absolute paths, as a system unit's %h
     would be root's home."""
     user = f"User={_user_name()}\n" if system else ""
-    hidden = "".join(f"InaccessiblePaths=-{_quoted(str(path))}\n" for path in _hidden(env))
+    hidden = "".join(f"InaccessiblePaths=-{_quoted(str(path))}\n" for path in _hidden(env, settings))
     moved = [(variable, expand(env.get(variable) or "", env)) for variable, _ in MOVED]
     # Where the agents keep their sessions, if moved: a unit gets none of a shell's variables. Whether agentsview
     # reads these is unconfirmed (§11); passed anyway, they cost nothing.
@@ -170,7 +179,8 @@ def unit(env: Mapping[str, str], port: int, *, system: bool) -> str:
     )
     sandbox = "".join(f"{setting}\n" for setting in SANDBOX)
     command = (
-        f"{_quoted(str(binary(env)), command=True)} serve --no-browser --no-update-check --port {port} --replace"
+        f"{_quoted(str(binary(env)), command=True)} serve --no-browser --no-update-check"
+        f" --port {settings.port} --replace"
     )
     return (
         f"{HEADER}[Unit]\nDescription=agentsview: the agents' sessions, for fabricd (sandboxed)\n\n"
@@ -182,8 +192,8 @@ def unit(env: Mapping[str, str], port: int, *, system: bool) -> str:
 
 def check(env: Mapping[str, str], config: Config | Exception, *, wanted: bool, fix: bool) -> list[Row]:
     """agentsview's rows: none where no project is allowed and kb never set it up. `wanted`: some workspace allows
-    a project; while none does, an installed unit is checked but never written or started. A port kb can't read
-    gives no new unit: fabricd's row says what's wrong with it."""
+    a project; while none does, an installed unit is checked but never written or started. A port or hidden
+    list kb can't read gives no new unit: fabricd's row says what's wrong with a port, agentsview's with a list."""
     user_path, system_path = units_dir(env) / NAME, SYSTEM_UNITS / NAME
     rows, unreadable = [], False
     try:
@@ -195,12 +205,21 @@ def check(env: Mapping[str, str], config: Config | Exception, *, wanted: bool, f
         system_unit = _read(system_path)
     except (OSError, UnicodeDecodeError):  # kb's own is 0644: one only root reads is the user's
         system_unit = "unreadable"
-    try:
-        port = agentsview_port(config) if isinstance(config, Config) else None
-    except ValueError:
-        port = None
+    settings = None
+    if isinstance(config, Config):
+        try:
+            port = agentsview_port(config)
+        except ValueError:  # fabricd's row says what's wrong with it
+            port = None
+        try:
+            hidden = agentsview_hidden(config, env)
+        except ValueError as e:
+            rows += [_bad_hidden(e, env)] if wanted else []
+            port = None
+        if port is not None:
+            settings = Settings(port, hidden)
     if system_unit is not None or system_path.is_symlink():
-        rows.append(_system(env, system_unit, port, fix=fix, wanted=wanted))
+        rows.append(_system(env, system_unit, settings, fix=fix, wanted=wanted))
         kbs = system_unit is not None and system_unit.startswith(HEADER) and not _masked(system_path)
         if kbs and user_unit is not None and user_unit.startswith(HEADER):  # two of kb's, on one port
             rows.append(_leftover(env))
@@ -208,10 +227,15 @@ def check(env: Mapping[str, str], config: Config | Exception, *, wanted: bool, f
     if unreadable:
         return rows
     if user_unit is not None or user_path.is_symlink():
-        return [_user(env, user_unit, port, fix=fix, wanted=wanted)]
-    if not wanted or port is None:
-        return []
-    return [_new(env, port, fix=fix)]
+        return [*rows, _user(env, user_unit, settings, fix=fix, wanted=wanted)]
+    if not wanted or settings is None:
+        return rows
+    return [_new(env, settings, fix=fix)]
+
+
+def _bad_hidden(e: ValueError, env: Mapping[str, str]) -> Row:
+    shown = tilde(config_file(env), env)
+    return Row("problem", "agentsview", shown, str(e), step=f"Fix [agentsview] hidden in {shown}")
 
 
 def _unreadable(e: Exception, env: Mapping[str, str]) -> Row:
@@ -232,17 +256,17 @@ def _leftover(env: Mapping[str, str]) -> Row:
     return Row("problem", "agentsview", tilde(path, env), detail, step=step)
 
 
-def _new(env: Mapping[str, str], port: int, *, fix: bool) -> Row:
+def _new(env: Mapping[str, str], settings: Settings, *, fix: bool) -> Row:
     """No unit yet. With --fix, the probe decides: a user unit where the sandbox holds, else the system unit, staged.
     Without it, kb doesn't probe, as a probe starts a unit."""
     shown = tilde(units_dir(env) / NAME, env)
-    if (unprobed := _unprobed(env, port, fix=fix)) is not None:
+    if (unprobed := _unprobed(env, settings, fix=fix)) is not None:
         return unprobed
     enforced = _probe(env)
     if enforced is True:
-        return _write_user(env, port, off=None)
+        return _write_user(env, settings, off=None)
     if enforced is False:
-        return _stage(env, port, ("missing", NEEDS_SYSTEM), fix=True)
+        return _stage(env, settings, ("missing", NEEDS_SYSTEM), fix=True)
     if enforced == NO_BUS:
         return Row("ok", "agentsview", shown, "can't ask systemd from here whether it can sandbox agentsview")
     step = "Run kb doctor --fix again once that's settled"
@@ -251,7 +275,7 @@ def _new(env: Mapping[str, str], port: int, *, fix: bool) -> Row:
     )
 
 
-def _unprobed(env: Mapping[str, str], port: int, *, fix: bool) -> Row | None:
+def _unprobed(env: Mapping[str, str], settings: Settings, *, fix: bool) -> Row | None:
     """The row of a new unit kb doesn't probe for: agentsview or systemd missing, or no --fix."""
     shown = tilde(units_dir(env) / NAME, env)
     if not binary(env).is_file():
@@ -259,12 +283,13 @@ def _unprobed(env: Mapping[str, str], port: int, *, fix: bool) -> Row | None:
         return Row("missing", "agentsview", shown, detail, step="Run scripts/install-agentsview.sh")
     if shutil.which("systemctl", path=env.get("PATH", "")) is None:
         detail = "no systemd here, so agentsview runs only when you start it, unsandboxed"
-        step = f"Run {tilde(binary(env), env)} serve --no-browser --no-update-check --port {port} in a terminal"
+        serve = f"{tilde(binary(env), env)} serve --no-browser --no-update-check --port {settings.port}"
+        step = f"Run {serve} in a terminal"
         return Row("ok", "agentsview", shown, detail, step=step)
     if fix:
         return None
-    if _staged_current(env, port):  # an earlier --fix's verdict, waiting for the user's sudo
-        return _stage(env, port, ("missing", NEEDS_SYSTEM), fix=False)
+    if _staged_current(env, settings):  # an earlier --fix's verdict, waiting for the user's sudo
+        return _stage(env, settings, ("missing", NEEDS_SYSTEM), fix=False)
     detail = "not running, so fabricd captures no Claude Code or Codex session"
     return Row("missing", "agentsview", shown, detail, step="Run kb doctor --fix, which sets it up")
 
@@ -329,15 +354,15 @@ ANSWERS: dict[int, bool | str] = {
 }
 
 
-def _staged_current(env: Mapping[str, str], port: int) -> bool:
+def _staged_current(env: Mapping[str, str], settings: Settings) -> bool:
     try:
-        current = staged(env).read_text(encoding="utf-8") == unit(env, port, system=True)
-        return current and script(env).read_text(encoding="utf-8") == installer(env, port)
+        current = staged(env).read_text(encoding="utf-8") == unit(env, settings, system=True)
+        return current and script(env).read_text(encoding="utf-8") == installer(env, settings)
     except (OSError, UnicodeDecodeError):
         return False
 
 
-def _stage(env: Mapping[str, str], port: int, said: tuple[str, str], *, fix: bool) -> Row:
+def _stage(env: Mapping[str, str], settings: Settings, said: tuple[str, str], *, fix: bool) -> Row:
     """The system unit, written where the user can install it from, with the script that does. `said`: the row's
     status and detail."""
     status, why = said
@@ -346,18 +371,20 @@ def _stage(env: Mapping[str, str], port: int, said: tuple[str, str], *, fix: boo
         try:
             data_dir(env).mkdir(exist_ok=True)
             staged(env).parent.mkdir(parents=True, exist_ok=True)
-            staged(env).write_text(unit(env, port, system=True), encoding="utf-8")
-            script(env).write_text(installer(env, port), encoding="utf-8")
+            staged(env).write_text(unit(env, settings, system=True), encoding="utf-8")
+            script(env).write_text(installer(env, settings), encoding="utf-8")
         except OSError as e:
             step = f"Make {tilde(staged(env).parent, env)} writable, then run kb doctor --fix again"
             return Row("problem", "agentsview", shown, f"can't stage the unit ({e.strerror or e})", step=step)
-    elif not _staged_current(env, port):
+    elif not _staged_current(env, settings):
         return Row(status, "agentsview", shown, why, step="Run kb doctor --fix, which stages the unit to install")
     step = f"Read {tilde(script(env), env)}, then run sudo sh {shlex.quote(str(script(env)))}"
     return Row(status, "agentsview", shown, f"{why}; staged at {tilde(staged(env), env)}", step=step)
 
 
-def _system(env: Mapping[str, str], current: str | None, port: int | None, *, fix: bool, wanted: bool) -> Row:
+def _system(
+    env: Mapping[str, str], current: str | None, settings: Settings | None, *, fix: bool, wanted: bool
+) -> Row:
     """The system unit, which only the user can change: checked against kb's, and its state asked."""
     path = SYSTEM_UNITS / NAME
     shown = str(path)
@@ -368,9 +395,9 @@ def _system(env: Mapping[str, str], current: str | None, port: int | None, *, fi
         return Row("ok", "agentsview", shown, "yours: kb leaves a unit it didn't write as it is", step=step)
     asked = _ask(env, system=True)
     state = _state(asked, shown, SYSTEM_STEPS, wanted=wanted)
-    if wanted and port is not None and current != unit(env, port, system=True):
+    if wanted and settings is not None and current != unit(env, settings, system=True):
         why = f"outdated: it runs from an old unit; {state.detail}"
-        return _stage(env, port, ("outdated", why), fix=fix)
+        return _stage(env, settings, ("outdated", why), fix=fix)
     if (asked or {}).get("NeedDaemonReload") == "yes":
         step = f"Run sudo systemctl daemon-reload && sudo systemctl restart {NAME}"
         if asked is None or _off(asked):  # turned off: reloaded, not started
@@ -380,7 +407,7 @@ def _system(env: Mapping[str, str], current: str | None, port: int | None, *, fi
     return state
 
 
-def _user(env: Mapping[str, str], current: str | None, port: int | None, *, fix: bool, wanted: bool) -> Row:
+def _user(env: Mapping[str, str], current: str | None, settings: Settings | None, *, fix: bool, wanted: bool) -> Row:
     """The user unit, which kb keeps as it would write it now, and starts where it's stopped: while a project is
     allowed, and unless the user turned it off."""
     path = units_dir(env) / NAME
@@ -388,7 +415,7 @@ def _user(env: Mapping[str, str], current: str | None, port: int | None, *, fix:
     if (left := _left(env, path, current)) is not None:
         return left
     asked = _ask(env, system=False)
-    if wanted and port is not None and (stale := _stale(current, asked, env, port)):
+    if wanted and settings is not None and (stale := _stale(current, asked, env, settings)):
         if not fix:
             return Row("outdated", "agentsview", shown, stale)
         kept = (
@@ -396,7 +423,7 @@ def _user(env: Mapping[str, str], current: str | None, port: int | None, *, fix:
             if asked is not None
             else "can't ask systemd from here whether it's on, so kb only reloaded it"
         )
-        return _write_user(env, port, off=kept)
+        return _write_user(env, settings, off=kept)
     row = _state(asked, shown, USER_STEPS, wanted=wanted)
     if row.status != "missing" or not fix:
         return row
@@ -407,10 +434,12 @@ def _user(env: Mapping[str, str], current: str | None, port: int | None, *, fix:
     return Row("fixed", "agentsview", shown, RUNNING)
 
 
-def _stale(current: str | None, asked: dict[str, str] | None, env: Mapping[str, str], port: int) -> str | None:
+def _stale(
+    current: str | None, asked: dict[str, str] | None, env: Mapping[str, str], settings: Settings
+) -> str | None:
     """Why the user unit isn't kb's as it runs now: an old file, or a new one systemd hasn't reloaded, as after a
     reload that failed."""
-    if current != unit(env, port, system=False):
+    if current != unit(env, settings, system=False):
         return "it runs from an old unit"
     if (asked or {}).get("NeedDaemonReload") == "yes":
         return "systemd runs it from the unit as it was before kb rewrote it"
@@ -435,7 +464,7 @@ def _off(asked: dict[str, str] | None) -> str | None:
     return f"turned off ({state}), so fabricd captures no Claude Code or Codex session" if state in OFF else None
 
 
-def _write_user(env: Mapping[str, str], port: int, *, off: str | None) -> Row:
+def _write_user(env: Mapping[str, str], settings: Settings, *, off: str | None) -> Row:
     """Through a temporary file and a rename, then reloaded and (re)started, unless the user turned it off: then
     only reloaded. A first install that systemd won't start is removed, so the next --fix probes and tries again."""
     path = units_dir(env) / NAME
@@ -445,7 +474,7 @@ def _write_user(env: Mapping[str, str], port: int, *, off: str | None) -> Row:
     try:
         data_dir(env).mkdir(exist_ok=True)  # the sandbox makes the rest of the home read-only, this folder included
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_text(unit(env, port, system=False), encoding="utf-8")
+        temporary.write_text(unit(env, settings, system=False), encoding="utf-8")
         temporary.replace(path)
     except OSError as e:
         with contextlib.suppress(OSError):  # best effort: in a read-only folder, unlink fails even on no file

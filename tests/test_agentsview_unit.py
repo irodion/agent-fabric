@@ -760,3 +760,60 @@ def test_an_unreadable_user_unit_still_has_the_system_unit_checked(lab: Lab) -> 
 
     assert [status for status, _ in rows(lab.kb)] == ["problem", "problem"]
     assert ("problem", "stopped: it failed (exit-code)") in rows(lab.kb)
+
+
+def hide(kb: Kb, value: str) -> None:
+    config = kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.write_text(config.read_text() + f"\n[agentsview]\nhidden = {value}\n")
+
+
+def test_the_configs_hidden_paths_are_hidden_too(lab: Lab) -> None:
+    hide(lab.kb, '["~/.config/devbox-health", "/srv/secrets"]')
+
+    lab.kb("doctor", "--fix")
+
+    text = the_unit(lab.kb).read_text()
+    assert f'InaccessiblePaths=-"{lab.kb.home}/.config/devbox-health"\n' in text
+    assert 'InaccessiblePaths=-"/srv/secrets"\n' in text
+    assert f'InaccessiblePaths=-"{lab.kb.home}/.ssh"\n' in text  # kb's own stay
+
+
+def test_a_path_added_to_hidden_makes_the_unit_outdated(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    state(lab.kb, "user", "enabled", "enabled")
+    hide(lab.kb, '["~/.config/devbox-health"]')
+
+    [(status, _)] = rows(lab.kb)
+    assert status == "outdated"
+    lab.kb("doctor", "--fix")
+    assert f'"{lab.kb.home}/.config/devbox-health"' in the_unit(lab.kb).read_text()
+
+
+@pytest.mark.parametrize(
+    ("value", "why"),
+    [
+        ('"~/.config/devbox-health"', "[agentsview] hidden is a list of paths, not '~/.config/devbox-health'"),
+        ('["relative/path"]', "[agentsview] hidden takes absolute paths or ~/ paths, not 'relative/path'"),
+        ('["/srv/a\\nExecStartPre=/bin/false"]', "[agentsview] hidden takes absolute paths or ~/ paths, not "),
+    ],
+)
+def test_a_hidden_list_kb_cannot_use_is_a_problem_and_writes_no_unit(lab: Lab, value: str, why: str) -> None:
+    hide(lab.kb, value)
+
+    [(status, detail)] = rows(lab.kb, "--fix")
+
+    assert status == "problem"
+    assert detail.startswith(why)
+    assert "Fix [agentsview] hidden in ~/.config/agent-fabric/config.toml" in steps(lab.kb)
+    assert not the_unit(lab.kb).exists()
+    assert probes(lab.kb) == 0
+
+
+def test_a_bad_hidden_list_leaves_an_installed_unit_as_it_is_and_says_so(lab: Lab) -> None:
+    lab.kb("doctor", "--fix")
+    state(lab.kb, "user", "enabled", "enabled")
+    before = the_unit(lab.kb).read_text()
+    hide(lab.kb, '["relative/path"]')
+
+    assert [status for status, _ in rows(lab.kb, "--fix")] == ["problem", "ok"]
+    assert the_unit(lab.kb).read_text() == before

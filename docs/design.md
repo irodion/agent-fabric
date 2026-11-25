@@ -220,6 +220,11 @@ succeed, so expect a system unit on the desktop too. Two more spike checks: Curs
 the list of Copilot and Cursor credential files to add to `InaccessiblePaths`. Cursor's own `state.vscdb` holds
 tokens too, but agentsview has to read it.
 
+A machine's own secrets, which kb can't know of, go in `[agentsview] hidden`, a list of absolute or `~/` paths that
+the unit hides after kb's own. On the devbox that is `~/.config/devbox-health`, a monitoring ping URL that the agents'
+sandboxes already hide (2026-11-25). A list kb can't use is a `problem` on agentsview's row, and no unit is written
+or rewritten from it.
+
 **Capture check (CLI agents, devbox, 2026-10-31).** agentsview v0.45.0 ran `sync` over the real home folders with
 its own data dir, inside Claude Code's sandbox, so the agents' folders were read-only as under the unit. Existing
 sessions were compared with each agent's own files, counts only. Then one test session per agent (a greeting, a test
