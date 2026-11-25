@@ -213,6 +213,21 @@ def agentsview_port(config: Config) -> int:
     return port
 
 
+def agentsview_hidden(config: Config, env: Mapping[str, str]) -> tuple[Path, ...]:
+    """`[agentsview] hidden`: paths agentsview's unit hides beyond kb's own list, such as a machine's own credentials.
+    Absolute or `~/`, one printable line each, since each goes into the unit. ValueError where one is wrong."""
+    hidden = _fabricd_table(config, "agentsview").get("hidden", [])
+    if not isinstance(hidden, list) or not all(isinstance(text, str) for text in hidden):
+        raise ValueError(f"[agentsview] hidden is a list of paths, not {hidden!r}")
+    paths = []
+    for text in hidden:
+        path = expand(text, env)
+        if not path.is_absolute() or not text.isprintable():
+            raise ValueError(f"[agentsview] hidden takes absolute paths or ~/ paths, not {text!r}")
+        paths.append(path)
+    return tuple(paths)
+
+
 def fabricd_settings(config: Config) -> FabricdSettings:
     """fabricd's settings from the config, each its default where it isn't set. ValueError where one is wrong."""
     port = agentsview_port(config)
