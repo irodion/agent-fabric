@@ -206,18 +206,15 @@ def check(env: Mapping[str, str], config: Config | Exception, *, wanted: bool, f
     except (OSError, UnicodeDecodeError):  # kb's own is 0644: one only root reads is the user's
         system_unit = "unreadable"
     settings = None
-    if isinstance(config, Config):
+    try:  # a port kb can't read: fabricd's row says what's wrong with it, or with an [agentsview] that isn't a table
+        port = agentsview_port(config) if isinstance(config, Config) else None
+    except ValueError:
+        port = None
+    if isinstance(config, Config) and port is not None:
         try:
-            port = agentsview_port(config)
-        except ValueError:  # fabricd's row says what's wrong with it
-            port = None
-        try:
-            hidden = agentsview_hidden(config, env)
+            settings = Settings(port, _usable(agentsview_hidden(config, env), env))
         except ValueError as e:
             rows += [_bad_hidden(e, env)] if wanted else []
-            port = None
-        if port is not None:
-            settings = Settings(port, hidden)
     if system_unit is not None or system_path.is_symlink():
         rows.append(_system(env, system_unit, settings, fix=fix, wanted=wanted))
         kbs = system_unit is not None and system_unit.startswith(HEADER) and not _masked(system_path)
@@ -231,6 +228,18 @@ def check(env: Mapping[str, str], config: Config | Exception, *, wanted: bool, f
     if not wanted or settings is None:
         return rows
     return [_new(env, settings, fix=fix)]
+
+
+def _usable(hidden: tuple[Path, ...], env: Mapping[str, str]) -> tuple[Path, ...]:
+    """The config's hidden paths, unless one hides what agentsview needs: the home, its binary, its data folder, or
+    the folders Claude Code and Codex keep their sessions in. ValueError naming the first that does."""
+    home = Path(env["HOME"])
+    needed = [home, binary(env), data_dir(env), home / ".claude", home / ".codex"]
+    needed += [moved for variable, _ in MOVED if (moved := expand(env.get(variable) or "", env)).is_absolute()]
+    for path in hidden:
+        if any(need == path or need.is_relative_to(path) for need in needed):
+            raise ValueError(f"[agentsview] hidden would hide what agentsview needs: {tilde(path, env)}")
+    return hidden
 
 
 def _bad_hidden(e: ValueError, env: Mapping[str, str]) -> Row:

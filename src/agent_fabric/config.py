@@ -224,6 +224,8 @@ def agentsview_hidden(config: Config, env: Mapping[str, str]) -> tuple[Path, ...
         path = expand(text, env)
         if not path.is_absolute() or not text.isprintable():
             raise ValueError(f"[agentsview] hidden takes absolute paths or ~/ paths, not {text!r}")
+        if ".." in path.parts:  # systemd ignores a path that isn't normalized, so it would stay readable
+            raise ValueError(f"[agentsview] hidden takes paths without .., not {text!r}")
         paths.append(path)
     return tuple(paths)
 

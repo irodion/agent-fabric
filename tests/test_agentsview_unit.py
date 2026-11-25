@@ -795,6 +795,12 @@ def test_a_path_added_to_hidden_makes_the_unit_outdated(lab: Lab) -> None:
         ('"~/.config/devbox-health"', "[agentsview] hidden is a list of paths, not '~/.config/devbox-health'"),
         ('["relative/path"]', "[agentsview] hidden takes absolute paths or ~/ paths, not 'relative/path'"),
         ('["/srv/a\\nExecStartPre=/bin/false"]', "[agentsview] hidden takes absolute paths or ~/ paths, not "),
+        ('["~/.config/x/../devbox-health"]', "[agentsview] hidden takes paths without .., not "),
+        ('["~"]', "[agentsview] hidden would hide what agentsview needs: ~"),
+        ('["/"]', "[agentsview] hidden would hide what agentsview needs: /"),
+        ('["~/.agentsview"]', "[agentsview] hidden would hide what agentsview needs: ~/.agentsview"),
+        ('["~/.local"]', "[agentsview] hidden would hide what agentsview needs: ~/.local"),
+        ('["~/.claude"]', "[agentsview] hidden would hide what agentsview needs: ~/.claude"),
     ],
 )
 def test_a_hidden_list_kb_cannot_use_is_a_problem_and_writes_no_unit(lab: Lab, value: str, why: str) -> None:
@@ -817,3 +823,12 @@ def test_a_bad_hidden_list_leaves_an_installed_unit_as_it_is_and_says_so(lab: La
 
     assert [status for status, _ in rows(lab.kb, "--fix")] == ["problem", "ok"]
     assert the_unit(lab.kb).read_text() == before
+
+
+def test_an_agentsview_entry_that_is_not_a_table_is_left_to_fabricds_row(lab: Lab) -> None:
+    config = lab.kb.home / ".config" / "agent-fabric" / "config.toml"
+    config.write_text("agentsview = 8080\n" + config.read_text())
+
+    assert rows(lab.kb, "--fix") == []
+    assert not any("[agentsview] hidden" in step for step in steps(lab.kb))
+    assert not the_unit(lab.kb).exists()
