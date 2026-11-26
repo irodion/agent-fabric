@@ -188,7 +188,6 @@ def unit(env: Mapping[str, str], settings: Settings, *, system: bool) -> str:
     return (
         f"{HEADER}[Unit]\nDescription=agentsview: the agents' sessions, for fabricd (sandboxed)\n\n"
         f"[Service]\n{user}ExecStart={command}\nEnvironment=AGENTSVIEW_TELEMETRY_ENABLED=0\n{environment}"
-        # on-failure: after earlyoom's SIGTERM, a clean exit, it stays stopped, and kb doctor says so (§4.1, Cost)
         f"Restart=on-failure\nRestartSec=30\n{MEMORY_HIGH}\n"
         f"{sandbox}ReadWritePaths={_quoted(str(data_dir(env)))}\n{hidden}\n"
         f"[Install]\nWantedBy={'multi-user.target' if system else 'default.target'}\n"
