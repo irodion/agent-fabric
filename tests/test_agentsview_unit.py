@@ -129,10 +129,10 @@ def test_where_the_sandbox_does_not_hold_fix_stages_a_system_unit_and_says_how_t
     digest = hashlib.sha256(script.read_bytes()).hexdigest()
     [step] = [step for step in steps(lab.kb, "--fix") if "install-agentsview.sh" in step]
     assert step == (
-        "As an administrator, copy ~/.local/share/agent-fabric/install-agentsview.sh out of the home, check it "
-        f"against the one kb wrote, read it and run it: f=$(sudo mktemp) && sudo cp {script} $f "
-        f"&& echo '{digest}  '$f | sudo sha256sum -c && sudo cat $f "
-        "&& printf 'Run it? [y/N] ' && read a && [ x$a = xy ] && sudo sh $f; sudo rm -f $f"
+        f"As an administrator, copy {script} out of the home, check it against the one kb wrote, read it and run it: "
+        f"f=$(sudo mktemp) && sudo cp {script} $f && echo '{digest}  '$f | sudo sha256sum -c && sudo cat $f "
+        "&& printf 'Run it? [y/N] ' && read a && case $a in y|Y) sudo sh $f ;; *) false ;; esac; "
+        "s=$?; sudo rm -f $f; [ $s = 0 ]"
     )
 
 
@@ -275,8 +275,7 @@ def test_a_staged_system_unit_keeps_its_install_step_without_probing_again(lab: 
     assert status == "missing"
     assert detail.endswith("; staged at ~/.local/share/agent-fabric/agentsview.service")
     assert any(
-        step.startswith("As an administrator, copy ~/.local/share/agent-fabric/install-agentsview.sh")
-        for step in steps(lab.kb)
+        step.startswith("As an administrator, copy ") and "install-agentsview.sh" in step for step in steps(lab.kb)
     )
     assert probes(lab.kb) == before
 
@@ -668,11 +667,14 @@ def run_step(kb: Kb, tmp_path: Path, command: str, answer: str) -> subprocess.Co
     return subprocess.run(["sh", "-c", command], input=answer, env=env, capture_output=True, text=True, check=False)
 
 
-def test_the_install_step_checks_the_script_shows_it_and_runs_the_copy_on_y(lab: Lab, tmp_path: Path) -> None:
+@pytest.mark.parametrize("answer", ["y", "Y"])
+def test_the_install_step_checks_the_script_shows_it_and_runs_the_copy_on_y(
+    lab: Lab, tmp_path: Path, answer: str
+) -> None:
     unenforced(lab.kb)
     lab.kb("doctor", "--fix")
 
-    done = run_step(lab.kb, tmp_path, install_command(lab.kb), "y\n")
+    done = run_step(lab.kb, tmp_path, install_command(lab.kb), f"{answer}\n")
 
     assert done.returncode == 0, done.stderr
     assert ": OK" in done.stdout
@@ -686,8 +688,9 @@ def test_the_install_step_runs_nothing_without_a_y(lab: Lab, tmp_path: Path) -> 
     unenforced(lab.kb)
     lab.kb("doctor", "--fix")
 
-    run_step(lab.kb, tmp_path, install_command(lab.kb), "\n")
+    done = run_step(lab.kb, tmp_path, install_command(lab.kb), "\n")
 
+    assert done.returncode != 0
     assert not (agentsview_unit.SYSTEM_UNITS / "agentsview.service").exists()
     assert not any((tmp_path / "admin-tmp").iterdir())
 
@@ -701,6 +704,7 @@ def test_the_install_step_refuses_a_script_changed_after_kb_doctor_showed_it(lab
 
     done = run_step(lab.kb, tmp_path, shown, "y\n")
 
+    assert done.returncode != 0
     assert "FAILED" in done.stdout
     assert "not kb's" not in done.stdout
     assert not (agentsview_unit.SYSTEM_UNITS / "agentsview.service").exists()
@@ -714,7 +718,7 @@ def test_a_unit_staged_without_its_script_is_staged_again(lab: Lab) -> None:
 
     assert "Run kb doctor --fix, which sets it up" in steps(lab.kb)
     assert any(
-        step.startswith("As an administrator, copy ~/.local/share/agent-fabric/install-agentsview.sh")
+        step.startswith("As an administrator, copy ") and "install-agentsview.sh" in step
         for step in steps(lab.kb, "--fix")
     )
 
