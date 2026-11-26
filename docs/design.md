@@ -264,7 +264,12 @@ tmux as well as headless.
   telemetry: the web UI posts events to agentsview's own `/api/v1/telemetry/events`, which hands them to the same
   reporter as the server's, so `kit_posthog_disabled` still keeps them on the machine.
 - **Cost.** The first full sync of 6,391 sessions took 5 min 39 s on 2 vCPU and made a 497 MB archive; incremental
-  syncs take about 1 s.
+  syncs take about 1 s. As the devbox's system unit (v0.46.1, 2026-11-25), the first start synced 5,540 sessions
+  (2.3 GB) in 6 min 24 s before opening its port: all that time the unit is active and fabricd gets connection
+  refused. The unit's memory peaked at 1.6 GB, page cache included. Restarted on its archive, it listened in 5.7 s
+  and holds about 230 MB, 200 MB of it its own. The unit sets `MemoryHigh=1G` (decided 2026-11-26): above it the
+  kernel reclaims and slows agentsview rather than kill it, since a killed sync is restarted 30 s later and the first
+  sync needn't be fast. It sets no `MemoryMax`: the devbox's earlyoom already stops a runaway.
 
 **Live check (CLI agents, devbox, 2026-11-19).** agentsview v0.46.1 ran under the unit's confinement (read-only
 home, only its data dir writable) while Claude Code 2.1.328, Codex 0.166.0 and Copilot CLI 1.0.105 each ran a
@@ -1635,6 +1640,8 @@ Open (2026-11-01):
   silent, as it would if Cursor never ran it); and where it runs hooks relative to its sandbox (`sandbox.mode` is
   `disabled` on the test box, so the markers it wrote there don't settle it).
 - The Cursor CLI reader: message order from the `store.db` blob tree, timestamps, and encrypted blobs (§4.1).
+- Whether `kb doctor` should say agentsview is starting, rather than running, while its unit is active and its port
+  still closed: on a first start that lasts minutes (§4.1, Cost).
 
 Open (2026-11-04):
 
