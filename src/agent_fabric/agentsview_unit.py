@@ -43,9 +43,9 @@ HIDDEN = (
     ".codex/auth.json",
     ".claude/.credentials.json",
 )  # credentials it never reads
-# Above this, the kernel reclaims its memory and slows it rather than kill it: the first full sync is the peak, and
-# it never needs to be fast (§4.1, Cost).
-MEMORY_HIGH = "MemoryHigh=1G"
+# Above this, the kernel reclaims its memory and slows it rather than kill it: above the devbox's first full sync,
+# cache included, so a sync like that one isn't slowed, while a bigger one gives way to the agents (§4.1, Cost).
+MEMORY_HIGH = "MemoryHigh=2G"
 MOVED = (("CODEX_HOME", "auth.json"), ("CLAUDE_CONFIG_DIR", ".credentials.json"))
 RUNNING = "running sandboxed: fabricd reads Claude Code's and Codex's sessions through it"
 PROBE_TIMEOUT = 30  # seconds for the probe's transient unit
@@ -188,7 +188,9 @@ def unit(env: Mapping[str, str], settings: Settings, *, system: bool) -> str:
     return (
         f"{HEADER}[Unit]\nDescription=agentsview: the agents' sessions, for fabricd (sandboxed)\n\n"
         f"[Service]\n{user}ExecStart={command}\nEnvironment=AGENTSVIEW_TELEMETRY_ENABLED=0\n{environment}"
-        f"Restart=on-failure\nRestartSec=30\n{MEMORY_HIGH}\n{sandbox}ReadWritePaths={_quoted(str(data_dir(env)))}\n{hidden}\n"
+        # always: earlyoom's SIGTERM ends it cleanly, which on-failure wouldn't restart (§4.1, Cost)
+        f"Restart=always\nRestartSec=30\n{MEMORY_HIGH}\n"
+        f"{sandbox}ReadWritePaths={_quoted(str(data_dir(env)))}\n{hidden}\n"
         f"[Install]\nWantedBy={'multi-user.target' if system else 'default.target'}\n"
     )
 
