@@ -265,19 +265,19 @@ tmux as well as headless.
   telemetry: the web UI posts events to agentsview's own `/api/v1/telemetry/events`, which hands them to the same
   reporter as the server's, so `kit_posthog_disabled` still keeps them on the machine.
 - **Cost.** The first full sync of 6,391 sessions took 5 min 39 s on 2 vCPU and made a 497 MB archive; incremental
-  syncs take about 1 s. As a system unit (2026-11-25; figures in an untracked report), a first start with a few
-  thousand sessions takes minutes before agentsview opens its port: all that time the unit is active and fabricd gets
-  connection refused. Its memory peaks under 2 GB, page cache included, and a restart on its archive listens within
-  seconds and holds a few hundred MB. The unit sets `MemoryHigh=2G` (decided 2026-11-26): above it the kernel reclaims
-  and slows agentsview rather than kill it, since a full sync needn't be fast. That is above the peak seen, whose own
-  share went unmeasured, so a sync like it isn't slowed; a bigger one, as the sessions grow, is slowed on purpose, and
-  if its own memory passes 2 GB the reclaim goes to swap, which the rest of the machine feels too. It sets no
-  `MemoryMax`: the devbox's earlyoom is the backstop for a runaway. The restart policy stays `on-failure`, so after
-  earlyoom's SIGTERM, a clean exit, agentsview can stay stopped: `kb doctor` shows it, `--fix` starts a user unit
-  again, and a system unit needs `sudo systemctl start`. `always`, to come back by itself, would also have a leftover
-  user unit and the system unit take the port from each other with `--replace` every 30 s (code review, 2026-11-26). A
-  user unit honours `MemoryHigh` only where the user manager has the memory controller delegated, as systemd's default
-  `user@.service` does.
+  syncs take about 1 s. As a system unit (v0.46.1, 2026-11-25; figures in an untracked report), a first start with a
+  few thousand sessions takes minutes before agentsview opens its port: all that time the unit is active and fabricd
+  gets connection refused. Its memory peaks under 2 GB, page cache included, and a restart on its archive listens
+  within seconds and holds a few hundred MB. The unit sets `MemoryHigh=2G` (decided 2026-11-26): above it the kernel
+  reclaims and slows agentsview rather than kill it, since a full sync needn't be fast. That is above the peak seen,
+  whose own share went unmeasured, so a sync like it isn't slowed; a bigger one, as the sessions grow, is slowed on
+  purpose, and if its own memory passes 2 GB the reclaim goes to swap, which the rest of the machine feels too. It
+  sets no `MemoryMax`: the devbox's earlyoom is the backstop for a runaway. The restart policy stays `on-failure`, so
+  after earlyoom's SIGTERM, a clean exit, agentsview can stay stopped: `kb doctor` shows it, `--fix` starts a user
+  unit again, and a system unit needs `sudo systemctl enable --now`, as `kb doctor` says. `always`, to come back by
+  itself, would also have a leftover user unit and the system unit take the port from each other with `--replace`
+  every 30 s (code review, 2026-11-26). A user unit honours `MemoryHigh` only where the user manager has the memory
+  controller delegated, as systemd's default `user@.service` does.
 
 **Live check (CLI agents, devbox, 2026-11-19).** agentsview v0.46.1 ran under the unit's confinement (read-only
 home, only its data dir writable) while Claude Code 2.1.328, Codex 0.166.0 and Copilot CLI 1.0.105 each ran a
