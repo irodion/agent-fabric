@@ -110,7 +110,7 @@ def test_the_user_unit_runs_the_vetted_binary_sandboxed_on_the_configured_port(l
         assert line in text
     assert f'InaccessiblePaths=-"{home}/.ssh"\n' in text
     assert "MemoryHigh=2G\n" in text  # throttled, never killed, past its first sync's peak
-    assert "Restart=always\n" in text  # restarted after earlyoom's SIGTERM too, a clean exit
+    assert "Restart=on-failure\n" in text  # not restarted after earlyoom's SIGTERM, or another's --replace
     assert "User=" not in text
     assert text.endswith("WantedBy=default.target\n")
 
@@ -126,7 +126,7 @@ def test_where_the_sandbox_does_not_hold_fix_stages_a_system_unit_and_says_how_t
     text = staged.read_text()
     assert f"User={lab.kb.home.owner()}\n" in text
     assert "MemoryHigh=2G\n" in text
-    assert "Restart=always\n" in text
+    assert "Restart=on-failure\n" in text
     assert text.endswith("WantedBy=multi-user.target\n")
     assert not the_unit(lab.kb).exists()
     script = staged.with_name("install-agentsview.sh")
