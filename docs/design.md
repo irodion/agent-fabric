@@ -265,16 +265,18 @@ tmux as well as headless.
   telemetry: the web UI posts events to agentsview's own `/api/v1/telemetry/events`, which hands them to the same
   reporter as the server's, so `kit_posthog_disabled` still keeps them on the machine.
 - **Cost.** The first full sync of 6,391 sessions took 5 min 39 s on 2 vCPU and made a 497 MB archive; incremental
-  syncs take about 1 s. As the devbox's system unit (v0.46.1, 2026-11-25), the first start synced 5,540 sessions
-  (2.3 GB) in 6 min 24 s before opening its port: all that time the unit is active and fabricd gets connection
-  refused. The unit's memory peaked at 1.6 GB, page cache included. Restarted on its archive, it listened in 5.7 s
-  and holds about 230 MB, 200 MB of it its own. The unit sets `MemoryHigh=2G` (decided 2026-11-26): above it the
-  kernel reclaims and slows agentsview rather than kill it, since the first sync needn't be fast. 2 GB is above that
-  peak, whose own share went unmeasured, so a sync like it isn't slowed. It sets no `MemoryMax`: the devbox's
-  earlyoom is the backstop for a runaway. The restart policy stays `on-failure`: `always`, to come back after
-  earlyoom, would also have a leftover user unit and the system unit take the port from each other with `--replace`
-  every 30 s (code review, 2026-11-26). A user unit honours `MemoryHigh` only where the user manager has the memory
-  controller delegated, as systemd's default `user@.service` does.
+  syncs take about 1 s. As the devbox's system unit (v0.46.1, 2026-11-25), the first start synced 5,540 sessions (2.3
+  GB) in 6 min 24 s before opening its port: all that time the unit is active and fabricd gets connection refused. The
+  unit's memory peaked at 1.6 GB, page cache included. Restarted on its archive, it listened in 5.7 s and holds about
+  230 MB, 200 MB of it its own. The unit sets `MemoryHigh=2G` (decided 2026-11-26): above it the kernel reclaims and
+  slows agentsview rather than kill it, since a full sync needn't be fast. 2 GB is above that peak, whose own share
+  went unmeasured, so a sync like it isn't slowed; a bigger one, as the sessions grow, is slowed on purpose. It sets
+  no `MemoryMax`: the devbox's earlyoom is the backstop for a runaway. The restart policy stays `on-failure`, so after
+  earlyoom's SIGTERM, a clean exit, agentsview can stay stopped: `kb doctor` shows it, `--fix` starts a user unit
+  again, and a system unit needs `sudo systemctl start`. `always`, to come back by itself, would also have a leftover
+  user unit and the system unit take the port from each other with `--replace` every 30 s (code review, 2026-11-26). A
+  user unit honours `MemoryHigh` only where the user manager has the memory controller delegated, as systemd's default
+  `user@.service` does.
 
 **Live check (CLI agents, devbox, 2026-11-19).** agentsview v0.46.1 ran under the unit's confinement (read-only
 home, only its data dir writable) while Claude Code 2.1.328, Codex 0.166.0 and Copilot CLI 1.0.105 each ran a
@@ -1340,7 +1342,7 @@ nothing from it, so hooks and notes don't load it.
 
 ## 5. Processes, ports, locations
 
-| Unit (systemd --user) | Command | Bind |
+| Unit (systemd --user, unless the row says otherwise) | Command | Bind |
 |---|---|---|
 | `agentsview.service` (sandboxed; user or system unit, §4.1) — `kb doctor --fix` sets it up with fabricd's: two transient user units probe whether they hold, on the machine alone: with the sandbox settings, a home file it can't write and loopback it can reach; with `IPAddressDeny=any` alone, loopback it can't, which shows the filter is applied. Only those answers, and systemd's 226/NAMESPACE, mean a system unit; any other failure can't tell. Where they hold, kb writes and starts a user unit; where not, it stages the system unit with `User=` in its data folder, beside a script that installs it (kb doctor's step copies the script out of the home as root, checks it against the sha256 of the one kb wrote, shows it and runs the copy with `sudo sh` on a y or Y, all one command that stops at any failure with a nonzero status and then removes the copy (an interrupt leaves it in /tmp), so what the administrator reads is what runs; the script enables and starts a first install, restarts one already there only while it's enabled, and refuses a masked unit, one kb didn't write, or a staged unit that differs from the one it was written with), then only reads it. Either unit sets `MemoryHigh=2G`, which a user unit gets only with the memory controller delegated (§4.1, Cost). The probe on the devbox (2026-11-23): the home stays writable, so a system unit. | `agentsview serve --no-browser --no-update-check --port <port> --replace` | `127.0.0.1:<port>` (8080 by default) |
 | `fabricd.service` | tracker, observer, digester, panel. `kb doctor --fix` writes and starts it once a workspace allows a project, as it does ingest's timers: the allow list is the say-so to publish, and a machine that only takes notes runs no daemon (2026-11-22). It runs the installed `fabricd` with a `PATH` of gitleaks' and git's folders, and keeps a unit the user disabled or masked off; `install.sh` restarts a running one of kb's on the new code. `KillMode=mixed`: a stop sends SIGTERM to fabricd alone, which waits for the step under way, so a wiki commit or gitleaks scan it runs isn't killed with it, and `TimeoutStopSec=300` outlasts both, where systemd's 90 s wouldn't outlast a commit's 120 (Bugbot, 2026-11-23) (code review, 2026-11-22). `Restart=on-failure`, except after a config it can't read (exit 2) or another fabricd on its data folder (exit 3), so neither restarts every 30 s; a bad config waits for a fix: `kb doctor` checks fabricd's settings itself and `--fix` starts it once they read. A `fabricd.service` kb didn't write is the user's, left as it is | 127.0.0.1:8090 |
