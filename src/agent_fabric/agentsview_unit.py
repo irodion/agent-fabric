@@ -387,8 +387,20 @@ def _stage(env: Mapping[str, str], settings: Settings, said: tuple[str, str], *,
             return Row("problem", "agentsview", shown, f"can't stage the unit ({e.strerror or e})", step=step)
     elif not _staged_current(env, settings):
         return Row(status, "agentsview", shown, why, step="Run kb doctor --fix, which stages the unit to install")
-    step = f"Read {tilde(script(env), env)}, then run sudo sh {shlex.quote(str(script(env)))}"
+    step = _install_step(env, settings)
     return Row(status, "agentsview", shown, f"{why}; staged at {tilde(staged(env), env)}", step=step)
+
+
+def _install_step(env: Mapping[str, str], settings: Settings) -> str:
+    """Copy, check, read, run: the script is copied where only root can write and checked against the hash of the
+    one kb wrote, so what the administrator reads is what runs, whatever writes in the user's home meanwhile."""
+    digest = hashlib.sha256(installer(env, settings).encode()).hexdigest()
+    return (
+        f"As root, copy {tilde(script(env), env)} out of the home, check it and read it: "
+        f'f=$(sudo mktemp) && sudo cp {shlex.quote(str(script(env)))} "$f" '
+        f'&& echo "{digest}  $f" | sudo sha256sum -c && sudo cat "$f"; '
+        'then run it: sudo sh "$f" && sudo rm "$f"'
+    )
 
 
 def _system(
