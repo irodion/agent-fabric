@@ -394,14 +394,17 @@ def _stage(env: Mapping[str, str], settings: Settings, said: tuple[str, str], *,
 def _install_step(env: Mapping[str, str], settings: Settings) -> str:
     """One command for an administrator's shell: copy the script where only root can write, check it against the
     hash of the one kb wrote, show it, and run it only on a y, so what the administrator reads is what runs, whatever
-    writes in the user's home meanwhile. Any failure stops it, and the copy goes either way. No double quotes or
-    backslashes: the report would escape them, and the command must paste as printed."""
+    writes in the user's home meanwhile. A failure stops it and sets its exit status, and the copy is removed after,
+    unless the administrator interrupts it. No double quotes or backslashes, since the report would escape them and
+    the command must paste as printed; that holds while the home's path has no single quote, which shlex would
+    escape with double quotes. The prose names the absolute path too: in an administrator's shell, ~ is theirs."""
     digest = hashlib.sha256(installer(env, settings).encode()).hexdigest()
+    path = shlex.quote(str(script(env)))
     return (
-        f"As an administrator, copy {tilde(script(env), env)} out of the home, check it against the one kb wrote, "
-        f"read it and run it: f=$(sudo mktemp) && sudo cp {shlex.quote(str(script(env)))} $f "
-        f"&& echo '{digest}  '$f | sudo sha256sum -c && sudo cat $f "
-        "&& printf 'Run it? [y/N] ' && read a && [ x$a = xy ] && sudo sh $f; sudo rm -f $f"
+        f"As an administrator, copy {path} out of the home, check it against the one kb wrote, read it and run it: "
+        f"f=$(sudo mktemp) && sudo cp {path} $f && echo '{digest}  '$f | sudo sha256sum -c && sudo cat $f "
+        "&& printf 'Run it? [y/N] ' && read a && case $a in y|Y) sudo sh $f ;; *) false ;; esac; "
+        "s=$?; sudo rm -f $f; [ $s = 0 ]"
     )
 
 
