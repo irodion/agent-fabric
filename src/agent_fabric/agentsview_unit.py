@@ -43,8 +43,8 @@ HIDDEN = (
     ".codex/auth.json",
     ".claude/.credentials.json",
 )  # credentials it never reads
-# Above this, the kernel reclaims its memory and slows it rather than kill it: above the devbox's first full sync,
-# cache included, so a sync like that one isn't slowed, while a bigger one gives way to the agents (§4.1, Cost).
+# Above this, the kernel reclaims its memory and slows it rather than kill it: above the peak of a first full sync
+# seen, cache included, so a sync like that one isn't slowed, while a bigger one gives way (§4.1, Cost).
 MEMORY_HIGH = "MemoryHigh=2G"
 MOVED = (("CODEX_HOME", "auth.json"), ("CLAUDE_CONFIG_DIR", ".credentials.json"))
 RUNNING = "running sandboxed: fabricd reads Claude Code's and Codex's sessions through it"
