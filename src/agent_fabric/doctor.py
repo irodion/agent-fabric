@@ -256,11 +256,11 @@ def _copilot_sync(settings: Path, env: Mapping[str, str]) -> Row:
 
 
 def _ingest_tools(
-    env: Mapping[str, str], read: Config, workspaces: list[Workspace], running: set[Workspace]
+    env: Mapping[str, str], read: Config, workspaces: list[Workspace], from_shell: list[Workspace]
 ) -> list[Row]:
-    """What `kb ingest` needs, once some workspace has a project for it to publish (docs/design.md §4.5, §4.7). A
-    workspace whose timer systemd runs on a PATH that finds them needs none from the shell's: the timer's row covers
-    them (§5)."""
+    """What `kb ingest` needs, once some workspace has a project for it to publish (docs/design.md §4.5, §4.7), from
+    the shell's PATH for the workspaces `from_shell` names. Not for one whose timer systemd runs on a PATH that finds
+    them, which the timer's row covers (§5), nor for a root that isn't there, which its workspace row names."""
     shown = tilde(config_file(env), env)
     rows = []
     tools: dict[str, None] = {}  # what the workspaces with a project allowed run from this shell, each once
@@ -274,7 +274,7 @@ def _ingest_tools(
             continue
         if problem := not_ours(backend):
             rows.append(Row("problem", "ingest", config.setting(env, workspace.root, "ingest", "backend"), problem))
-        if workspace not in running:
+        if workspace in from_shell:
             tools.update(dict.fromkeys(("gitleaks",) if problem else ("gitleaks", backend)))
     return rows + [
         Row("problem", "ingest", tool, f"{tool} isn't on PATH, and kb ingest needs it")
@@ -376,7 +376,7 @@ def doctor(
     timers, running = timer.check(env, spaces.registered, ingest_units, fix=fix, known=spaces.known)
     rows += [
         *(
-            _ingest_tools(env, spaces.config, spaces.registered, running)
+            _ingest_tools(env, spaces.config, spaces.registered, [w for w in workspaces if w not in running])
             if spaces.known and isinstance(spaces.config, Config)
             else []
         ),
