@@ -207,6 +207,14 @@ def test_a_line_that_isnt_json_is_skipped(home: Path, caplog: pytest.LogCaptureF
     assert "isn't JSON" in caplog.text
 
 
+def test_a_line_too_deep_to_read_is_skipped(home: Path, caplog: pytest.LogCaptureFixture) -> None:
+    with events(home).open("a") as file:
+        file.write("[" * 200_000 + "\n")
+    append(home, reply("after"))
+    assert [m.content for m in source(home).messages(ID, 7).messages] == ["after"]
+    assert "isn't JSON" in caplog.text
+
+
 @pytest.mark.parametrize(
     "odd",
     [

@@ -12,7 +12,8 @@ import os
 import shutil
 import sqlite3
 import time
-from contextlib import closing
+from collections.abc import Callable, Iterator
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ ID = f"cursor:{SESSION}"
 LONG_AGO = datetime(2020, 1, 1, tzinfo=UTC)
 RECORDED = 1_795_772_678.165  # the session's updatedAtMs, in seconds
 OTHER = "5e8f3636-1cb7-4d58-8523-368e9b08abfb"
+OTHER_ID = f"cursor:{OTHER}"
 MESSAGE_BLOBS = 12  # the recorded root's field 1s, the conversation's messages, which the reader looks up first
 
 
@@ -51,6 +53,16 @@ def home(tmp_path: Path) -> Path:
 
 def chat(home: Path) -> Path:
     return home / ".cursor" / "chats" / FOLDER / SESSION
+
+
+@contextmanager
+def permissions(folder: Path, mode: int) -> Iterator[None]:
+    """The folder with `mode` for the block, and its own back after, so that the test's folder can be removed."""
+    folder.chmod(mode)
+    try:
+        yield
+    finally:
+        folder.chmod(0o755)
 
 
 def source(home: Path, **kwargs: Any) -> CursorSource:
@@ -84,7 +96,7 @@ def write_store(folder: Path, messages: list[Any], *, tail: bytes = b"") -> None
     (folder / "store.db").unlink(missing_ok=True)
     blobs = [message if isinstance(message, bytes | None) else json.dumps(message).encode() for message in messages]
     ids = [hashlib.sha256(blob or b"").digest() for blob in blobs]
-    root = b"".join(b"\x0a\x20" + id for id in ids) + tail  # field 1, 32 bytes long, once per message
+    root = root_of(blobs) + tail
     with closing(sqlite3.connect(folder / "store.db")) as db, db:
         db.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)")
         db.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
@@ -93,8 +105,17 @@ def write_store(folder: Path, messages: list[Any], *, tail: bytes = b"") -> None
             [(id.hex(), blob) for id, blob in zip(ids, blobs, strict=True)],
         )
         db.execute("INSERT INTO blobs VALUES (?, ?)", (hashlib.sha256(root).hexdigest(), root))
-        head = {"agentId": OTHER, "latestRootBlobId": hashlib.sha256(root).hexdigest()}
-        db.execute("INSERT INTO meta VALUES ('0', ?)", (json.dumps(head).encode().hex(),))
+        db.execute("INSERT INTO meta VALUES ('0', ?)", (head_of(root),))
+
+
+def root_of(blobs: list[bytes | None]) -> bytes:
+    """A root blob that lists the messages in order: field 1, 32 bytes long, once per message."""
+    return b"".join(b"\x0a\x20" + hashlib.sha256(blob or b"").digest() for blob in blobs)
+
+
+def head_of(root: bytes) -> str:
+    """`meta` key `0`, which names the root: hex-encoded JSON."""
+    return json.dumps({"agentId": OTHER, "latestRootBlobId": hashlib.sha256(root).hexdigest()}).encode().hex()
 
 
 def prompt(text: str) -> dict[str, Any]:
@@ -174,6 +195,12 @@ def test_a_session_that_cant_be_read_is_skipped_alone(home: Path, caplog: pytest
     assert "5e8f3636" in caplog.text
 
 
+def test_a_meta_too_deep_to_read_is_skipped_alone(home: Path, caplog: pytest.LogCaptureFixture) -> None:
+    write_chat(home, [prompt("hi")], meta="[" * 200_000)
+    assert [s.id for s in source(home).active_sessions(LONG_AGO)] == [ID]
+    assert "5e8f3636" in caplog.text
+
+
 @pytest.mark.parametrize("stamp", ["NaN", "Infinity", "1e20", "-1e20", '"yesterday"'])
 def test_a_meta_time_that_isnt_one_is_left_out(home: Path, stamp: str) -> None:
     write_chat(
@@ -182,8 +209,8 @@ def test_a_meta_time_that_isnt_one_is_left_out(home: Path, stamp: str) -> None:
         meta=f'{{"cwd":"/home/ann/x","createdAtMs":{stamp},"updatedAtMs":{stamp}}}',
     )
     listed = {s.id: s for s in source(home).active_sessions(LONG_AGO)}
-    assert listed[f"cursor:{OTHER}"].started_at is None
-    assert listed[f"cursor:{OTHER}"].ended_at is not None  # when its store was written
+    assert listed[OTHER_ID].started_at is None
+    assert listed[OTHER_ID].ended_at is not None  # when its store was written
 
 
 def test_a_message_blob_that_isnt_json_text_spoils_its_session_alone(
@@ -199,7 +226,7 @@ def test_a_store_without_its_meta_is_unreadable_not_gone(home: Path, caplog: pyt
     assert [s.id for s in source(home).active_sessions(LONG_AGO)] == [ID]
     assert OTHER in caplog.text
     with pytest.raises(CaptureError) as caught:
-        source(home).session(f"cursor:{OTHER}")
+        source(home).session(OTHER_ID)
     assert not caught.value.gone
 
 
@@ -214,12 +241,12 @@ def test_a_store_without_its_meta_is_unreadable_not_gone(home: Path, caplog: pyt
 def test_cursors_context_isnt_a_prompt_in_any_form(home: Path, content: Any) -> None:
     context = {"role": "user", "content": content}
     write_chat(home, [{"role": "system", "content": "You are"}, context, prompt("hi"), answer("hello")])
-    assert source(home).session(f"cursor:{OTHER}").message_count == 2
+    assert source(home).session(OTHER_ID).message_count == 2
 
 
 def test_a_prompt_that_mentions_user_info_is_still_a_prompt(home: Path) -> None:
     write_chat(home, [prompt("what goes in <user_info>?"), answer("the machine")])
-    assert source(home).session(f"cursor:{OTHER}").message_count == 2
+    assert source(home).session(OTHER_ID).message_count == 2
 
 
 def test_a_varint_longer_than_protobuf_allows_spoils_its_session_alone(
@@ -269,7 +296,7 @@ def test_a_store_cursor_hasnt_filled_yet_is_skipped_quietly(
     assert [s.id for s in source(home).active_sessions(LONG_AGO)] == [ID]
     assert caplog.text == ""
     with pytest.raises(CaptureError) as caught:
-        source(home).session(f"cursor:{OTHER}")
+        source(home).session(OTHER_ID)
     assert not caught.value.gone
 
 
@@ -341,14 +368,11 @@ def test_a_root_cut_short_spoils_its_session_alone(home: Path, tail: bytes, capl
 @pytest.mark.parametrize("unreadable", [Path(), Path(FOLDER)])  # the chats folder, and a folder of chats in it
 def test_chats_that_cant_be_looked_at_are_a_capture_error_not_none(home: Path, unreadable: Path) -> None:
     folder = home / ".cursor" / "chats" / unreadable
-    folder.chmod(0)
-    try:
+    with permissions(folder, 0):
         with pytest.raises(CaptureError) as listing:
             source(home).active_sessions(LONG_AGO)
         with pytest.raises(CaptureError) as reading:
             source(home).session(ID)
-    finally:
-        folder.chmod(0o755)
     assert not listing.value.gone
     assert not reading.value.gone
 
@@ -365,14 +389,11 @@ def test_a_session_folder_that_cant_be_looked_at_is_skipped_alone(
     home: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     folder = write_chat(home, [prompt("hi"), answer("hello")])
-    folder.chmod(0)
-    try:
+    with permissions(folder, 0):
         assert [s.id for s in source(home).active_sessions(LONG_AGO)] == [ID]
         assert source(home).session(ID).id == ID
         with pytest.raises(CaptureError) as caught:
-            source(home).session(f"cursor:{OTHER}")
-    finally:
-        folder.chmod(0o755)
+            source(home).session(OTHER_ID)
     assert OTHER in caplog.text
     assert not caught.value.gone
 
@@ -380,7 +401,7 @@ def test_a_session_folder_that_cant_be_looked_at_is_skipped_alone(
 @pytest.mark.parametrize("cwd", ["", "code/x", 7])
 def test_a_folder_that_isnt_an_absolute_path_is_left_out(home: Path, cwd: object) -> None:
     write_chat(home, [prompt("hi"), answer("hello")], meta=json.dumps({"cwd": cwd, "createdAtMs": 1795772600000}))
-    session = source(home).session(f"cursor:{OTHER}")
+    session = source(home).session(OTHER_ID)
     assert (session.cwd, session.project) == (None, "")
 
 
@@ -462,7 +483,7 @@ def test_a_call_reads_as_the_agent_made_it(home: Path) -> None:
 def test_a_tool_falls_in_agentsviews_category_for_it(home: Path, tool: str, category: str) -> None:
     call = {"type": "tool-call", "toolCallId": "c1", "toolName": tool, "args": {}}
     write_chat(home, [prompt("go"), answer("on it", call)])
-    assert messages(home, f"cursor:{OTHER}")[1].tool_calls[0].category == category
+    assert messages(home, OTHER_ID)[1].tool_calls[0].category == category
 
 
 def test_a_reply_keeps_its_reasoning_and_its_texts_together(home: Path) -> None:
@@ -481,7 +502,7 @@ def test_a_reply_keeps_its_reasoning_and_its_texts_together(home: Path) -> None:
         ],
     }
     write_chat(home, [prompt("hi"), reply])
-    said = messages(home, f"cursor:{OTHER}")[1]
+    said = messages(home, OTHER_ID)[1]
     assert (said.content, said.thinking_text, said.model) == (
         "```py\n    x = 1\n    y = 2\n```",  # joined as agentsview joins them, trimmed only at the ends
         "The user wants a word.",
@@ -492,12 +513,12 @@ def test_a_reply_keeps_its_reasoning_and_its_texts_together(home: Path) -> None:
 def test_a_user_message_cursor_didnt_wrap_as_a_prompt_isnt_one(home: Path) -> None:
     injected = {"role": "user", "content": "<system_reminder>be brief</system_reminder>"}
     write_chat(home, [prompt("hi"), answer("hello"), injected, prompt("again"), answer("ok")])
-    assert [m.content for m in messages(home, f"cursor:{OTHER}")] == ["hi", "hello", "again", "ok"]
+    assert [m.content for m in messages(home, OTHER_ID)] == ["hi", "hello", "again", "ok"]
 
 
 def test_a_prompt_keeps_what_comes_before_cursors_closing_tag(home: Path) -> None:
     write_chat(home, [prompt("why does <user_query> end at </user_query>?"), answer("it doesn't")])
-    assert messages(home, f"cursor:{OTHER}")[0].content == "why does <user_query> end at </user_query>?"
+    assert messages(home, OTHER_ID)[0].content == "why does <user_query> end at </user_query>?"
 
 
 def test_a_prompt_with_skills_attached_reads_as_what_the_user_typed(home: Path) -> None:
@@ -505,20 +526,20 @@ def test_a_prompt_with_skills_attached_reads_as_what_the_user_typed(home: Path) 
         "<manually_attached_skills>\nkb-note\n</manually_attached_skills>\n<user_query>\nleave a note\n</user_query>"
     )
     write_chat(home, [{"role": "user", "content": [{"type": "text", "text": text}]}, answer("done")])
-    assert messages(home, f"cursor:{OTHER}")[0].content == "leave a note"
+    assert messages(home, OTHER_ID)[0].content == "leave a note"
 
 
 def test_arguments_already_written_as_json_are_kept_as_they_are(home: Path) -> None:
     call = {"type": "tool-call", "toolCallId": "c1", "toolName": "Shell", "args": '{"command":"ls"}'}
     write_chat(home, [prompt("go"), answer("on it", call)])
-    assert messages(home, f"cursor:{OTHER}")[1].tool_calls[0].input_json == '{"command":"ls"}'
+    assert messages(home, OTHER_ID)[1].tool_calls[0].input_json == '{"command":"ls"}'
 
 
 def test_a_reply_without_reasoning_keeps_the_model_of_the_reply_before(home: Path) -> None:
     reasoning = {"type": "reasoning", "text": "", "providerOptions": {"cursor": {"modelName": "m1"}}}
     first = {"id": "1", "role": "assistant", "content": [reasoning, {"type": "text", "text": "one"}]}
     write_chat(home, [prompt("hi"), first, prompt("again"), answer("two")])
-    assert [m.model for m in messages(home, f"cursor:{OTHER}")] == [None, "m1", None, "m1"]
+    assert [m.model for m in messages(home, OTHER_ID)] == [None, "m1", None, "m1"]
 
 
 def test_a_part_of_a_shape_this_reader_doesnt_know_is_skipped(home: Path) -> None:
@@ -528,7 +549,7 @@ def test_a_part_of_a_shape_this_reader_doesnt_know_is_skipped(home: Path) -> Non
         "content": [{"type": "image"}, "text", {"type": "tool-call"}, {"type": "text", "text": "ok"}],
     }
     write_chat(home, [prompt("hi"), odd])
-    said = messages(home, f"cursor:{OTHER}")[1]
+    said = messages(home, OTHER_ID)[1]
     assert (said.content, said.tool_calls) == ("ok", ())
 
 
@@ -542,12 +563,12 @@ def test_a_read_past_the_last_message_finds_none(home: Path) -> None:
 
 def test_the_revision_moves_with_each_write_cursor_makes(home: Path) -> None:
     folder = write_chat(home, [prompt("hi")])
-    before = source(home).messages(f"cursor:{OTHER}", 0).revision
+    before = source(home).messages(OTHER_ID, 0).revision
     write_store(folder, [prompt("hi"), answer("hello")])
-    after = source(home).messages(f"cursor:{OTHER}", 0)
+    after = source(home).messages(OTHER_ID, 0)
     assert before is not None
     assert after.revision not in (None, before)
-    assert after.revision == source(home).session(f"cursor:{OTHER}").transcript_revision
+    assert after.revision == source(home).session(OTHER_ID).transcript_revision
 
 
 def test_a_reply_or_prompt_with_nothing_to_read_takes_no_ordinal(home: Path) -> None:
@@ -555,26 +576,26 @@ def test_a_reply_or_prompt_with_nothing_to_read_takes_no_ordinal(home: Path) -> 
     empty_reply = {"id": "1", "role": "assistant", "content": [thought]}
     empty_prompt = {"role": "user", "content": "<user_query>\n\n</user_query>"}
     write_chat(home, [prompt("hi"), empty_reply, answer("done"), empty_prompt])
-    read = messages(home, f"cursor:{OTHER}")
+    read = messages(home, OTHER_ID)
     assert [(m.ordinal, m.content, m.model) for m in read] == [(0, "hi", None), (1, "done", "m1")]
 
 
 def test_a_reply_written_as_a_string_reads_as_its_text(home: Path) -> None:
     write_chat(home, [prompt("hi"), {"role": "assistant", "content": " hello "}])
-    assert messages(home, f"cursor:{OTHER}")[1].content == "hello"
+    assert messages(home, OTHER_ID)[1].content == "hello"
 
 
 def test_a_prompt_cut_before_its_closing_tag_reads_from_its_opening_one(home: Path) -> None:
     cut = {"role": "user", "content": "<timestamp>Friday</timestamp>\n<user_query>\nfix it"}
     write_chat(home, [cut, answer("ok")])
-    assert messages(home, f"cursor:{OTHER}")[0].content == "fix it"
+    assert messages(home, OTHER_ID)[0].content == "fix it"
 
 
 def test_arguments_json_cant_write_leave_the_input_out(home: Path) -> None:
     part = b'{"type":"tool-call","toolCallId":"c1","toolName":"Shell","args":{"n":NaN}}'
     call = b'{"id":"1","role":"assistant","content":[' + part + b"]}"
     write_chat(home, [prompt("go"), call])
-    shell = messages(home, f"cursor:{OTHER}")[1].tool_calls[0]
+    shell = messages(home, OTHER_ID)[1].tool_calls[0]
     assert (shell.tool_name, shell.input_json) == ("Shell", None)
 
 
@@ -585,13 +606,13 @@ def test_a_prompt_reads_only_the_part_cursor_wrapped(home: Path) -> None:
     write_chat(
         home, [{"role": "user", "content": [query, attached]}, {"role": "user", "content": [hidden]}, answer("ok")]
     )
-    assert [m.content for m in messages(home, f"cursor:{OTHER}")] == ["fix it", "ok"]
+    assert [m.content for m in messages(home, OTHER_ID)] == ["fix it", "ok"]
 
 
 def test_a_calls_input_under_the_ai_sdks_newer_name_reads_too(home: Path) -> None:
     call = {"type": "tool-call", "toolCallId": "c1", "toolName": "Shell", "input": {"command": "ls"}}
     write_chat(home, [prompt("go"), answer("on it", call)])
-    assert messages(home, f"cursor:{OTHER}")[1].tool_calls[0].input_json == '{"command":"ls"}'
+    assert messages(home, OTHER_ID)[1].tool_calls[0].input_json == '{"command":"ls"}'
 
 
 # ── tool results ──────────────────────────────────────────────────────────
@@ -641,14 +662,14 @@ def test_a_command_that_succeeded_exits_0(home: Path) -> None:
             result("c1", "Shell", "Exit code: 0", {"success": {"command": "true", "stdout": ""}}),
         ],
     )
-    (command,) = messages(home, f"cursor:{OTHER}")[1].tool_calls
+    (command,) = messages(home, OTHER_ID)[1].tool_calls
     assert (command.exit_code, command.result_content) == (0, "Exit code: 0")
 
 
 def test_a_rejected_command_errored_with_no_exit_code(home: Path) -> None:
     rejected = result("c1", "Shell", "Rejected: ", {"rejected": {"command": "rm -rf x"}}, error=True)
     write_chat(home, [prompt("go"), answer("on it", shell("c1", "rm -rf x")), rejected])
-    (command,) = messages(home, f"cursor:{OTHER}")[1].tool_calls
+    (command,) = messages(home, OTHER_ID)[1].tool_calls
     assert (command.exit_code, [e.status for e in command.result_events]) == (None, ["errored"])
     assert command.result_content == "Rejected: "
 
@@ -663,7 +684,7 @@ def test_a_failed_edit_keeps_its_error(home: Path) -> None:
         error=True,
     )
     write_chat(home, [prompt("fix"), answer("on it", edit), failed])
-    (call,) = messages(home, f"cursor:{OTHER}")[1].tool_calls
+    (call,) = messages(home, OTHER_ID)[1].tool_calls
     assert (call.result_content, [e.status for e in call.result_events]) == (
         "Error: String not found in file",
         ["errored"],
@@ -672,7 +693,7 @@ def test_a_failed_edit_keeps_its_error(home: Path) -> None:
 
 def test_a_call_still_running_has_no_result_yet(home: Path) -> None:
     write_chat(home, [prompt("go"), answer("on it", shell("c1", "sleep 9"))])
-    (command,) = messages(home, f"cursor:{OTHER}")[1].tool_calls
+    (command,) = messages(home, OTHER_ID)[1].tool_calls
     assert (command.result_content, command.result_events, command.exit_code) == (None, (), None)
 
 
@@ -682,7 +703,7 @@ def test_results_fold_into_their_own_calls_whatever_the_order(home: Path) -> Non
     first = result("c1", "Shell", "Exit code: 0", {"success": {"command": "a"}})
     stray = result("c9", "Shell", "Exit code: 5", {"failure": {"command": "c", "exitCode": 5}})
     write_chat(home, [prompt("go"), calls, second, stray, first, answer("done")])
-    read = messages(home, f"cursor:{OTHER}")
+    read = messages(home, OTHER_ID)
     assert [(c.tool_use_id, c.exit_code) for c in read[1].tool_calls] == [("c1", 0), ("c2", 2)]
     assert [m.content for m in read] == ["go", "both", "done"]
 
@@ -691,14 +712,14 @@ def test_a_result_written_as_parts_reads_as_their_text(home: Path) -> None:
     parts = {"type": "tool-result", "toolCallId": "c1", "result": [{"type": "text", "text": "out"}]}
     odd = {"id": "t", "role": "tool", "content": [parts, "x"]}
     write_chat(home, [prompt("go"), answer("on it", shell("c1", "a")), odd])
-    (command,) = messages(home, f"cursor:{OTHER}")[1].tool_calls
+    (command,) = messages(home, OTHER_ID)[1].tool_calls
     assert (command.result_content, command.exit_code) == ("out", None)
 
 
 def test_a_result_with_no_record_of_its_end_has_no_status(home: Path) -> None:
     bare = {"id": "t", "role": "tool", "content": [{"type": "tool-result", "toolCallId": "c1", "result": "out"}]}
     write_chat(home, [prompt("go"), answer("on it", shell("c1", "a")), bare])
-    (command,) = messages(home, f"cursor:{OTHER}")[1].tool_calls
+    (command,) = messages(home, OTHER_ID)[1].tool_calls
     assert [(e.status, e.content) for e in command.result_events] == [(None, "out")]
 
 
@@ -706,7 +727,7 @@ def test_a_record_is_the_result_whose_call_the_tool_message_is_named_for(home: P
     both = result("c1", "Shell", "Rejected: ", {"rejected": {"command": "a"}}, error=True)
     both["content"].append({"type": "tool-result", "toolCallId": "c2", "toolName": "Shell", "result": "Exit code: 0"})
     write_chat(home, [prompt("go"), answer("on it", shell("c1", "a"), shell("c2", "b")), both])
-    calls = messages(home, f"cursor:{OTHER}")[1].tool_calls
+    calls = messages(home, OTHER_ID)[1].tool_calls
     assert [[e.status for e in c.result_events] for c in calls] == [["errored"], [None]]
 
 
@@ -723,20 +744,20 @@ def test_a_call_cursor_recorded_as_failing_errored_whatever_its_flag_says(home: 
     ended = result("c1", "Shell", "?", output)
     del ended["providerOptions"]["cursor"]["highLevelToolCallResult"]["isError"]
     write_chat(home, [prompt("go"), answer("on it", shell("c1", "a")), ended])
-    (command,) = messages(home, f"cursor:{OTHER}")[1].tool_calls
+    (command,) = messages(home, OTHER_ID)[1].tool_calls
     assert ([e.status for e in command.result_events], command.exit_code) == (["errored"], None)
 
 
 def test_a_result_json_cant_write_strictly_still_shows(home: Path) -> None:
     odd = b'{"id":"c1","role":"tool","content":[{"type":"tool-result","toolCallId":"c1","result":{"n":NaN}}]}'
     write_chat(home, [prompt("go"), answer("on it", shell("c1", "a")), odd])
-    assert messages(home, f"cursor:{OTHER}")[1].tool_calls[0].result_content == '{"n":NaN}'
+    assert messages(home, OTHER_ID)[1].tool_calls[0].result_content == '{"n":NaN}'
 
 
 def test_a_command_left_running_in_the_background_has_no_exit_code_yet(home: Path) -> None:
     started = result("c1", "Shell", "Started", {"success": {"command": "npm run dev"}, "isBackground": True})
     write_chat(home, [prompt("go"), answer("on it", shell("c1", "npm run dev")), started])
-    (command,) = messages(home, f"cursor:{OTHER}")[1].tool_calls
+    (command,) = messages(home, OTHER_ID)[1].tool_calls
     assert (command.exit_code, command.result_content) == (None, "Started")
     assert [e.status for e in command.result_events] == ["running"]
 
@@ -745,7 +766,7 @@ def test_a_command_left_running_in_the_background_has_no_exit_code_yet(home: Pat
 def test_a_failure_cursor_recorded_errored_whatever_its_code(home: Path, code: int) -> None:
     failed = result("c1", "Shell", f"Exit code: {code}", {"failure": {"command": "a", "exitCode": code}})
     write_chat(home, [prompt("go"), answer("on it", shell("c1", "a")), failed])
-    (command,) = messages(home, f"cursor:{OTHER}")[1].tool_calls
+    (command,) = messages(home, OTHER_ID)[1].tool_calls
     assert ([e.status for e in command.result_events], command.exit_code) == (["errored"], code)
 
 
@@ -754,7 +775,7 @@ def test_a_record_with_error_messages_errored(home: Path) -> None:
     crashed["providerOptions"]["cursor"]["highLevelToolCallResult"]["rawErrorMessages"] = ["tool crashed"]
     read = {"type": "tool-call", "toolCallId": "c1", "toolName": "Read", "args": {}}
     write_chat(home, [prompt("go"), answer("on it", read), crashed])
-    assert [e.status for e in messages(home, f"cursor:{OTHER}")[1].tool_calls[0].result_events] == ["errored"]
+    assert [e.status for e in messages(home, OTHER_ID)[1].tool_calls[0].result_events] == ["errored"]
 
 
 def test_a_result_of_no_text_leaves_its_data_out(home: Path) -> None:
@@ -762,7 +783,7 @@ def test_a_result_of_no_text_leaves_its_data_out(home: Path) -> None:
     write_chat(
         home, [prompt("go"), answer("on it", shell("c1", "a")), {"id": "t", "role": "tool", "content": [image]}]
     )
-    assert messages(home, f"cursor:{OTHER}")[1].tool_calls[0].result_content is None
+    assert messages(home, OTHER_ID)[1].tool_calls[0].result_content is None
 
 
 @pytest.mark.parametrize(
@@ -777,13 +798,13 @@ def test_a_result_of_no_text_leaves_its_data_out(home: Path) -> None:
 def test_a_list_that_isnt_content_parts_reads_as_its_json(home: Path, answered: list[Any], content: str) -> None:
     listed = {"id": "t", "role": "tool", "content": [{"type": "tool-result", "toolCallId": "c1", "result": answered}]}
     write_chat(home, [prompt("go"), answer("on it", shell("c1", "a")), listed])
-    assert messages(home, f"cursor:{OTHER}")[1].tool_calls[0].result_content == content
+    assert messages(home, OTHER_ID)[1].tool_calls[0].result_content == content
 
 
 def test_an_outcome_other_than_success_errored(home: Path) -> None:
     timed_out = result("c1", "Shell", "Timed out", {"timeout": {"command": "pytest"}})
     write_chat(home, [prompt("go"), answer("on it", shell("c1", "pytest")), timed_out])
-    (command,) = messages(home, f"cursor:{OTHER}")[1].tool_calls
+    (command,) = messages(home, OTHER_ID)[1].tool_calls
     assert ([e.status for e in command.result_events], command.exit_code) == (["errored"], None)
 
 
@@ -794,7 +815,7 @@ def test_a_record_with_no_outcome_says_nothing_of_how_the_call_ended(home: Path,
     told = result("c1", "Shell", "?", {})
     told["providerOptions"]["cursor"]["highLevelToolCallResult"] = ended
     write_chat(home, [prompt("go"), answer("on it", shell("c1", "a")), told])
-    (command,) = messages(home, f"cursor:{OTHER}")[1].tool_calls
+    (command,) = messages(home, OTHER_ID)[1].tool_calls
     assert ([e.status for e in command.result_events], command.exit_code) == ([None], None)
 
 
@@ -802,15 +823,13 @@ def test_records_with_a_type_that_arent_content_parts_read_as_their_json(home: P
     hits = [{"type": "file", "path": "calc.py"}, {"type": "dir", "path": "src"}]
     listed = {"id": "t", "role": "tool", "content": [{"type": "tool-result", "toolCallId": "c1", "result": hits}]}
     write_chat(home, [prompt("go"), answer("on it", shell("c1", "a")), listed])
-    assert messages(home, f"cursor:{OTHER}")[1].tool_calls[0].result_content == json.dumps(
-        hits, separators=(",", ":")
-    )
+    assert messages(home, OTHER_ID)[1].tool_calls[0].result_content == json.dumps(hits, separators=(",", ":"))
 
 
 def test_a_success_with_its_own_exit_code_keeps_it(home: Path) -> None:
     found = result("c1", "Shell", "Exit code: 1", {"success": {"command": "grep x f", "exitCode": 1}})
     write_chat(home, [prompt("go"), answer("on it", shell("c1", "grep x f")), found])
-    assert messages(home, f"cursor:{OTHER}")[1].tool_calls[0].exit_code == 1
+    assert messages(home, OTHER_ID)[1].tool_calls[0].exit_code == 1
 
 
 # ── reading under a read-only home ────────────────────────────────────────
@@ -827,16 +846,39 @@ def wal_store(home: Path, tmp_path: Path, *, shm: bool) -> Path:
         db.execute("PRAGMA journal_mode=wal")
         db.execute("PRAGMA wal_autocheckpoint=0")  # the write below stays in the WAL
         reply = json.dumps(answer("hello")).encode()
-        root = b"\x0a\x20" + hashlib.sha256(json.dumps(prompt("hi")).encode()).digest()
-        root += b"\x0a\x20" + hashlib.sha256(reply).digest()
+        root = root_of([json.dumps(prompt("hi")).encode(), reply])
         with db:
             db.execute("INSERT INTO blobs VALUES (?, ?)", (hashlib.sha256(reply).hexdigest(), reply))
             db.execute("INSERT INTO blobs VALUES (?, ?)", (hashlib.sha256(root).hexdigest(), root))
-            head = {"agentId": OTHER, "latestRootBlobId": hashlib.sha256(root).hexdigest()}
-            db.execute("UPDATE meta SET value = ? WHERE key = '0'", (json.dumps(head).encode().hex(),))
+            db.execute("UPDATE meta SET value = ? WHERE key = '0'", (head_of(root),))
         for name in ("store.db", "store.db-wal", *(["store.db-shm"] if shm else [])):  # while the connection is open
             shutil.copy(live / name, folder / name)
     return folder
+
+
+def checkpointed(folder: Path, tmp_path: Path) -> Path:
+    """A copy of the folder's store as Cursor's close leaves it: its WAL's writes all in the store."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    for name in ("store.db", "store.db-wal"):
+        shutil.copy(folder / name, scratch / name)
+    with closing(sqlite3.connect(scratch / "store.db")) as db:
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return scratch / "store.db"
+
+
+def on_connect(monkeypatch: pytest.MonkeyPatch, action: Callable[[int], None]) -> list[str]:
+    """Each store the reader opens, after `action` runs with how many it has opened, this one included."""
+    connect = sqlite3.connect
+    opened: list[str] = []
+
+    def connecting(database: str, *, uri: bool, timeout: float) -> sqlite3.Connection:
+        opened.append(database)
+        action(len(opened))
+        return connect(database, uri=uri, timeout=timeout)
+
+    monkeypatch.setattr(sqlite3, "connect", connecting)
+    return opened
 
 
 def closed(home: Path) -> Path:
@@ -853,49 +895,35 @@ def test_a_store_cursor_closed_reads_and_nothing_is_made_beside_it(home: Path, m
     """Cursor's store is in WAL mode, and with no -shm beside it SQLite can't open it read only, nor make one in a
     folder it can't write (§4.1); in one it can, it would, and capture writes nothing there (§8)."""
     folder = closed(home)
-    folder.chmod(mode)
-    try:
+    with permissions(folder, mode):
         assert source(home).session(ID).message_count == 8
         assert sorted(path.name for path in folder.iterdir()) == ["meta.json", "store.db"]
-    finally:
-        folder.chmod(0o755)
 
 
 def test_a_store_cursor_is_writing_reads_with_its_wal_from_a_folder_it_cant_write(home: Path, tmp_path: Path) -> None:
     folder = wal_store(home, tmp_path, shm=True)
-    folder.chmod(0o555)
-    try:
-        assert [m.content for m in messages(home, f"cursor:{OTHER}")] == ["hi", "hello"]
-    finally:
-        folder.chmod(0o755)
+    with permissions(folder, 0o555):
+        assert [m.content for m in messages(home, OTHER_ID)] == ["hi", "hello"]
 
 
 def test_a_wal_a_crash_left_without_its_shm_is_unreadable_not_gone(
     home: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     folder = wal_store(home, tmp_path, shm=False)
-    folder.chmod(0o555)
-    try:
+    with permissions(folder, 0o555):
         assert [s.id for s in source(home).active_sessions(LONG_AGO)] == [ID]
         with pytest.raises(CaptureError) as caught:
-            source(home).session(f"cursor:{OTHER}")
-    finally:
-        folder.chmod(0o755)
+            source(home).session(OTHER_ID)
     assert OTHER in caplog.text
     assert not caught.value.gone
 
 
 def test_a_read_during_which_cursor_wrote_is_made_again(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    connect = sqlite3.connect
-    opened: list[str] = []
-
-    def writing(database: str, *, uri: bool, timeout: float) -> sqlite3.Connection:
-        opened.append(database)
-        if len(opened) == 1:  # Cursor writes as the first read is made
+    def writing(count: int) -> None:
+        if count == 1:  # Cursor writes as the first read is made
             os.utime(chat(home) / "store.db", (RECORDED + 1, RECORDED + 1))
-        return connect(database, uri=uri, timeout=timeout)
 
-    monkeypatch.setattr(sqlite3, "connect", writing)
+    opened = on_connect(monkeypatch, writing)
     assert source(home).session(ID).message_count == 8
     assert len(opened) == 2
 
@@ -907,35 +935,28 @@ def test_a_wal_a_crash_left_without_its_shm_gets_none_made_in_a_folder_it_can_wr
     writes to (§8)."""
     folder = wal_store(home, tmp_path, shm=False)
     with pytest.raises(CaptureError) as caught:
-        source(home).session(f"cursor:{OTHER}")
+        source(home).session(OTHER_ID)
     assert not caught.value.gone
     assert sorted(path.name for path in folder.iterdir()) == ["meta.json", "store.db", "store.db-wal"]
 
 
 def test_an_empty_wal_cursor_left_reads_as_none(home: Path) -> None:
     (closed(home) / "store.db-wal").write_bytes(b"")  # checkpointed, but kept open by a reader as Cursor closed
-    chat(home).chmod(0o555)
-    try:
+    with permissions(chat(home), 0o555):
         assert source(home).session(ID).message_count == 8
-    finally:
-        chat(home).chmod(0o755)
 
 
 def test_a_store_cursor_writes_to_reads_once_under_sqlites_own_locks(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     folder = wal_store(home, tmp_path, shm=True)
-    connect = sqlite3.connect
-    opened: list[str] = []
 
-    def writing(database: str, *, uri: bool, timeout: float) -> sqlite3.Connection:
-        opened.append(database)
-        stamp = RECORDED + len(opened)
+    def writing(count: int) -> None:
+        stamp = RECORDED + count
         os.utime(folder / "store.db-wal", (stamp, stamp))  # Cursor appends as each read is made
-        return connect(database, uri=uri, timeout=timeout)
 
-    monkeypatch.setattr(sqlite3, "connect", writing)
-    assert source(home).session(f"cursor:{OTHER}").message_count == 2
+    opened = on_connect(monkeypatch, writing)
+    assert source(home).session(OTHER_ID).message_count == 2
     assert len(opened) == 1
 
 
@@ -946,28 +967,21 @@ def test_a_store_still_being_made_throughout_every_read_is_skipped_quietly(
     other.mkdir(parents=True)
     (other / "meta.json").write_text('{"cwd":"/home/ann/x","createdAtMs":1795772600000}')
     (other / "store.db").touch()
-    connect = sqlite3.connect
-    opened: list[str] = []
 
-    def making(database: str, *, uri: bool, timeout: float) -> sqlite3.Connection:
-        opened.append(database)
-        stamp = RECORDED + len(opened)
+    def making(count: int) -> None:
+        stamp = RECORDED + count
         os.utime(other / "store.db", (stamp, stamp))
-        return connect(database, uri=uri, timeout=timeout)
 
-    monkeypatch.setattr(sqlite3, "connect", making)
+    on_connect(monkeypatch, making)
     assert [s.id for s in source(home).active_sessions(LONG_AGO)] == [ID]
     assert caplog.text == ""
 
 
 def test_a_store_removed_as_it_opens_is_gone_and_isnt_made_again(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    connect = sqlite3.connect
-
-    def removed(database: str, *, uri: bool, timeout: float) -> sqlite3.Connection:
+    def removed(count: int) -> None:
         (chat(home) / "store.db").unlink()
-        return connect(database, uri=uri, timeout=timeout)
 
-    monkeypatch.setattr(sqlite3, "connect", removed)
+    on_connect(monkeypatch, removed)
     with pytest.raises(CaptureError) as caught:
         source(home).session(ID)
     assert caught.value.gone
@@ -978,28 +992,18 @@ def test_a_store_cursor_closes_as_it_opens_reads_as_closed(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     folder = wal_store(home, tmp_path, shm=True)
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    for name in ("store.db", "store.db-wal"):
-        shutil.copy(folder / name, scratch / name)
-    with closing(sqlite3.connect(scratch / "store.db")) as db:  # what Cursor's close leaves: all in the store
-        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    shutil.copy(scratch / "store.db", tmp_path / "closed.db")
-    connect = sqlite3.connect
-    opened: list[str] = []
+    store = checkpointed(folder, tmp_path)
 
-    def closing_now(database: str, *, uri: bool, timeout: float) -> sqlite3.Connection:
-        opened.append(database)
-        if len(opened) == 1:  # Cursor closes: its writes in the store, its -wal and -shm gone
-            shutil.copy(tmp_path / "closed.db", folder / "store.db")
+    def closing_now(count: int) -> None:
+        if count == 1:  # Cursor closes: its writes in the store, its -wal and -shm gone
+            shutil.copy(store, folder / "store.db")
             for name in ("store.db-wal", "store.db-shm"):
                 (folder / name).unlink(missing_ok=True)
             folder.chmod(0o555)
-        return connect(database, uri=uri, timeout=timeout)
 
-    monkeypatch.setattr(sqlite3, "connect", closing_now)
+    on_connect(monkeypatch, closing_now)
     try:
-        assert [m.content for m in messages(home, f"cursor:{OTHER}")] == ["hi", "hello"]
+        assert [m.content for m in messages(home, OTHER_ID)] == ["hi", "hello"]
     finally:
         folder.chmod(0o755)
     assert sorted(path.name for path in folder.iterdir()) == ["meta.json", "store.db"]
@@ -1010,31 +1014,21 @@ def test_a_store_read_as_cursor_removes_its_shm_is_read_again(
 ) -> None:
     """A close removes the -shm before the -wal: a read made between the two finds a WAL it can't open."""
     folder = wal_store(home, tmp_path, shm=True)
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    for name in ("store.db", "store.db-wal"):
-        shutil.copy(folder / name, scratch / name)
-    with closing(sqlite3.connect(scratch / "store.db")) as db:  # what Cursor's close leaves: all in the store
-        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    shutil.copy(scratch / "store.db", tmp_path / "closed.db")
-    connect = sqlite3.connect
-    opened: list[str] = []
+    store = checkpointed(folder, tmp_path)
 
-    def closing_now(database: str, *, uri: bool, timeout: float) -> sqlite3.Connection:
-        opened.append(database)
-        if len(opened) == 1:
+    def closing_now(count: int) -> None:
+        if count == 1:
             (folder / "store.db-shm").unlink()
             folder.chmod(0o555)
-        elif len(opened) == 2:
+        elif count == 2:
             folder.chmod(0o755)
-            shutil.copy(tmp_path / "closed.db", folder / "store.db")
+            shutil.copy(store, folder / "store.db")
             (folder / "store.db-wal").unlink()
             folder.chmod(0o555)
-        return connect(database, uri=uri, timeout=timeout)
 
-    monkeypatch.setattr(sqlite3, "connect", closing_now)
+    on_connect(monkeypatch, closing_now)
     try:
-        assert [m.content for m in messages(home, f"cursor:{OTHER}")] == ["hi", "hello"]
+        assert [m.content for m in messages(home, OTHER_ID)] == ["hi", "hello"]
     finally:
         folder.chmod(0o755)
 
@@ -1043,25 +1037,20 @@ def test_a_store_read_in_the_gap_between_cursor_removing_its_shm_and_its_wal_is_
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     folder = wal_store(home, tmp_path, shm=False)  # the -shm gone, the -wal not yet
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    for name in ("store.db", "store.db-wal"):
-        shutil.copy(folder / name, scratch / name)
-    with closing(sqlite3.connect(scratch / "store.db")) as db:
-        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    store = checkpointed(folder, tmp_path)
     folder.chmod(0o555)
     sleep = time.sleep
 
     def closes(seconds: float) -> None:  # Cursor finishes closing during the pause
         folder.chmod(0o755)
-        shutil.copy(scratch / "store.db", folder / "store.db")
+        shutil.copy(store, folder / "store.db")
         (folder / "store.db-wal").unlink()
         folder.chmod(0o555)
         sleep(0)
 
     monkeypatch.setattr(time, "sleep", closes)
     try:
-        assert [m.content for m in messages(home, f"cursor:{OTHER}")] == ["hi", "hello"]
+        assert [m.content for m in messages(home, OTHER_ID)] == ["hi", "hello"]
     finally:
         folder.chmod(0o755)
 
@@ -1128,7 +1117,7 @@ def call_step(call: str, start: int, end: int) -> bytes:
 
 
 def times(home: Path) -> list[datetime | None]:
-    return [m.timestamp for m in messages(home, f"cursor:{OTHER}")]
+    return [m.timestamp for m in messages(home, OTHER_ID)]
 
 
 def test_a_prompt_takes_the_turn_named_for_its_request_whatever_its_text(home: Path) -> None:
@@ -1171,7 +1160,7 @@ def test_a_reply_after_an_empty_prompt_takes_no_time_from_the_turn_before(home: 
 )
 def test_a_turn_of_a_shape_this_reader_doesnt_know_times_nothing_and_spoils_nothing(home: Path, tail: bytes) -> None:
     write_chat(home, [asked("hi", "r1"), answer("hello")], tail=tail)
-    assert [(m.content, m.timestamp) for m in messages(home, f"cursor:{OTHER}")] == [("hi", None), ("hello", None)]
+    assert [(m.content, m.timestamp) for m in messages(home, OTHER_ID)] == [("hi", None), ("hello", None)]
 
 
 def test_a_prompt_timed_in_its_second_field_and_a_step_in_a_blob_of_its_own_read_too(home: Path) -> None:
@@ -1195,7 +1184,7 @@ def test_a_reply_that_only_calls_tools_takes_the_time_its_first_call_started(hom
     calls = {"id": "1", "role": "assistant", "content": [shell("c1", "make"), shell("c2", "make test")]}
     steps = (call_step("c1", 1795772601000, 1795772609000), call_step("c2", 1795772610000, 1795772620000))
     write_chat(home, [asked("build it", "r1"), calls], tail=turn("r1", 1795772600000, *steps))
-    (said,) = messages(home, f"cursor:{OTHER}")[1:]
+    (said,) = messages(home, OTHER_ID)[1:]
     assert said.timestamp == ms(1795772601000)
     assert [[e.timestamp for e in c.result_events] for c in said.tool_calls] == [[], []]  # no results written yet
 
@@ -1223,7 +1212,7 @@ def test_a_turn_whose_prompt_cant_be_read_still_times_its_calls(home: Path, said
     ended = result("c1", "Shell", "Exit code: 0", {"success": {"command": "make"}})
     tail = turn("r1", 0, call_step("c1", 1795772601000, 1795772609000), said=said)
     write_chat(home, [asked("build it", "r1"), calls, ended], tail=tail)
-    built = messages(home, f"cursor:{OTHER}")
+    built = messages(home, OTHER_ID)
     assert (built[0].timestamp, built[1].timestamp) == (None, ms(1795772601000))
     assert built[1].tool_calls[0].result_events[0].timestamp == ms(1795772609000)
 
@@ -1293,7 +1282,7 @@ def test_two_calls_with_one_id_keep_their_own_results_times(home: Path) -> None:
     tail = turn("r1", 1795772600000, call_step("call_1", 1795772601000, 1795772602000))
     tail += turn("r2", 1795772610000, call_step("call_1", 1795772611000, 1795772612000))
     write_chat(home, [asked("one", "r1"), first, done, asked("two", "r2"), again, done], tail=tail)
-    read = messages(home, f"cursor:{OTHER}")
+    read = messages(home, OTHER_ID)
     assert [read[n].tool_calls[0].result_events[0].timestamp for n in (1, 3)] == [
         ms(1795772602000),
         ms(1795772612000),
@@ -1320,7 +1309,7 @@ def test_a_call_cursor_indexed_across_a_requests_two_turns_takes_its_end_from_ei
         "r1", 1795772605000, call_step("c1", 1795772601000, 1795772609000)
     )
     write_chat(home, [asked("build it", "r1"), calls, done], tail=tail)
-    assert messages(home, f"cursor:{OTHER}")[1].tool_calls[0].result_events[0].timestamp == ms(1795772609000)
+    assert messages(home, OTHER_ID)[1].tool_calls[0].result_events[0].timestamp == ms(1795772609000)
 
 
 def test_a_field_written_twice_reads_as_its_last(home: Path) -> None:
@@ -1341,7 +1330,7 @@ def test_a_result_folds_into_the_call_before_it_with_its_id(home: Path) -> None:
         passed,
     ]
     write_chat(home, said)
-    first, second = (m.tool_calls[0] for m in messages(home, f"cursor:{OTHER}") if m.tool_calls)
+    first, second = (m.tool_calls[0] for m in messages(home, OTHER_ID) if m.tool_calls)
     assert (first.exit_code, first.result_content) == (1, "Exit code: 1")
     assert (second.exit_code, second.result_content) == (0, "Exit code: 0")
 
@@ -1427,7 +1416,7 @@ def test_a_reader_using_the_shm_isnt_a_change(home: Path, tmp_path: Path) -> Non
     folder = wal_store(home, tmp_path, shm=True)
 
     async def watch() -> bool:
-        ticks = source(home, poll=0.01).watch(f"cursor:{OTHER}")
+        ticks = source(home, poll=0.01).watch(OTHER_ID)
         await anext(ticks)  # the opening tick
         (folder / "store.db-shm").write_bytes(b"\1" * 32768)  # as SQLite's readers mark it
         try:

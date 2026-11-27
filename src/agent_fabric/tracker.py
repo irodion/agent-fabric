@@ -312,10 +312,10 @@ class Tracker:
         changed = row is None or content != row.content
         latest = _latest(messages)
         grew = messages and (row is None or messages[-1].ordinal > row.last_ordinal)
-        if grew and latest is not None and _untimed(messages[-1]):
-            # Times that don't reach the end, as where Cursor CLI's reader has none for a prompt it never indexed:
-            # the session's end, when it was last written, is its own time for the messages past the last read.
-            # Only for those: a write that adds nothing, such as Cursor rewriting its meta, or an earlier time it
+        if grew and latest is not None and None in _stamps(messages[-1]):
+            # Times that don't reach the end, as where a source has none for a message it hasn't indexed yet: the
+            # session's end, when it was last written, is its own time for the messages past the last read. Only
+            # for those: a write that adds nothing, such as a rewrite of the session's metadata, or an earlier time
             # filled in late, isn't activity. A read a watch made has no listing: the session is asked, as this
             # read is the one that sees the change.
             ended = meta.ended_at if meta else self._ended_at(feed, session_id)
@@ -528,21 +528,13 @@ def _answer(messages: Sequence[Message]) -> str | None:
 
 def _latest(messages: Iterable[Message]) -> datetime | None:
     """The latest time in the messages, theirs and their tool results'; one without a zone counts as UTC."""
-    stamps = [_utc(stamp) for message in messages for stamp in _times(message)]
+    stamps = [_utc(stamp) for message in messages for stamp in _stamps(message) if stamp is not None]
     return max(stamps) if stamps else None
 
 
-def _untimed(message: Message) -> bool:
-    """The message, or a result folded into it, has no time of its own."""
-    return message.timestamp is None or any(
-        event.timestamp is None for call in message.tool_calls for event in call.result_events
-    )
-
-
-def _times(message: Message) -> list[datetime]:
-    """A message's times: its own, and its tool results'."""
-    stamps = [message.timestamp, *(event.timestamp for call in message.tool_calls for event in call.result_events)]
-    return [stamp for stamp in stamps if stamp is not None]
+def _stamps(message: Message) -> list[datetime | None]:
+    """A message's times, its own and its tool results', each None where it has none."""
+    return [message.timestamp, *(event.timestamp for call in message.tool_calls for event in call.result_events)]
 
 
 def _utc(stamp: datetime) -> datetime:
