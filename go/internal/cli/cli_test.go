@@ -198,3 +198,18 @@ func TestKbSessionsSaysAFlagTakesNoValue(t *testing.T) {
 		t.Fatalf("exit %d, stderr %q", code, stderr.String())
 	}
 }
+
+func TestKbCatchupPrintsWhatCatchupGives(t *testing.T) {
+	ctx := workspace(t)
+	kb := filepath.Join(ctx.Cwd, "kb")
+	paths := `{"pages": ["` + ctx.Cwd + `"], "index": "` + ctx.Cwd + `/index.db", "project": {"session": ` +
+		`"raw/sessions/p/", "note": "raw/notes/p/", "page": "wiki/projects/a.md"}}`
+	if err := os.WriteFile(kb, []byte("#!/bin/sh\n[ \"$1\" = paths ] && echo '"+paths+"'\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{"catchup", "--project", "p"}, ctx, &stdout, &stderr)
+	if code != 0 || !strings.Contains(stdout.String(), "## Project page: wiki/projects/a.md") || stderr.Len() > 0 {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+}

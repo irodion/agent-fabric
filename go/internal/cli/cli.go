@@ -15,12 +15,13 @@ import (
 )
 
 // commands are the commands kb-go serves, as the Python kb's GO_COMMANDS names them.
-var commands = []string{"mcp", "show", "search", "sessions", "reindex"}
+var commands = []string{"mcp", "show", "search", "sessions", "catchup", "reindex"}
 
 const usage = `usage: kb mcp
        kb show <path>    a page's path in the workspace, as wiki/projects/... or raw/sessions/...
        kb search <words> [--kind session|page|note] [--project ID] [--since DAY|AGE] [-- <words>]
        kb sessions [--project ID|FOLDER | --all-projects] [--file PATH] [--failing-tests] [--since DAY|AGE]
+       kb catchup [--project ID|FOLDER]
        kb reindex`
 
 // Run runs one command and gives its exit code: 1 where it fails, 2 for a command line kb-go doesn't take. `kb mcp`
@@ -58,21 +59,18 @@ func Run(args []string, ctx kbmcp.Context, stdout, stderr io.Writer) int {
 		out, err = ctx.Search(call, search)
 	case len(args) >= 1 && args[0] == "sessions":
 		var sessions kbmcp.SessionsArgs
-		words, help, usageErr := options(args[1:],
+		if code, done := wordless(args, stdout, stderr,
 			map[string]*string{"--project": &sessions.Project, "--file": &sessions.File, "--since": &sessions.Since},
-			map[string]*bool{"--all-projects": &sessions.AllProjects, "--failing-tests": &sessions.FailingTests})
-		if help {
-			fmt.Fprintln(stdout, usage)
-			return 0
-		}
-		if usageErr == nil && len(words) > 0 {
-			usageErr = fmt.Errorf("takes no words: %q", strings.Join(words, " "))
-		}
-		if usageErr != nil {
-			fmt.Fprintf(stderr, "kb sessions: %v\n%s\n", usageErr, usage)
-			return 2
+			map[string]*bool{"--all-projects": &sessions.AllProjects, "--failing-tests": &sessions.FailingTests}); done {
+			return code
 		}
 		out, err = ctx.Sessions(call, sessions)
+	case len(args) >= 1 && args[0] == "catchup":
+		var catchup kbmcp.CatchupArgs
+		if code, done := wordless(args, stdout, stderr, map[string]*string{"--project": &catchup.Project}, nil); done {
+			return code
+		}
+		out, err = ctx.Catchup(call, catchup)
 	case len(args) == 1 && args[0] == "reindex":
 		out, err = ctx.Reindex(call)
 		if err == nil {
@@ -88,6 +86,24 @@ func Run(args []string, ctx kbmcp.Context, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprint(stdout, out)
 	return 0
+}
+
+// wordless reads the options of a command that takes no words, and is done, with the exit code, where it was asked
+// for its usage or its command line is one it doesn't take.
+func wordless(args []string, stdout, stderr io.Writer, values map[string]*string, flags map[string]*bool) (int, bool) {
+	words, help, err := options(args[1:], values, flags)
+	if help {
+		fmt.Fprintln(stdout, usage)
+		return 0, true
+	}
+	if err == nil && len(words) > 0 {
+		err = fmt.Errorf("takes no words: %q", strings.Join(words, " "))
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "kb %s: %v\n%s\n", args[0], err, usage)
+		return 2, true
+	}
+	return 0, false
 }
 
 // searchArgs reads `kb search`'s words and options: --kind, --project and --since.

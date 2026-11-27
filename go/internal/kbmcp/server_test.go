@@ -454,7 +454,7 @@ func TestGetPageServesNoPageThroughALinkedFolderAsSearchIndexesNone(t *testing.T
 
 func TestAKbThatRefusesTheProjectSaysWhyWithoutBlamingItsVersion(t *testing.T) {
 	kb := filepath.Join(t.TempDir(), "kb")
-	script := "#!/bin/sh\necho 'kb: --project ../x: that folder is in another workspace; search from there' >&2\nexit 2\n"
+	script := "#!/bin/sh\necho 'kb: --project ../x: that folder is in another workspace; run it from there' >&2\nexit 2\n"
 	if err := os.WriteFile(kb, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -707,5 +707,159 @@ func TestListSessionsOverAnIndexWithoutItsTablesBuildsOneAgain(t *testing.T) {
 		map[string]any{"project": "github.com/me/app"})
 	if got := text(t, result); result.IsError || !strings.Contains(got, "2026-11-20-codex-aaaa.md\n") {
 		t.Fatalf("got %q (error: %v)", got, result.IsError)
+	}
+}
+
+func TestCatchupGivesTheProjectsNotesItsLastSessionsAndItsPage(t *testing.T) {
+	kb := stub(t, "echo 'n1a2b3c  a status note'\n")
+	ctx := kbmcp.Context{KB: kb, Cwd: t.TempDir()}
+	for i, day := range []string{"20", "21", "22", "23"} {
+		page(t, kb, fmt.Sprintf("wiki/raw/sessions/github.com/me/app/2026/11/2026-11-%s-codex-000%d.md", day, i),
+			digest("codex", "2026-11-"+day+"T09:00:00Z", "2026-11-"+day+"T09:30:00Z", "null", 0))
+	}
+	var claims []string // as §4.6 writes them: a heading, the note's text, its source
+	for i := range 20 {
+		claims = append(claims, fmt.Sprintf("### claim %d\ntext %d\n- source: n%06d", i, i, i))
+	}
+	page(t, kb, "wiki/wiki/projects/github.com/me/app.md", "# app\n"+strings.Join(claims, "\n")+"\n")
+
+	got := text(t, call(t, ctx, "catchup", map[string]any{"project": "github.com/me/app"}))
+
+	for _, want := range []string{
+		"## Notes\n", "[inbox]\n[--project=github.com/me/app]\n", "n1a2b3c  a status note\n",
+		"## Last sessions\n", "2026-11-23-codex-0003.md\n", "2026-11-21-codex-0001.md\n",
+		"## Project page: wiki/projects/github.com/me/app.md, its 20 claims' headings; get_page gives them whole\n",
+		"\n### claim 0\n### claim 1\n", "\n### claim 19\n</kb-page-",
+		"## Open loops\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("no %q in %q", want, got)
+		}
+	}
+	for _, unwanted := range []string{"2026-11-20-codex-0000.md", "- source:"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("%q in %q", unwanted, got)
+		}
+	}
+}
+
+func TestCatchupOfAProjectWithNothingYetSaysSoInEachPart(t *testing.T) {
+	kb := filepath.Join(t.TempDir(), "kb")
+	paths := `{"pages": ["` + filepath.Dir(kb) + `/wiki"], "index": "` + filepath.Dir(kb) + `/index.db", ` +
+		`"project": {"session": "raw/sessions/p/", "note": "raw/notes/p/", "page": "wiki/projects/p.md"}}`
+	script := "#!/bin/sh\nif [ \"$1\" = paths ]; then echo '" + paths + "'; fi\n" // and kb inbox lists nothing
+	if err := os.WriteFile(kb, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got := text(t, call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "catchup", nil))
+	for _, want := range []string{"## Notes\nnone open\n", "## Last sessions\nnone\n", "## Project page\nnone yet\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("no %q in %q", want, got)
+		}
+	}
+}
+
+// rendered is a project page as pages.py writes it: each section, the empty ones and Superseded too, a blank line after
+// each heading and each claim.
+func rendered(summary string, live, superseded []string) string {
+	var page strings.Builder
+	page.WriteString("# github.com/me/app\n\n")
+	if summary != "" {
+		page.WriteString("## Summary\n\n" + summary + "\n\n")
+	}
+	page.WriteString("## Gotchas\n\n")
+	for i, claim := range live {
+		page.WriteString(fmt.Sprintf("### %s\n%s\n- source: n%06d (Codex, 2026-11-20) · verified: 2026-11-20\n\n", claim, claim, i))
+	}
+	page.WriteString("## Fixes\n\n## Decisions\n\n## Superseded\n\n")
+	for _, claim := range superseded {
+		page.WriteString("### " + claim + "\n" + claim + "\n- source: n999999\n\n")
+	}
+	return page.String()
+}
+
+func TestCatchupGivesAProjectPageThatFitsWhole(t *testing.T) {
+	kb := stub(t, "")
+	page(t, kb, "wiki/wiki/projects/github.com/me/app.md", rendered("", []string{"uses uv", "pytest -m 'not db'"}, nil))
+	got := text(t, call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "catchup", map[string]any{"project": "github.com/me/app"}))
+	if !strings.Contains(got, "## Project page: wiki/projects/github.com/me/app.md\n") ||
+		!strings.Contains(got, "\n- source: n000001 (Codex, 2026-11-20) · verified: 2026-11-20\n") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestCatchupGivesAProjectPagesSummaryWhereItHasOneUpToFortyLines(t *testing.T) {
+	kb := stub(t, "")
+	ctx := kbmcp.Context{KB: kb, Cwd: t.TempDir()}
+	page(t, kb, "wiki/wiki/projects/github.com/me/app.md", rendered("uv, not poetry", []string{"uses uv"}, nil))
+	got := text(t, call(t, ctx, "catchup", map[string]any{"project": "github.com/me/app"}))
+	if !strings.Contains(got, ", its summary; get_page gives the rest\n") || !strings.Contains(got, "\nuv, not poetry\n</kb-page-") ||
+		strings.Contains(got, "### uses uv") {
+		t.Fatalf("short: %q", got)
+	}
+	page(t, kb, "wiki/wiki/projects/github.com/me/app.md", rendered(strings.TrimSuffix(strings.Repeat("a line\n", 60), "\n"), nil, nil))
+	got = text(t, call(t, ctx, "catchup", map[string]any{"project": "github.com/me/app"}))
+	if !strings.Contains(got, ", its summary's first 40 lines; get_page gives the rest\n") || strings.Count(got, "a line\n") != 40 {
+		t.Fatalf("long: %q", got)
+	}
+}
+
+func TestCatchupGivesTheHeadingsOfALongPagesClaimsThatHold(t *testing.T) {
+	kb := stub(t, "")
+	var live []string
+	for i := range 15 {
+		live = append(live, fmt.Sprintf("claim %d", i))
+	}
+	// An empty summary is none; Superseded's claims don't hold.
+	page(t, kb, "wiki/wiki/projects/github.com/me/app.md", strings.Replace(rendered("", live, []string{"a replaced claim"}),
+		"## Gotchas", "## Summary\n\n## Gotchas", 1))
+	got := text(t, call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "catchup", map[string]any{"project": "github.com/me/app"}))
+	if !strings.Contains(got, ", its 15 claims' headings; get_page gives them whole\n") ||
+		!strings.Contains(got, "\n### claim 0\n### claim 1\n") || !strings.Contains(got, "\n### claim 14\n</kb-page-") ||
+		strings.Contains(got, "replaced") || strings.Contains(got, "- source:") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestCatchupWithoutAnIndexStillGivesTheNotesAndThePage(t *testing.T) {
+	kb := stub(t, "echo 'n1a2b3c  a status note'\n")
+	// Where the index's folder can't be made, as an agent's sandbox that has none yet.
+	if err := os.WriteFile(filepath.Join(filepath.Dir(kb), "data"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	page(t, kb, "wiki/wiki/projects/github.com/me/app.md", "# app\n### uses uv\nuv\n- source: n000001\n")
+	got := text(t, call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "catchup", map[string]any{"project": "github.com/me/app"}))
+	for _, want := range []string{"n1a2b3c  a status note\n", "## Last sessions\nnot read: ", "### uses uv\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("no %q in %q", want, got)
+		}
+	}
+}
+
+func TestCatchupOfALongPageWithNoClaimThatHoldsSaysSo(t *testing.T) {
+	kb := stub(t, "")
+	var superseded []string
+	for i := range 15 {
+		superseded = append(superseded, fmt.Sprintf("replaced %d", i))
+	}
+	page(t, kb, "wiki/wiki/projects/github.com/me/app.md", rendered("", nil, superseded))
+	got := text(t, call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "catchup", map[string]any{"project": "github.com/me/app"}))
+	if !strings.Contains(got, ", too long to give here; get_page gives it whole\n") ||
+		!strings.Contains(got, "\nno claim that still holds\n</kb-page-") || strings.Contains(got, "replaced") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestCatchupGivesTheFirstFortyHeadingsOfAPageWithMoreClaims(t *testing.T) {
+	kb := stub(t, "")
+	var live []string
+	for i := range 45 {
+		live = append(live, fmt.Sprintf("claim %d", i))
+	}
+	page(t, kb, "wiki/wiki/projects/github.com/me/app.md", rendered("", live, nil))
+	got := text(t, call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "catchup", map[string]any{"project": "github.com/me/app"}))
+	if !strings.Contains(got, ", the first 40 of its 45 claims' headings; get_page gives them whole\n") ||
+		!strings.Contains(got, "\n### claim 39\n</kb-page-") || strings.Contains(got, "### claim 40") {
+		t.Fatalf("got %q", got)
 	}
 }

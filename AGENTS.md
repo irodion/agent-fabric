@@ -6,9 +6,10 @@
 Three parts are built: agent notes (`kb note`, `inbox`, `doctor`, `hook` and the `kb-note` skill), notes into the wiki
 (`kb ingest`, `kb lint`), and the CI that builds and vets agentsview. The agentsview adapter, the first piece of
 capture, is built too, with Copilot CLI's and Cursor CLI's own readers, the normalizer, the tracker, the digester, and
-`fabricd`, which runs the last two. `kb mcp`, in Go, serves `list_notes`, `get_page`, `search` and `list_sessions` so
-far, with `kb show`, `kb search`, `kb sessions` and `kb reindex` as their twins. The rest of the design,
-including fabricd's panel, `kb mcp`'s other tools and the other `kb` commands, is still a plan (§9 has the phases).
+`fabricd`, which runs the last two. `kb mcp`, in Go, serves `list_notes`, `get_page`, `search`, `list_sessions` and
+`catchup`, with `kb show`, `kb search`, `kb sessions`, `kb catchup` and `kb reindex` as their twins; `open_loops` waits
+for the panel. The rest of the design,
+including fabricd's panel and the other `kb` commands, is still a plan (§9 has the phases).
 
 The design holds decisions, their reasons and dated findings from real agent runs. Details live in code and tests,
 which cite it by section. Read the section before changing what it covers:

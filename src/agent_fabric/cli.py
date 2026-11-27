@@ -149,7 +149,7 @@ def _paths(args: argparse.Namespace, workspace: Workspace, ctx: Context) -> Resu
         from agent_fabric.digest import sessions_folder  # noqa: PLC0415
 
         # Where kb writes the project's pages, so kb-go never turns a project id into a path itself.
-        project = _project_here(args.project, workspace, ctx, "search from there")
+        project = _project_here(args.project, workspace, ctx, "run it from there")
         found["project"] = {
             "session": sessions_folder(project),
             "note": notes_folder(project),
@@ -166,6 +166,7 @@ def _go_parsers(commands: "argparse._SubParsersAction[_Parser]") -> None:
         ("show", "a session digest or a wiki page, whole, by its path in the workspace"),
         ("search", "pages that hold every word, among digests, wiki pages and filed notes"),
         ("sessions", "agents' sessions in a project, newest first, from their digests"),
+        ("catchup", "a project's open notes, last sessions and wiki page, before work on it"),
         ("reindex", "build the workspace's search index again from its pages"),
     ):
         commands.add_parser(name, help=about)
@@ -524,7 +525,7 @@ def _entry(note: Note, now: datetime, resolved_by: str | None, moved: bool) -> s
 
 
 # The commands written in Go: `kb` hands each to `kb-go`, which takes over the process (docs/design.md §6).
-GO_COMMANDS = frozenset({"mcp", "show", "search", "sessions", "reindex"})
+GO_COMMANDS = frozenset({"mcp", "show", "search", "sessions", "catchup", "reindex"})
 
 
 def main() -> None:
