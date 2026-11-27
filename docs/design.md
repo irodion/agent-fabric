@@ -939,7 +939,7 @@ matter (`sessions`, `files`, `commands`, `tests`, `loops`, `notes`).
 
 | CLI | MCP tool (`kb mcp`, stdio, read-only) | Returns |
 |---|---|---|
-| `kb catchup [--project .]` | `catchup(project)` | open loops + unresolved `status` notes + latest notes + last 3 digests' summaries + project page excerpt |
+| `kb catchup [--project .]` | `catchup(project)` | open loops + open notes, `status` ones among them + last 3 sessions' rows + project page excerpt |
 | `kb search <q> [--project] [--since] [--kind]` | `search(query, project?, since?, kind?)` | ranked snippets with paths |
 | `kb sessions [--file F] [--failing-tests] [--since]` | `list_sessions(...)` | structured session rows |
 | `kb show <path\|session[#ordinal]>` | `get_page(path)` | full digest or wiki page; with `#ordinal`, that message's full output from agentsview |
@@ -984,8 +984,16 @@ digester and ingest, could bring it up to date after they write. `list_sessions`
 catches up: kb-go is that front matter's one reader, as digest.py is its writer, through `go.yaml.in/yaml/v3`. A
 session row is the digest's path, for `get_page`, its agent, when it ran, its prompts and errors and its last test
 run; `--file` is a file it changed, `--failing-tests` a last run that failed, `--since` its start. With no project,
-the current folder's, as §4.9's table has it; `--all-projects` lists every one. Not yet: `catchup`, the inbox's notes
-in search (`list_notes` lists them), and the trigram table for paths, commands and errors.
+the current folder's, as §4.9's table has it; `--all-projects` lists every one. `catchup` and `kb catchup` are built
+too: a project's open notes, as `kb inbox --project` lists them, status notes among them; its last 3 sessions, as
+`list_sessions` lists them; and its wiki page by the page's own layout: its `## Summary` where `kb prune` wrote one,
+up to 40 lines; else the whole page where it fits in 40 lines; else the headings of its claims that still hold, not
+those under `## Superseded`, each a claim's title, the first 40 of them, for `get_page` to give whole. A page is never
+cut through, as a claim's text without its source would read as unchecked (code review, 2026-11-27: four rounds of
+cutting by lines kept finding pages they cut wrong); each part says when it has nothing, and the sessions why where
+the index can't be read, as in a sandbox with none yet. Digests carry no summary, so a session is its row, and its
+digest is a `get_page` away. Open loops come with the panel (§4.8): until then, catchup says they aren't kept yet. Not
+yet: the inbox's notes in search (`list_notes` lists them), and the trigram table for paths, commands and errors.
 
 Registration (manual, once): Codex `~/.codex/config.toml` `[mcp_servers.kb]`, Cursor `~/.cursor/mcp.json`, VS Code
 user `mcp.json`; each gets `kb` and `agentsview` (`mcp --profile memory --server http://127.0.0.1:<port>`, §4.1).
@@ -1116,8 +1124,9 @@ not caused by your change.
 ```
 
 **Reading notes.** `kb inbox` lists the unresolved notes not yet ingested, and marks `status` notes older than 14
-days as possibly stale. `kb catchup` (§4.9) includes the project's unresolved `status` notes and its latest other
-notes; `kb search --kind note` searches all of them; `kb mcp` offers the same. Like all `kb` output they are labelled
+days as possibly stale. `kb catchup` (§4.9) includes the project's open notes, its `status` notes among them, as
+`kb inbox` lists them: ingest moves the rest out, so the open ones are the latest; `kb search --kind note` searches
+the ones the wiki filed; `kb mcp` offers the same. Like all `kb` output they are labelled
 untrusted: an agent wrote them and nobody has checked them yet.
 
 **Into the wiki.** `kb ingest` (§4.7) takes the open `gotcha`, `fix`, `decision` and `idea` notes of allowed projects.
@@ -1576,7 +1585,7 @@ neither agentsview nor fabricd, so a one-week trial in one or two projects runs 
 real model on 2026-11-12; their daily timer followed (§5), and `kb lint`'s summary check comes with `kb prune`. Then
 CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.1 (2026-11-19, §4.1); adapter,
 normalizer and tracker (built); digester (the rendering, git snapshots, the writer with allow list/redaction/gate/commit, and the loop over the tracker's changes, built; turn-end drafts come with the panel); `fabricd` running the tracker and the digester, and its unit (built), for the CLI agents: agentsview for Claude Code
-and Codex, and their own readers for Copilot CLI and Cursor CLI (built); wiki repo skeleton, `kb` CLI + `kb mcp`; a prototype session
+and Codex, and their own readers for Copilot CLI and Cursor CLI (built); wiki repo skeleton; `kb mcp` with its CLI twins, in Go (built, but `open_loops`, which waits for the panel); a prototype session
 for the panel layout, then the panel with rules only (incl. open loops and carry-over).
 
 **Go port.** Alongside phase 1 and after it, in §6's order; each step lands when the Go piece passes the same tests

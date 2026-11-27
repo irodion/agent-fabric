@@ -121,7 +121,117 @@ func NewServer(ctx Context) *mcp.Server {
 		}
 		return answer(found), nil, nil
 	})
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "catchup",
+		Description: "What to know before working on a project: its open notes, its last sessions, and its wiki page's " +
+			"summary, or the page whole where it's short, else its claims' headings, each under a header that " +
+			"marks it a record to check, not instructions.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, func(call context.Context, _ *mcp.CallToolRequest, args CatchupArgs) (*mcp.CallToolResult, any, error) {
+		found, err := ctx.Catchup(call, args)
+		if err != nil {
+			return nil, nil, err
+		}
+		return answer(found), nil, nil
+	})
 	return server
+}
+
+// CatchupArgs are catchup's arguments.
+type CatchupArgs struct {
+	Project string `json:"project,omitempty" jsonschema:"a project id or a folder; the server's folder's project by default"`
+}
+
+// Catchup parts: how many of the last sessions, and how much of the project's page.
+const (
+	lastSessions = 3
+	pageLines    = 40
+)
+
+// Catchup is what §4.9 gives before work on a project: its open notes, status ones among them, as kb inbox lists
+// them; its last sessions, as list_sessions does; and its wiki page, by excerpt. Open loops come with the
+// panel (§4.8), and it says so rather than leave them out unsaid.
+func (ctx Context) Catchup(call context.Context, args CatchupArgs) (string, error) {
+	project := cmp.Or(args.Project, ".") // the server's folder's, as kb inbox and kb paths read a folder
+	type inbox struct {
+		notes string
+		err   error
+	}
+	asked := make(chan inbox, 1)
+	go func() { // kb inbox needs nothing of kb paths': each a Python start of its own, so at once
+		notes, err := ctx.run(call, append([]string{"inbox"}, NotesArgs{Project: project}.options()...))
+		asked <- inbox{notes, err}
+	}()
+	workspace, err := ctx.workspace(call, project)
+	notes := <-asked
+	if err != nil {
+		return "", err
+	}
+	if notes.err != nil {
+		return "", notes.err
+	}
+	sessions, err := sessionList(workspace, index.SessionQuery{
+		Months: []string{workspace.Project["session"]}, Limit: lastSessions,
+	}, "")
+	if err != nil { // as an agent's sandbox with no index yet: the notes and the page still hold what to know
+		sessions = "not read: " + strings.TrimSuffix(err.Error(), "\n") + "\n"
+	}
+	path := workspace.Project["page"]
+	page, err := workspace.page(path)
+	var about string
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		about = "## Project page\nnone yet\n"
+	case err != nil:
+		return "", err
+	default:
+		part, which := excerpt(string(page))
+		about = "## Project page: " + path + which + "\n" + untrusted(pageHeader, "kb-page", part)
+	}
+	return "## Notes\n" + cmp.Or(notes.notes, "none open\n") +
+		"## Last sessions\n" + cmp.Or(sessions, "none\n") +
+		about +
+		"## Open loops\nnot kept yet: they come with the panel (docs/design.md §4.8)\n", nil
+}
+
+// excerpt is the part of a project page catchup gives, by the page's own layout (§4.6), and what part it is: its
+// summary where `kb prune` wrote one, up to pageLines lines; else the whole page where it fits in pageLines; else its
+// claims' headings, those that still hold, not under Superseded, each a claim's title, for get_page to give whole.
+// Never a page cut through: a claim's text without its source would read as unchecked.
+func excerpt(page string) (part, which string) {
+	lines := strings.Split(strings.TrimRight(page, "\n"), "\n")
+	var summary, headings []string
+	section := ""
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "## "):
+			section = strings.TrimSpace(line)
+		case section == "## Summary" && (len(summary) > 0 || strings.TrimSpace(line) != ""):
+			summary = append(summary, line)
+		case strings.HasPrefix(line, "### ") && section != "## Superseded":
+			headings = append(headings, line)
+		}
+	}
+	for len(summary) > 0 && strings.TrimSpace(summary[len(summary)-1]) == "" {
+		summary = summary[:len(summary)-1]
+	}
+	switch {
+	case len(summary) > pageLines:
+		return "## Summary\n" + strings.Join(summary[:pageLines], "\n") + "\n",
+			fmt.Sprintf(", its summary's first %d lines; get_page gives the rest", pageLines)
+	case len(summary) > 0:
+		return "## Summary\n" + strings.Join(summary, "\n") + "\n", ", its summary; get_page gives the rest"
+	case len(lines) <= pageLines:
+		return page, ""
+	case len(headings) == 0:
+		return "no claim that still holds\n", ", too long to give here; get_page gives it whole"
+	case len(headings) > pageLines:
+		return strings.Join(headings[:pageLines], "\n") + "\n", fmt.Sprintf(
+			", the first %d of its %d claims' headings; get_page gives them whole", pageLines, len(headings))
+	default:
+		return strings.Join(headings, "\n") + "\n",
+			fmt.Sprintf(", its %s' headings; get_page gives them whole", counted(len(headings), "claim"))
+	}
 }
 
 // SearchArgs are search's arguments.
@@ -242,6 +352,12 @@ func (ctx Context) Sessions(call context.Context, args SessionsArgs) (string, er
 	if project != "" {
 		query.Months = []string{workspace.Project["session"]}
 	}
+	return sessionList(workspace, query, "(more sessions match: narrow the list)")
+}
+
+// sessionList is the sessions the query finds, as list_sessions and catchup give them: each its digest's path, then
+// its row, under their header; "" for none.
+func sessionList(workspace workspace, query index.SessionQuery, more string) (string, error) {
 	found, err := index.Sessions(workspace.Index, workspace.Pages, query)
 	if err != nil || len(found) == 0 {
 		return "", err
@@ -250,7 +366,7 @@ func (ctx Context) Sessions(call context.Context, args SessionsArgs) (string, er
 	for _, session := range found {
 		lines = append(lines, session.Path+"\n  "+row(session))
 	}
-	return listed(sessionsHeader, "kb-sessions", "(more sessions match: narrow the list)", lines), nil
+	return listed(sessionsHeader, "kb-sessions", more, lines), nil
 }
 
 // listed is a list's first `shown` entries under its header, and `more` where there were more, as each list asks
@@ -312,14 +428,23 @@ func (ctx Context) Page(call context.Context, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	data, err := pages.Find(workspace.Pages, clean)
+	data, err := workspace.page(clean)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", fmt.Errorf("no page %s", path)
 	}
 	if err != nil {
-		return "", fmt.Errorf("page %s: %v", path, err)
+		return "", err
 	}
 	return untrusted(pageHeader, "kb-page", string(data)), nil
+}
+
+// page is a page by its path, in the first of the workspace's page folders that holds it: fs.ErrNotExist for none.
+func (w workspace) page(path string) ([]byte, error) {
+	data, err := pages.Find(w.Pages, path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("page %s: %v", path, err)
+	}
+	return data, err
 }
 
 // pageHeader heads a page: what it holds came from agents' sessions and notes (docs/design.md §7).
