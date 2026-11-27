@@ -26,6 +26,7 @@ from agent_fabric.inbox import Inbox, Snapshot
 from agent_fabric.ingest import BUSY, Busy, Stopped, ingest
 from agent_fabric.lint import lint
 from agent_fabric.notes import KINDS, MACHINE, MAX_TEXT, STALE_AFTER, Note, expired, missing_ref, new_id
+from agent_fabric.pages import notes_folder, page_path
 from agent_fabric.paths import config_file, expand, tilde
 from agent_fabric.secretgate import GateUnavailable
 from agent_fabric.shown import shown
@@ -116,14 +117,14 @@ def run_in(argv: list[str], ctx: Context) -> Result:
     )
     lint_cmd = commands.add_parser("lint", help="what's stale or broken in the wiki (docs/design.md §4.7)")
     lint_cmd.add_argument("--workspace", help=WORKSPACE_HELP)
-    commands.add_parser("mcp", help="serve kb's read-only tools to an agent over MCP on stdio (docs/design.md §4.9)")
-    show_cmd = commands.add_parser("show", help="a session digest or a wiki page, whole (docs/design.md §4.9)")
-    show_cmd.add_argument("path", help="the page's path in the workspace, as wiki/projects/... or raw/sessions/...")
-    commands.add_parser("paths")  # for kb-go, so no help of its own
+    _go_parsers(commands)
+    paths_cmd = commands.add_parser("paths")  # for kb-go, so no help of its own
+    paths_cmd.add_argument("--project")
     try:
+        # main hands these to kb-go before they get here; before argparse, which knows none of their arguments
+        if argv[:1] and argv[0] in GO_COMMANDS:
+            raise UsageError(f"kb {argv[0]} runs as kb-go, a process of its own: start it from a shell")
         args = parser.parse_args(argv)
-        if args.command in GO_COMMANDS:  # main hands these to kb-go before they get here
-            raise UsageError(f"kb {args.command} runs as kb-go, a process of its own: start it from a shell")
         if args.command == "hook":
             return Result(0, run_hook(args.event, args.agent, ctx), "")
         if args.command in ("lint", "ingest"):
@@ -137,11 +138,36 @@ def run_in(argv: list[str], ctx: Context) -> Result:
         return Result(2, "", f"kb: {e}\n")
 
 
-def _paths(workspace: Workspace, ctx: Context) -> Result:
+def _paths(args: argparse.Namespace, workspace: Workspace, ctx: Context) -> Result:
     """`kb paths`: the folders a page's path is read in for kb-go, the workspace's local digests first, then its wiki,
-    so that which workspace a folder is in has one reader until the port reaches it (docs/design.md §4.9, §6)."""
+    and its search index, so that which workspace a folder is in has one reader until the port reaches it
+    (docs/design.md §4.9, §6)."""
     pages = [str(workspace.local(ctx.env)), str(workspace.wiki(ctx.env))]
-    return Result(0, json.dumps({"pages": pages}, ensure_ascii=False) + "\n", "")
+    found: dict[str, object] = {"pages": pages, "index": str(workspace.index(ctx.env))}
+    if args.project is not None:
+        # Loaded only here: digest brings in capture's httpx and pydantic, which every hook would pay for otherwise.
+        from agent_fabric.digest import sessions_folder  # noqa: PLC0415
+
+        # Where kb writes the project's pages, so kb-go never turns a project id into a path itself.
+        project = _project_here(args.project, workspace, ctx, "search from there")
+        found["project"] = {
+            "session": sessions_folder(project),
+            "note": notes_folder(project),
+            "page": page_path(project),
+        }
+    return Result(0, json.dumps(found, ensure_ascii=False) + "\n", "")
+
+
+def _go_parsers(commands: "argparse._SubParsersAction[_Parser]") -> None:
+    """The commands kb-go serves (`GO_COMMANDS`), for `kb --help` alone: `main` hands them over, `kb <command> --help`
+    too, before argparse reads them."""
+    for name, about in (
+        ("mcp", "serve kb's read-only tools to an agent over MCP on stdio (docs/design.md §4.9)"),
+        ("show", "a session digest or a wiki page, whole, by its path in the workspace"),
+        ("search", "pages that hold every word, among digests, wiki pages and filed notes"),
+        ("reindex", "build the workspace's search index again from its pages"),
+    ):
+        commands.add_parser(name, help=about)
 
 
 def _setup_command(args: argparse.Namespace, ctx: Context) -> Result:
@@ -173,7 +199,7 @@ def _notes_command(args: argparse.Namespace, ctx: Context) -> Result:
     except (OSError, ValueError) as e:  # TOMLDecodeError too
         return _unreadable_config(e, ctx.env)
     if args.command == "paths":
-        return _paths(workspace, ctx)
+        return _paths(args, workspace, ctx)
     inbox = Inbox(workspace.inbox(ctx.env))
     return _note(args, workspace, inbox, ctx) if args.command == "note" else _inbox(args, workspace, inbox, ctx)
 
@@ -497,7 +523,7 @@ def _entry(note: Note, now: datetime, resolved_by: str | None, moved: bool) -> s
 
 
 # The commands written in Go: `kb` hands each to `kb-go`, which takes over the process (docs/design.md §6).
-GO_COMMANDS = frozenset({"mcp", "show"})
+GO_COMMANDS = frozenset({"mcp", "show", "search", "reindex"})
 
 
 def main() -> None:

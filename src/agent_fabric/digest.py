@@ -174,14 +174,19 @@ class _Section:
     cut: str = "[… {n} earlier entries cut: kb show {session}]"  # what a cut says
 
 
+def sessions_folder(project: str) -> str:
+    """`raw/sessions/<project>/`, where a project's digests are, inside the wiki or the local folder."""
+    folder = "/".join(_segment(part) for part in project.split("/") if part.strip("./"))
+    return f"raw/sessions/{folder or 'unknown'}/"
+
+
 def path(meta: SessionMeta, project: str, start: datetime) -> str:
     """`raw/sessions/<project>/<yyyy>/<mm>/<yyyy-mm-dd>-<agent>-<shortid>.md`, inside the wiki or the local folder."""
     when = _utc(start)
-    folder = "/".join(_segment(part) for part in project.split("/") if part.strip("./"))
     # The id's last 8 letters and digits: a UUIDv7 (Codex's) starts with its time, so its first 8 are shared by all
     # sessions started in the same minute or so, while its end is random, like a UUIDv4's (Claude Code's).
     short = _segment(re.sub(r"[^A-Za-z0-9]", "", meta.id.rsplit(":", 1)[-1])[-8:])
-    return f"raw/sessions/{folder or 'unknown'}/{when:%Y/%m}/{when:%Y-%m-%d}-{_segment(meta.agent)}-{short}.md"
+    return f"{sessions_folder(project)}{when:%Y/%m}/{when:%Y-%m-%d}-{_segment(meta.agent)}-{short}.md"
 
 
 def started(meta: SessionMeta, messages: Sequence[Message]) -> datetime | None:

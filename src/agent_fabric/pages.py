@@ -165,9 +165,14 @@ def page_path(project: str) -> str:
     return MACHINE_PAGE if project == MACHINE else f"{PROJECTS}/{_slug(project)}.md"
 
 
+def notes_folder(project: str) -> str:
+    """`raw/notes/<project>/`, where ingest keeps the copies of a project's notes."""
+    return f"raw/notes/{_slug(project)}/"
+
+
 def raw_path(note: Note) -> str:
     """Where ingest keeps its copy of a note, so that pages can cite it (§4.10)."""
-    return f"raw/notes/{_slug(note.scope)}/{note.time:%Y}/{note.time:%m}/{note.filename}"
+    return f"{notes_folder(note.scope)}{note.time:%Y}/{note.time:%m}/{note.filename}"
 
 
 def safe(text: str) -> str:

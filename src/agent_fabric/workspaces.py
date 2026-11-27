@@ -6,7 +6,16 @@ from pathlib import Path
 
 from agent_fabric.config import Config, allowed_projects, ingest_backend, read_config, setting, workspace_roots
 from agent_fabric.gitinfo import main_checkout
-from agent_fabric.paths import expand, inbox_dir, ingest_worktree, local_dir, quarantine_dir, wiki_dir, workspace_data
+from agent_fabric.paths import (
+    expand,
+    inbox_dir,
+    index_db,
+    ingest_worktree,
+    local_dir,
+    quarantine_dir,
+    wiki_dir,
+    workspace_data,
+)
 
 
 @dataclass(frozen=True)
@@ -22,6 +31,10 @@ class Workspace:
     def local(self, env: Mapping[str, str]) -> Path:
         """Its digests that stay on the machine (docs/design.md §4.5)."""
         return local_dir(env) if self.root is None else workspace_data(self.root, env) / "local"
+
+    def index(self, env: Mapping[str, str]) -> Path:
+        """Its search index (docs/design.md §4.9), in kb's data, as its local digests are."""
+        return index_db(env) if self.root is None else workspace_data(self.root, env) / "index.db"
 
     def quarantine(self, env: Mapping[str, str]) -> Path:
         """Its digests gitleaks stopped (docs/design.md §4.5)."""
