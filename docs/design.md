@@ -951,7 +951,15 @@ matter (`sessions`, `files`, `commands`, `tests`, `loops`, `notes`).
 | `kb ingest`, `kb lint`, `kb prune`, `kb retro`, `kb reindex`, `kb doctor` | — | maintenance (§4.7) |
 
 Project defaults to the git root of the current directory. MCP results are labelled as historical notes (untrusted
-content), mirroring OpenHands' `<UNTRUSTED_CONTENT>` wrapping.
+content), mirroring OpenHands' `<UNTRUSTED_CONTENT>` wrapping: under a header that calls them claims to check, not
+instructions, between markers drawn new for each answer. A page's path is its path in the current folder's
+workspace, `raw/sessions/…` or `wiki/projects/…` as §4.6 lays the wiki out, wherever it's kept: a digest moves between
+the workspace's local digests and its wiki as its project joins or leaves the allow list (§4.5), and keeps its path.
+`get_page` and `kb show` read it in the local digests first, then the wiki, and only a Markdown file under `wiki/`,
+`raw/sessions/` or `raw/notes/`, by a path that stays there, links included; not the manifests, nor quarantined
+digests. What a tool answers reaches the agent's model, and its vendor: the wiki's pages passed §4.5's gitleaks gate,
+but local digests only its redaction, as `kb` output always has (§4.5), so a secret the redaction misses in a project
+off the allow list reaches an agent of any project in the workspace that asks for it.
 
 Registration (manual, once): Codex `~/.codex/config.toml` `[mcp_servers.kb]`, Cursor `~/.cursor/mcp.json`, VS Code
 user `mcp.json`; each gets `kb` and `agentsview` (`mcp --profile memory --server http://127.0.0.1:<port>`, §4.1).
@@ -1421,7 +1429,8 @@ root as vendored, and builds `kb-go`, which `scripts/install.sh` puts beside `kb
 (`GOTOOLCHAIN=local`, `-mod=readonly`). `kb` hands each command written in Go to `kb-go`, which takes over the process,
 so `kb mcp` keeps its command line and its stdio; once the port is done, `kb-go` becomes `kb`. What a Go command needs
 that Go doesn't read yet, it asks the Python `kb` beside it, so that each file format has one reader until its piece
-is ported: `kb mcp`'s `list_notes` is `kb inbox` until step 3. CI's `lint` runs gofmt, go vet and go test in the Go
+is ported: `kb mcp`'s `list_notes` is `kb inbox` until step 3, and `kb paths` names the current folder's workspace's
+page folders. CI's `lint` runs gofmt, go vet and go test in the Go
 image `build-agentsview.yml` uses, and the vet gate scans `go/go.mod` with the rest.
 
 ## 7. Security and privacy

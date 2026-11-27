@@ -30,5 +30,5 @@ func main() {
 			kb = onPath
 		}
 	}
-	os.Exit(cli.Run(os.Args[1:], kbmcp.Context{KB: kb, Cwd: cwd}, os.Stderr))
+	os.Exit(cli.Run(os.Args[1:], kbmcp.Context{KB: kb, Cwd: cwd}, os.Stdout, os.Stderr))
 }
