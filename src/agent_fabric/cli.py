@@ -165,6 +165,7 @@ def _go_parsers(commands: "argparse._SubParsersAction[_Parser]") -> None:
         ("mcp", "serve kb's read-only tools to an agent over MCP on stdio (docs/design.md §4.9)"),
         ("show", "a session digest or a wiki page, whole, by its path in the workspace"),
         ("search", "pages that hold every word, among digests, wiki pages and filed notes"),
+        ("sessions", "agents' sessions in a project, newest first, from their digests"),
         ("reindex", "build the workspace's search index again from its pages"),
     ):
         commands.add_parser(name, help=about)
@@ -523,7 +524,7 @@ def _entry(note: Note, now: datetime, resolved_by: str | None, moved: bool) -> s
 
 
 # The commands written in Go: `kb` hands each to `kb-go`, which takes over the process (docs/design.md §6).
-GO_COMMANDS = frozenset({"mcp", "show", "search", "reindex"})
+GO_COMMANDS = frozenset({"mcp", "show", "search", "sessions", "reindex"})
 
 
 def main() -> None:

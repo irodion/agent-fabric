@@ -20,8 +20,9 @@ import (
 	"github.com/irodion/agent-fabric/go/internal/pages"
 )
 
-// version is the index's schema: an index of another version is built again, as it can always be.
-const version = 1
+// version is the index's schema: an index of another version is built again, as it can always be. 2 added the
+// sessions and files tables.
+const version = 2
 
 // schema is the index: a row per page, and its text in FTS5 under the same rowid, so that a page is dropped by its
 // rowid; FTS5 finds a row by any other column only by reading every one.
@@ -88,15 +89,7 @@ func Search(file string, folders []string, query Query) ([]Hit, error) {
 	if match == "" {
 		return nil, errors.New("a search needs a word to look for")
 	}
-	db, err := current(file, folders)
-	if readOnly(err) || code(err) == busy { // busy: another search still building it, which a reader can wait out
-		db, err = openReadOnly(file)
-		if err == nil {
-			if err = filled(db, file, folders); err != nil {
-				db.Close()
-			}
-		}
-	}
+	db, err := reader(file, folders)
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +111,21 @@ func Search(file string, folders []string, query Query) ([]Hit, error) {
 		hits = append(hits, hit)
 	}
 	return hits, rows.Err()
+}
+
+// reader is the index at `file` up to date with the page folders, to read; where it can't be written, as in an
+// agent's sandbox, or another is building it still, as it stands.
+func reader(file string, folders []string) (*sql.DB, error) {
+	db, err := current(file, folders)
+	if readOnly(err) || code(err) == busy { // busy: another search still building it, which a reader can wait out
+		db, err = openReadOnly(file)
+		if err == nil {
+			if err = filled(db, file, folders); err != nil {
+				db.Close()
+			}
+		}
+	}
+	return db, err
 }
 
 // Rebuild builds the index at `file` again from the page folders, and gives how many pages it holds. An index of this
@@ -306,7 +314,7 @@ func create(db *sql.DB) error {
 	case err != nil:
 		return err
 	case was == 0 && tables == 0:
-		if _, err := tx.Exec(schema + fmt.Sprintf("PRAGMA user_version = %d;", version)); err != nil {
+		if _, err := tx.Exec(schema + sessionsSchema + fmt.Sprintf("PRAGMA user_version = %d;", version)); err != nil {
 			return err
 		}
 	case was != version:
@@ -406,7 +414,7 @@ func sync(db *sql.DB, folders []string, again bool) error {
 	}
 	defer tx.Rollback()
 	if again {
-		if _, err := tx.Exec(`DELETE FROM text; DELETE FROM pages;`); err != nil {
+		if _, err := tx.Exec(`DELETE FROM text; DELETE FROM pages; DELETE FROM sessions; DELETE FROM files;`); err != nil {
 			return err
 		}
 	}
@@ -436,11 +444,10 @@ func sync(db *sql.DB, folders []string, again bool) error {
 			delete(found, r.path) // as indexed
 			continue
 		}
-		if _, err := tx.Exec(`DELETE FROM text WHERE rowid = ?`, r.id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM pages WHERE id = ?`, r.id); err != nil {
-			return err
+		for _, table := range []string{"text WHERE rowid", "pages WHERE id", "sessions WHERE page", "files WHERE page"} {
+			if _, err := tx.Exec(`DELETE FROM `+table+` = ?`, r.id); err != nil {
+				return err
+			}
 		}
 	}
 	for path, now := range found {
@@ -463,6 +470,11 @@ func sync(db *sql.DB, folders []string, again bool) error {
 		}
 		if _, err := tx.Exec(`INSERT INTO text (rowid, body) VALUES (?, ?)`, id, string(body)); err != nil {
 			return err
+		}
+		if strings.HasPrefix(path, pages.Sessions) { // a digest, whose front matter fills the sessions table
+			if err := session(tx, id, body); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit()
