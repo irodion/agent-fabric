@@ -273,10 +273,21 @@ def _turned_off(state: str, unit: Unit) -> str:
     return f"turned off ({state}); systemctl --user enable --now {unit.timer_sh} turns it back on"
 
 
-def _state(command: str, env: Mapping[str, str], unit: Unit, *, fix: bool) -> Row:
-    """Whether systemd has the timer on and waiting, and how the service's last run went."""
+def _on(asked: tuple[dict[str, str], dict[str, str]]) -> bool:
+    """Whether systemd has the timer on and waiting."""
+    return (asked[0].get("UnitFileState"), asked[0].get("ActiveState")) == ("enabled", "active")
+
+
+def _state(
+    command: str,
+    env: Mapping[str, str],
+    unit: Unit,
+    asked: tuple[dict[str, str], dict[str, str]] | None,
+    *,
+    fix: bool,
+) -> Row:
+    """Whether systemd has the timer on and waiting, and how the service's last run went, from what it said."""
     shown = tilde(units_dir(env) / unit.timer, env)
-    asked = _ask(command, env, unit)
     if asked is None:
         return Row("ok", "timer", shown, "installed; can't ask systemd from here whether it's on or how it last ran")
     timer, service = asked
@@ -285,7 +296,7 @@ def _state(command: str, env: Mapping[str, str], unit: Unit, *, fix: bool) -> Ro
             step = f"Run systemctl --user stop {unit.timer_sh}, or tonight's run still happens"
             return Row("ok", "timer", shown, f"{off}, but it still waits for its next run", step=step)
         return Row("ok", "timer", shown, off)
-    if (timer.get("UnitFileState"), timer.get("ActiveState")) != ("enabled", "active"):
+    if not _on(asked):
         return (
             _turn_on(command, env, shown, unit)
             if fix
@@ -312,10 +323,11 @@ def _instances(folder: Path) -> set[str]:
 
 def check(
     env: Mapping[str, str], registered: list[Workspace], present: list[Unit], *, fix: bool, known: bool
-) -> list[Row]:
+) -> tuple[list[Row], set[Workspace]]:
     """The timers' rows: one per workspace that's there and has or wants a timer, v0.6's timer moved to the default
     workspace's, and the units of a workspace that's no longer registered removed. A root that isn't there keeps its
-    units, and so does every root while the config can't be read (`known` false)."""
+    units, and so does every root while the config can't be read (`known` false). With them, the workspaces whose
+    timer systemd runs on a PATH that finds the tools their ingest needs, which the shell's PATH may not (§5)."""
     folder = units_dir(env)
     command = shutil.which("systemctl", path=env.get("PATH", ""))
     # lexists: a link too, even a broken one, and False where the folder can't be read, which Path.exists raises on
@@ -325,9 +337,11 @@ def check(
     if command is None:
         if old or any(_wanted(env, unit) for unit in present) or _instances(folder):
             detail = "no systemd here, so kb ingest runs only when you start it"
-            return [Row("ok", "timer", tilde(folder, env), detail, step="Run kb ingest yourself every few days")]
-        return []
+            by_hand = Row("ok", "timer", tilde(folder, env), detail, step="Run kb ingest yourself every few days")
+            return [by_hand], set()
+        return [], set()
     rows = []
+    running: set[Workspace] = set()
     moving, off = False, None  # whether v0.6's timer moves to the default workspace's, and how it was turned off
     default = next((unit for unit in present if unit.workspace.root is None), unit_of(Workspace(None), None))
     if old:
@@ -335,12 +349,13 @@ def check(
         rows += [row] if row else []
     for each in present:
         unit = replace(each, moved_off=off) if each.workspace.root is None else each
-        one = _one(command, env, unit, fix=fix)
+        one, runs = _one(command, env, unit, fix=fix)
         rows += one
+        running |= {unit.workspace} if runs else set()
         if unit.workspace.root is None and moving:
             rows.append(_moved(command, env, unit, one))
     rows += [_remove(command, env, instance, fix=fix) for instance in sorted(gone)]
-    return rows
+    return rows, running
 
 
 def _old(command: str, env: Mapping[str, str], default: Unit, *, fix: bool) -> tuple[Row | None, bool, str | None]:
@@ -427,9 +442,10 @@ def _cant_change(env: Mapping[str, str], shown: str) -> Row:
     return Row("problem", "timer", shown, f"can't change {folder}, so it's left as it is", step=step)
 
 
-def _one(command: str, env: Mapping[str, str], unit: Unit, *, fix: bool) -> list[Row]:
-    """One workspace's timer. Units already installed are still checked once ingest isn't wanted, so a timer whose
-    runs fail doesn't go unseen, but only written while it is."""
+def _one(command: str, env: Mapping[str, str], unit: Unit, *, fix: bool) -> tuple[list[Row], bool]:
+    """One workspace's timer, and whether systemd runs it on a PATH that finds its tools where the shell's doesn't.
+    Units already installed are still checked once ingest isn't wanted, so a timer whose runs fail doesn't go unseen,
+    but only written while it is."""
     folder = units_dir(env)
     shown = tilde(folder / unit.timer, env)
     names = (unit.service, unit.timer)
@@ -437,23 +453,47 @@ def _one(command: str, env: Mapping[str, str], unit: Unit, *, fix: bool) -> list
         current = {name: _read(folder / name) for name in names}
     except (OSError, UnicodeDecodeError) as e:
         if not unit.allowed and unit.moved_off is None:  # as fabricd's: a notes-only machine has no units to read
-            return []
+            return [], False
         reason = e.strerror if isinstance(e, OSError) and e.strerror else e
         step = (
             f"Look at {tilde(folder, env)}/fabric-ingest@{unit.instance}.*: kb checks and rewrites them once it can"
         )
-        return [Row("problem", "timer", shown, f"can't read the units ({reason})", step=step + " read them")]
+        return [Row("problem", "timer", shown, f"can't read the units ({reason})", step=step + " read them")], False
     masked = {name for name in names if _masked(folder / name)}
     if unit.timer in masked:
-        return [Row("ok", "timer", shown, _turned_off("masked", unit))]
+        return [Row("ok", "timer", shown, _turned_off("masked", unit))], False
     installed = any(text is not None for text in current.values())
     # v0.6's timer turned off moves here even before the workspace wants one, or its state would be lost.
     wanted = _wanted(env, unit) or unit.moved_off is not None
     if not wanted and not installed:
-        return []
+        return [], False
     if masked or not wanted:  # checked, never written
-        return [_service_masked(command, env, unit) if masked else _state(command, env, unit, fix=False)]
-    return [_installed(command, env, current, unit, fix=fix)]
+        row, runs = (_service_masked(command, env, unit), False) if masked else _checked(command, env, current, unit)
+        return [row], runs
+    return [_installed(command, env, current, unit, fix=fix)], False
+
+
+def _checked(command: str, env: Mapping[str, str], current: dict[str, str | None], unit: Unit) -> tuple[Row, bool]:
+    """Installed units kb won't write from this shell, and whether their runs find the tools. While systemd runs the
+    timer, its runs use the unit's PATH, not the shell's, so that's where the tools are looked for: a shell without
+    nvm, such as ssh's, doesn't make codex missing (§5)."""
+    asked = _ask(command, env, unit)
+    if asked is None or not _on(asked) or not unit.allowed or not unit.tools:
+        return _state(command, env, unit, asked, fix=False), False
+    shown = tilde(units_dir(env) / unit.timer, env)
+    if not installed_kb(env).is_file():
+        detail = f"the service would run {tilde(installed_kb(env), env)}, which isn't there"
+        return Row("problem", "timer", shown, detail, step="Run scripts/install.sh, which installs that kb"), False
+    if current[unit.service] is None:
+        detail = f"{unit.service} isn't there, so the timer starts nothing"
+        step = f"Run kb doctor --fix from a shell whose PATH finds {' and '.join(unit.tools)}"
+        return Row("problem", "timer", shown, detail, step=step), False
+    if lost := _lost(env, unit, saved_path(current[unit.service])):
+        step = f"Run kb doctor --fix from a shell whose PATH finds {' and '.join(lost)}"
+        return Row(
+            "problem", "timer", shown, f"its PATH no longer finds {' or '.join(lost)}, so each run fails", step=step
+        ), False
+    return _state(command, env, unit, asked, fix=False), True
 
 
 def _service_masked(command: str, env: Mapping[str, str], unit: Unit) -> Row:
@@ -471,6 +511,38 @@ def _service_masked(command: str, env: Mapping[str, str], unit: Unit) -> Row:
     return Row("ok", "timer", shown, _turned_off("masked", unit))
 
 
+def saved_path(text: str | None) -> str:
+    """The PATH a unit file of kb's saved, as systemd reads it, or "" where it saved none."""
+    saved = SAVED_PATH.search(text or "")
+    return saved[1].replace("%%", "%").replace('\\"', '"').replace("\\\\", "\\") if saved else ""
+
+
+def _runs_on_node(script: str | None) -> bool:
+    """Whether a tool is a script that finds node on PATH, as codex's `#!/usr/bin/env node` does. A first line that
+    names node by its path needs none on PATH."""
+    if script is None:
+        return False
+    try:
+        with open(script, "rb") as file:
+            first = file.readline(256)
+    except OSError:
+        return False
+    if not first.startswith(b"#!"):
+        return False
+    words = first[2:].split()
+    return bool(words) and os.path.basename(words[0]) == b"env" and b"node" in words[1:]
+
+
+def _lost(env: Mapping[str, str], unit: Unit, path: str) -> list[str]:
+    """The tools a unit's PATH no longer finds: those its ingest runs, and node where the shell's has one or a tool
+    the unit's PATH finds runs on it, which a shell without nvm has no node to show."""
+    tools = unit.tools or ()
+    needs_node = shutil.which("node", path=env.get("PATH", "")) or any(
+        _runs_on_node(shutil.which(tool, path=path)) for tool in tools
+    )
+    return [tool for tool in (*tools, *(("node",) if needs_node else ())) if not shutil.which(tool, path=path)]
+
+
 def _without_path(text: str | None) -> str | None:
     return SAVED_PATH.sub("", text) if text is not None else None
 
@@ -485,10 +557,7 @@ def _stale(
         name: _without_path(text) for name, text in expected.items()
     }:
         return "kb ingest runs from an old unit"
-    saved = SAVED_PATH.search(current[unit.service] or "")
-    path = saved[1].replace("%%", "%").replace('\\"', '"').replace("\\\\", "\\") if saved else ""
-    node = ("node",) if shutil.which("node", path=env.get("PATH", "")) else ()
-    lost = [tool for tool in (*(unit.tools or ()), *node) if not shutil.which(tool, path=path)]
+    lost = _lost(env, unit, saved_path(current[unit.service]))
     return f"its PATH no longer finds {' or '.join(lost)}, so each run fails" if lost else None
 
 
@@ -499,7 +568,7 @@ def _installed(command: str, env: Mapping[str, str], current: dict[str, str | No
         return Row("problem", "timer", shown, detail, step="Run scripts/install.sh, which installs that kb")
     expected = units(env, unit)
     if (stale := _stale(current, expected, env, unit)) is None:
-        return _state(command, env, unit, fix=fix)
+        return _state(command, env, unit, _ask(command, env, unit), fix=fix)
     installed = any(text is not None for text in current.values())
     if fix:
         return _write(command, env, unit, installed=installed)

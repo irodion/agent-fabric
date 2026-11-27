@@ -152,17 +152,120 @@ def test_without_systemd_doctor_says_to_run_ingest_by_hand(lab: Lab, tmp_path: P
     assert not (lab.kb.home / UNITS).exists()
 
 
-def test_fix_leaves_the_timer_alone_while_codex_is_not_on_path(lab: Lab, tmp_path: Path) -> None:
+def test_codex_off_the_shells_path_is_no_problem_while_the_units_path_finds_it(lab: Lab, tmp_path: Path) -> None:
     lab.kb("doctor", "--fix")
     written = unit(lab.kb, "fabric-ingest@default.service")
-    only_on_path(lab, tmp_path, "gitleaks")
+    only_on_path(lab, tmp_path, "gitleaks")  # a shell without nvm, such as ssh's
     a_stub(tmp_path / "only", "systemctl", (tmp_path / "stubs" / "systemctl").read_text())
 
     result = lab.kb("doctor", "--fix")
 
-    assert timer_rows(lab.kb, "--fix") == [("ok", DAILY)]  # checked, not rewritten: the ingest row names codex
-    assert "codex isn't on PATH" in result.stdout
+    assert timer_rows(lab.kb, "--fix") == [("ok", DAILY)]  # checked, not rewritten from a PATH without codex
+    assert "codex isn't on PATH" not in result.stdout
     assert unit(lab.kb, "fabric-ingest@default.service") == written
+
+
+def test_codex_off_the_shells_path_is_a_problem_while_the_timer_is_masked(lab: Lab, tmp_path: Path) -> None:
+    lab.kb("doctor", "--fix")
+    timer_file = lab.kb.home / UNITS / "fabric-ingest@default.timer"
+    timer_file.unlink()
+    timer_file.symlink_to("/dev/null")  # no run uses the unit's PATH: ingest runs only from a shell
+    only_on_path(lab, tmp_path, "gitleaks")
+    a_stub(tmp_path / "only", "systemctl", (tmp_path / "stubs" / "systemctl").read_text())
+
+    assert "codex isn't on PATH" in lab.kb("doctor").stdout
+
+
+def test_codex_off_the_shells_path_is_a_problem_while_the_timer_is_disabled(lab: Lab, tmp_path: Path) -> None:
+    lab.kb("doctor", "--fix")
+    systemd_state(lab.kb, "enabled", "disabled")  # ingest runs only from a shell
+    only_on_path(lab, tmp_path, "gitleaks")
+    a_stub(tmp_path / "only", "systemctl", (tmp_path / "stubs" / "systemctl").read_text())
+
+    assert "codex isn't on PATH" in lab.kb("doctor").stdout
+
+
+def test_from_a_shell_without_codex_only_a_tool_the_unit_lost_counts(lab: Lab, tmp_path: Path) -> None:
+    lab.kb("doctor", "--fix")
+    timer_file = lab.kb.home / UNITS / "fabric-ingest@default.timer"
+    timer_file.write_text(timer_file.read_text().replace("03:00:00", "Mon 03:00:00"))
+    only_on_path(lab, tmp_path, "gitleaks")
+    a_stub(tmp_path / "only", "systemctl", (tmp_path / "stubs" / "systemctl").read_text())
+
+    # Such a shell may lack the variables the unit carries too; a shell with codex says it's old, and rewrites it.
+    assert timer_rows(lab.kb, "--fix") == [("ok", DAILY)]
+
+
+def test_from_a_shell_without_codex_a_unit_whose_kb_is_gone_is_a_problem(lab: Lab, tmp_path: Path) -> None:
+    lab.kb("doctor", "--fix")
+    only_on_path(lab, tmp_path, "gitleaks")
+    a_stub(tmp_path / "only", "systemctl", (tmp_path / "stubs" / "systemctl").read_text())
+    installed_kb(lab.kb).unlink()
+
+    [(status, detail)] = timer_rows(lab.kb)
+
+    assert (status, "isn't there" in detail) == ("problem", True)
+    assert "codex isn't on PATH" in lab.kb("doctor").stdout  # no run finds it either
+
+
+def test_codex_found_by_neither_the_shell_nor_the_unit_is_a_problem(lab: Lab, tmp_path: Path) -> None:
+    only_on_path(lab, tmp_path, "gitleaks")
+    a_stub(tmp_path / "only", "systemctl", (tmp_path / "stubs" / "systemctl").read_text())
+    codex = a_stub(tmp_path / "nvm-bin", "codex", "#!/bin/sh\n")
+    lab.kb.env["PATH"] = f"{codex.parent}:{lab.kb.env['PATH']}"
+    lab.kb("doctor", "--fix")
+    assert str(codex.parent) in timer.saved_path(unit(lab.kb, "fabric-ingest@default.service")).split(":")
+    codex.unlink()  # its node version removed
+
+    result = lab.kb("doctor", "--fix")
+
+    assert "codex isn't on PATH" in result.stdout
+    assert timer_rows(lab.kb) == [("problem", "its PATH no longer finds codex, so each run fails")]
+    assert "Run kb doctor --fix from a shell whose PATH finds codex" in steps(lab.kb)
+
+
+def test_from_a_shell_without_node_a_unit_that_lost_codexs_node_is_a_problem(
+    lab: Lab, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(timer, "BASE_PATH", ())  # a machine's own node, as on CI, would still be found there
+    codex = a_stub(tmp_path / "codex-bin", "codex", "#!/usr/bin/env node\n")  # a script outside node's folder
+    node = a_stub(tmp_path / "old-node", "node", "#!/bin/sh\n")
+    only_on_path(lab, tmp_path, "gitleaks", "git")
+    a_stub(tmp_path / "only", "systemctl", (tmp_path / "stubs" / "systemctl").read_text())
+    shell = lab.kb.env["PATH"]
+    lab.kb.env["PATH"] = f"{codex.parent}:{node.parent}:{shell}"
+    lab.kb("doctor", "--fix")
+    node.unlink()  # as when nvm removes a version
+    lab.kb.env["PATH"] = shell  # a shell without nvm, which has no node to show
+
+    assert timer_rows(lab.kb) == [("problem", "its PATH no longer finds node, so each run fails")]
+
+
+@pytest.mark.parametrize(
+    ("first", "needs"),
+    [
+        ("#!/usr/bin/env node", True),
+        ("#!/usr/bin/env -S node --flag", True),
+        ("#!/opt/node/bin/node", False),
+        ("#!/bin/sh", False),
+    ],
+)
+def test_a_tool_needs_node_on_path_only_where_env_finds_it(tmp_path: Path, first: str, needs: bool) -> None:
+    script = a_stub(tmp_path, "codex", f"{first}\n")
+
+    assert timer._runs_on_node(str(script)) is needs
+
+
+def test_from_a_shell_without_codex_a_timer_without_its_service_is_a_problem(lab: Lab, tmp_path: Path) -> None:
+    lab.kb("doctor", "--fix")
+    (lab.kb.home / UNITS / "fabric-ingest@default.service").unlink()
+    only_on_path(lab, tmp_path, "gitleaks")
+    a_stub(tmp_path / "only", "systemctl", (tmp_path / "stubs" / "systemctl").read_text())
+
+    assert timer_rows(lab.kb) == [
+        ("problem", "fabric-ingest@default.service isn't there, so the timer starts nothing")
+    ]
+    assert "codex isn't on PATH" in lab.kb("doctor").stdout
 
 
 def test_a_timer_that_was_stopped_is_not_running_and_fix_starts_it(lab: Lab) -> None:

@@ -24,6 +24,7 @@ from agent_fabric.timer import (
     _quoted,
     _read,
     _systemctl,
+    saved_path,
 )
 
 NAME = "fabricd.service"
@@ -154,9 +155,7 @@ def _stale(current: str | None, env: Mapping[str, str]) -> str | None:
         return "fabricd doesn't run on its own"
     if SAVED_PATH.sub("", current) != SAVED_PATH.sub("", unit(env)):
         return "fabricd runs from an old unit"
-    saved = SAVED_PATH.search(current)
-    path = saved[1].replace("%%", "%").replace('\\"', '"').replace("\\\\", "\\") if saved else ""
-    lost = [tool for tool in TOOLS if not shutil.which(tool, path=path)]
+    lost = [tool for tool in TOOLS if not shutil.which(tool, path=saved_path(current))]
     return f"its PATH no longer finds {' or '.join(lost)}, so no digest can be written" if lost else None
 
 

@@ -255,11 +255,15 @@ def _copilot_sync(settings: Path, env: Mapping[str, str]) -> Row:
     return Row("ok", "sync", shown, "Copilot CLI's session sync is off")
 
 
-def _ingest_tools(env: Mapping[str, str], read: Config, workspaces: list[Workspace]) -> list[Row]:
-    """What `kb ingest` needs, once some workspace has a project for it to publish (docs/design.md §4.5, §4.7)."""
+def _ingest_tools(
+    env: Mapping[str, str], read: Config, workspaces: list[Workspace], running: set[Workspace]
+) -> list[Row]:
+    """What `kb ingest` needs, once some workspace has a project for it to publish (docs/design.md §4.5, §4.7). A
+    workspace whose timer systemd runs on a PATH that finds them needs none from the shell's: the timer's row covers
+    them (§5)."""
     shown = tilde(config_file(env), env)
     rows = []
-    tools: dict[str, None] = {}  # what the workspaces with a project allowed run, each once
+    tools: dict[str, None] = {}  # what the workspaces with a project allowed run from this shell, each once
     for workspace in workspaces:  # each checked, so that a bad list anywhere gets its row
         try:
             if not read.allowed(workspace.root):
@@ -270,7 +274,8 @@ def _ingest_tools(env: Mapping[str, str], read: Config, workspaces: list[Workspa
             continue
         if problem := not_ours(backend):
             rows.append(Row("problem", "ingest", config.setting(env, workspace.root, "ingest", "backend"), problem))
-        tools.update(dict.fromkeys(("gitleaks",) if problem else ("gitleaks", backend)))
+        if workspace not in running:
+            tools.update(dict.fromkeys(("gitleaks",) if problem else ("gitleaks", backend)))
     return rows + [
         Row("problem", "ingest", tool, f"{tool} isn't on PATH, and kb ingest needs it")
         for tool in tools
@@ -368,13 +373,14 @@ def doctor(
         timer.unit_of(workspace, None if isinstance(spaces.config, Exception) else spaces.config)
         for workspace in workspaces
     ]
+    timers, running = timer.check(env, spaces.registered, ingest_units, fix=fix, known=spaces.known)
     rows += [
         *(
-            _ingest_tools(env, spaces.config, spaces.registered)
+            _ingest_tools(env, spaces.config, spaces.registered, running)
             if spaces.known and isinstance(spaces.config, Config)
             else []
         ),
-        *timer.check(env, spaces.registered, ingest_units, fix=fix, known=spaces.known),
+        *timers,
         *agentsview_unit.check(env, spaces.config, wanted=any(unit.allowed for unit in ingest_units), fix=fix),
         *fabricd_unit.check(env, spaces.config, wanted=any(unit.allowed for unit in ingest_units), fix=fix),
     ]
