@@ -6,8 +6,8 @@
 Three parts are built: agent notes (`kb note`, `inbox`, `doctor`, `hook` and the `kb-note` skill), notes into the wiki
 (`kb ingest`, `kb lint`), and the CI that builds and vets agentsview. The agentsview adapter, the first piece of
 capture, is built too, with Copilot CLI's and Cursor CLI's own readers, the normalizer, the tracker, the digester, and
-`fabricd`, which runs the last two. The rest of the design, including fabricd's panel and the other `kb` commands, is
-still a plan (§9 has the phases).
+`fabricd`, which runs the last two. `kb mcp`, in Go, serves one tool so far, `list_notes`. The rest of the design,
+including fabricd's panel, `kb mcp`'s other tools and the other `kb` commands, is still a plan (§9 has the phases).
 
 The design holds decisions, their reasons and dated findings from real agent runs. Details live in code and tests,
 which cite it by section. Read the section before changing what it covers:
@@ -27,11 +27,13 @@ still open.
 scripts/check.sh               # lint.yml's checks, one line per check
 scripts/check.sh --red <rev>   # names new tests that pass on <rev>'s code: they don't show the change
 uv run pytest tests/test_note.py::test_a_kind_given_with_resolve_is_refused
-uv run kb <args>               # this clone's kb, on the real home
+uv run kb <args>               # this clone's kb, on the real home; but kb mcp runs the installed kb-go
+(cd go && go test ./...)       # kb-go's tests; check.sh runs them with gofmt and go vet
 ```
 
 In an agent's sandbox, plain `uv run` needs `--cache-dir "$TMPDIR/uv"` after `run`; `scripts/check.sh` adds it
-itself.
+itself. Go's caches are read-only there too: `check.sh` moves the build cache into `$TMPDIR`, and the module cache
+only where a module isn't in the real one yet, which downloads them again from `storage.googleapis.com`.
 
 - `scripts/check.sh` uses one Python version (`.python-version`, 3.14) and skips tools that aren't installed. CI also
   runs 3.13, the minimum, so code has to work there, and the vet gate. The check runs before a commit only where
@@ -129,6 +131,11 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   list and gitleaks; it commits in the wiki's own checkout, the user's too, only while that is clean on `main`.
   `digester.Digester` follows the tracker's changes from its own place in `state.db`: snapshots at a session's start
   and turn ends, and its digest written at each finalization, retried while it can't be.
+- **kb-go.** The part of kb written in Go, in `go/` (§6): `cmd/kb-go` is the binary, `internal/cli.Run` its entry,
+  and `kb` hands it the commands in `cli.GO_COMMANDS` by exec, the `kb-go` beside it first. `internal/kbmcp` is `kb
+  mcp` (§4.9); what Go doesn't read yet it asks the Python `kb` beside `kb-go`, so `list_notes` is `kb inbox`. Its
+  tests call each tool through an MCP client over the SDK's in-memory transport, with a stand-in `kb`, and
+  `cmd/kb-go`'s test runs the test binary as `kb-go` over stdio.
 - **fabricd.** `fabricd.start` is the process (`fabricd` on PATH): it reads `[agentsview] port` and `[sessions]
   idle_minutes` once, takes `fabricd.lock` beside `state.db` so that one runs per data folder, and runs `fabricd.serve`
   until SIGTERM or SIGINT, which waits for the step under way; a second signal ends it at once. The tracker and the
