@@ -358,6 +358,65 @@ def test_a_change_in_a_session_with_no_times_counts_from_when_it_was_seen(
     assert kinds(t.poll(T0 + 50 * MINUTE)) == [("finalized", "s1")]
 
 
+def test_a_last_message_with_no_time_counts_from_the_listings_own(db: sqlite3.Connection, source: Source) -> None:
+    # Cursor CLI's reader times what its turn index holds, but not a prompt Cursor never indexed: the listing's end,
+    # when Cursor last wrote the session, is the session's own time for it.
+    source.add("s1", "cursor")
+    source.say("s1", "user", "build it", T0)
+    t = tracker(db, feed(source, "cursor"))
+    t.poll(T0)
+    seen = []
+    for minutes in (20, 40):
+        source.say("s1", "user", "continue", None)
+        source.changed("s1", ended_at=T0 + minutes * MINUTE)
+        seen += [(minutes, kinds(t.poll(T0 + minutes * MINUTE)))]
+    seen += [(45, kinds(t.poll(T0 + 45 * MINUTE))), (71, kinds(t.poll(T0 + 71 * MINUTE)))]
+    assert seen == [(20, []), (40, []), (45, []), (71, [("finalized", "s1")])]
+
+
+def test_a_watch_that_sees_an_untimed_change_first_counts_it_from_the_sessions_end(
+    db: sqlite3.Connection, source: Source
+) -> None:
+    source.add("s1", "cursor")
+    source.say("s1", "user", "build it", T0)
+    t = tracker(db, feed(source, "cursor"))
+    t.poll(T0)
+    source.say("s1", "user", "continue", None)
+    source.changed("s1", ended_at=T0 + 25 * MINUTE)
+    t.tick("s1", T0 + 25 * MINUTE)  # the watch, before any poll lists the change
+    assert kinds(t.poll(T0 + 31 * MINUTE)) == []
+    row = t.session("s1")
+    assert row is not None
+    assert (row.state, row.active_at) == ("active", T0 + 25 * MINUTE)
+
+
+def test_an_earlier_time_filled_in_late_reopens_nothing(db: sqlite3.Connection, source: Source) -> None:
+    # Cursor indexes a turn late: an earlier message gets its time, its store a newer write, but nothing more is said.
+    source.add("s1", "cursor")
+    source.say("s1", "user", "build it", T0)
+    source.say("s1", "assistant", "On it.", None)
+    source.say("s1", "user", "continue", None)
+    source.changed("s1", ended_at=T0 + 2 * MINUTE)  # its last write, which its untimed messages count from
+    t = tracker(db, feed(source, "cursor"))
+    t.poll(T0 + 2 * MINUTE)
+    assert kinds(t.poll(T0 + 33 * MINUTE)) == [("finalized", "s1")]
+    source.fold("s1", 1, timestamp=T0 + MINUTE)  # its index, written with it, read late
+    source.changed("s1", ended_at=T0 + 2 * 60 * MINUTE)
+    assert kinds(t.poll(T0 + 2 * 60 * MINUTE)) == []
+
+
+def test_a_write_that_adds_nothing_past_the_last_time_reopens_nothing(db: sqlite3.Connection, source: Source) -> None:
+    source.add("s1", "cursor")
+    source.say("s1", "user", "build it", T0)
+    source.say("s1", "user", "continue", None)
+    source.changed("s1", ended_at=T0)
+    t = tracker(db, feed(source, "cursor"))
+    t.poll(T0)
+    assert kinds(t.poll(T0 + 31 * MINUTE)) == [("finalized", "s1")]
+    source.changed("s1", ended_at=T0 + 2 * 60 * MINUTE)  # Cursor rewrote its meta.json, adding no message
+    assert kinds(t.poll(T0 + 2 * 60 * MINUTE)) == []
+
+
 def test_a_new_field_in_how_messages_read_reopens_nothing(db: sqlite3.Connection, source: Source) -> None:
     source.add("s1")
     turn(source, "s1", T0)

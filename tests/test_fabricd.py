@@ -6,6 +6,7 @@ sets, and `start` runs the whole process on a fake home until a signal stops it.
 import asyncio
 import fcntl
 import os
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -14,7 +15,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from contextlib import closing
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from agent_fabric import digester
 from agent_fabric.capture import AgentsviewSource, SessionMeta
 from agent_fabric.config import Config, FabricdSettings, fabricd_settings
 from agent_fabric.copilot import CopilotSource
+from agent_fabric.cursor import CursorSource
 from agent_fabric.digester import Digester
 from agent_fabric.fabricd import capture_feeds, serve, start
 from agent_fabric.paths import local_dir, state_db
@@ -206,9 +208,24 @@ def test_each_agent_is_read_through_one_source(env: dict[str, str]) -> None:
         assert {(f.name, type(f.source)) for f in feeds} == {
             ("agentsview", AgentsviewSource),
             ("copilot", CopilotSource),
+            ("cursor", CursorSource),
         }
         agents = [agent for f in feeds for agent in f.agents]
-        assert sorted(agents) == ["claude", "codex", "copilot"]
+        assert sorted(agents) == ["claude", "codex", "copilot", "cursor"]
+    finally:
+        for f in feeds:
+            if isinstance(f.source, AgentsviewSource):
+                f.source.close()
+
+
+def test_cursor_clis_feed_reads_the_home_fabricd_was_given(env: dict[str, str]) -> None:
+    fixtures = Path(__file__).parent / "fixtures" / "cursor" / "chats"
+    shutil.copytree(fixtures, Path(env["HOME"]) / ".cursor" / "chats")
+    feeds = capture_feeds(env, 8080)
+    try:
+        (cursor,) = (f for f in feeds if f.name == "cursor")
+        listed = cursor.source.active_sessions(datetime(2020, 1, 1, tzinfo=UTC))
+        assert [s.id for s in listed] == ["cursor:c7da6f1e-a42a-464b-bd21-1fde77114411"]
     finally:
         for f in feeds:
             if isinstance(f.source, AgentsviewSource):

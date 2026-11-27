@@ -34,6 +34,8 @@ from agent_fabric.capture import AgentsviewSource
 from agent_fabric.config import BAD_CONFIG, LOCKED, fabricd_settings, read_config
 from agent_fabric.copilot import AGENT as COPILOT
 from agent_fabric.copilot import CopilotSource
+from agent_fabric.cursor import AGENT as CURSOR
+from agent_fabric.cursor import CursorSource
 from agent_fabric.paths import config_file, state_db, tilde
 from agent_fabric.tracker import POLL, TURN_QUIET, Change, Feed, Tracker
 
@@ -41,11 +43,12 @@ log = logging.getLogger(__name__)
 
 
 def capture_feeds(env: Mapping[str, str], port: int) -> list[Feed]:
-    """Each agent through its one source (§4.3): agentsview for Claude Code and Codex, Copilot CLI's own reader for
-    Copilot. Cursor CLI waits for its own reader (§4.1)."""
+    """Each agent through its one source (§4.3): agentsview for Claude Code and Codex, and their own readers for
+    Copilot CLI and Cursor CLI, which agentsview fails under a read-only home (§4.1)."""
     return [
         Feed("agentsview", AgentsviewSource(f"http://127.0.0.1:{port}"), frozenset({"claude", "codex"})),
         Feed("copilot", CopilotSource(env), frozenset({COPILOT})),
+        Feed("cursor", CursorSource(env), frozenset({CURSOR})),
     ]
 
 

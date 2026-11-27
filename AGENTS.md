@@ -5,9 +5,9 @@
 `docs/design.md` plans a memory shared across coding agents: session digests, a live panel, a wiki, an MCP server.
 Three parts are built: agent notes (`kb note`, `inbox`, `doctor`, `hook` and the `kb-note` skill), notes into the wiki
 (`kb ingest`, `kb lint`), and the CI that builds and vets agentsview. The agentsview adapter, the first piece of
-capture, is built too, with Copilot CLI's own reader, the normalizer, the tracker, the digester, and `fabricd`, which
-runs the last two. The rest of the design, including fabricd's panel and the other `kb` commands, is still a
-plan (§9 has the phases).
+capture, is built too, with Copilot CLI's and Cursor CLI's own readers, the normalizer, the tracker, the digester, and
+`fabricd`, which runs the last two. The rest of the design, including fabricd's panel and the other `kb` commands, is
+still a plan (§9 has the phases).
 
 The design holds decisions, their reasons and dated findings from real agent runs. Details live in code and tests,
 which cite it by section. Read the section before changing what it covers:
@@ -109,7 +109,9 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   spec, cut down by `scripts/agentsview-openapi.py`, which a pin bump reruns: a test fails while the two differ.
   `copilot.py` is Copilot CLI's own `CaptureSource` over its session folders, since agentsview fails Copilot under a
   read-only home (§4.1). It reads `events.jsonl` the way agentsview does, and its tests compare the two readings of
-  the live check's Copilot session.
+  the live check's Copilot session. `cursor.py` is Cursor CLI's, over its chat folders: it reads each `store.db` in
+  place, writing nothing beside it, and times the messages from Cursor's turn index. Its fixture is a synthetic
+  recording scrubbed by `scripts/cursor-fixture.py`; the tests build other stores themselves.
 - **Normalizing.** `normalize.events` turns a session's messages into §4.2's events, one per message, each tool call
   an action with a kind, a command, an exit code and whether it failed. A table per agent (`ACTIONS`) says where it
   keeps its command and exit code; Codex's code-mode scripts split into one action per call inside. The tests run the

@@ -15,6 +15,7 @@ import pytest
 
 from agent_fabric.capture import AgentsviewSource, Message, SessionMeta, ToolCall, ToolResultEvent
 from agent_fabric.copilot import CopilotSource
+from agent_fabric.cursor import CursorSource
 from agent_fabric.normalize import Action, Event, events
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -76,6 +77,19 @@ def test_claude_codes_failed_command_and_the_rest() -> None:
         ("edit", None, None, False),
     ]
     assert [e.failed for e in found] == [False, True, False, False, False]
+
+
+def test_cursors_failed_test_run_and_its_search_through_its_own_reader(tmp_path: Path) -> None:
+    # Cursor CLI's recorded session (2026-11-27): a test run that exits 1, and a search that finds nothing.
+    shutil.copytree(FIXTURES / "cursor" / "chats", tmp_path / ".cursor" / "chats")
+    source = CursorSource({"HOME": str(tmp_path)})
+    session_id = "cursor:c7da6f1e-a42a-464b-bd21-1fde77114411"
+    found = events(source.session(session_id), source.messages(session_id, 0).messages)
+    assert summary(found) == [
+        ("shell", "python3 --version && python3 test_calc.py", 1, True),
+        ("search", None, None, False),
+    ]
+    assert [e.failed for e in found] == [False, False, False, True, False, False, False, False]
 
 
 def test_codexs_script_calls_become_actions_with_their_own_exit_codes() -> None:
@@ -589,3 +603,43 @@ def test_an_event_keeps_its_message() -> None:
 def test_result_statuses_are_read_in_order() -> None:
     tool = ToolCall(tool_name="bash", category="Bash", result_events=(ToolResultEvent(status="started"),))
     assert tool.result_events[0].status == "started"
+
+
+# ── Cursor CLI ────────────────────────────────────────────────────────────
+
+
+def test_a_cursor_command_with_no_record_of_its_end_takes_its_exit_code_from_its_output() -> None:
+    result = "Exit code: 2\n\nCommand output:\n\n```\nnope\n```"
+    (action,) = one("cursor", call("Shell", "Bash", {"command": "make"}, result))
+    assert (action.exit_code, action.failed) == (2, True)
+
+
+def test_the_exit_code_cursors_reader_kept_wins() -> None:
+    (action,) = one("cursor", call("Shell", "Bash", {"command": "x"}, "Exit code: 2", "completed", exit_code=0))
+    assert (action.exit_code, action.failed) == (0, False)
+
+
+def test_a_cursor_file_showing_an_exit_line_isnt_the_commands() -> None:
+    shown = "Exit code: 0\n\nCommand output:\n\n```\nExit code: 3\n```"
+    (action,) = one("cursor", call("Shell", "Bash", {"command": "cat log"}, shown))
+    assert action.exit_code == 0
+
+
+def test_a_cursor_command_rejected_with_no_record_of_its_end_failed() -> None:
+    (action,) = one("cursor", call("Shell", "Bash", {"command": "rm -rf x"}, "Rejected: "))
+    assert (action.status, action.failed) == ("errored", True)
+
+
+def test_a_cursor_command_killed_with_no_record_keeps_its_negative_code() -> None:
+    (action,) = one("cursor", call("Shell", "Bash", {"command": "make"}, "Exit code: -15\n\nCommand output:\n"))
+    assert (action.exit_code, action.failed) == (-15, True)
+
+
+def test_a_cursor_command_still_running_takes_no_code_from_its_output() -> None:
+    (action,) = one("cursor", call("Shell", "Bash", {"command": "npm run dev"}, "Exit code: 0", "running"))
+    assert action.exit_code is None
+
+
+def test_an_edit_cursor_rejected_with_no_record_of_its_end_failed() -> None:
+    (action,) = one("cursor", call("StrReplace", "Edit", {"path": "x.py"}, "Rejected: user declined"))
+    assert (action.kind, action.failed) == ("edit", True)

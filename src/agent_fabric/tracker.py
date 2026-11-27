@@ -296,6 +296,13 @@ class Tracker:
                 (status, listing, active_at.isoformat(), session_id),
             )
 
+    def _ended_at(self, feed: Feed, session_id: str) -> datetime | None:
+        """The session's own end, asked of its source; None where it can't be asked."""
+        try:
+            return feed.source.session(session_id).ended_at
+        except CaptureError:
+            return None
+
     def _read(
         self, feed: Feed, session_id: str, meta: SessionMeta | None, now: datetime, listing: str | None
     ) -> list[Change]:
@@ -304,12 +311,22 @@ class Tracker:
         content = _hash(messages)
         changed = row is None or content != row.content
         latest = _latest(messages)
+        grew = messages and (row is None or messages[-1].ordinal > row.last_ordinal)
+        if grew and latest is not None and _untimed(messages[-1]):
+            # Times that don't reach the end, as where Cursor CLI's reader has none for a prompt it never indexed:
+            # the session's end, when it was last written, is its own time for the messages past the last read.
+            # Only for those: a write that adds nothing, such as Cursor rewriting its meta, or an earlier time it
+            # filled in late, isn't activity. A read a watch made has no listing: the session is asked, as this
+            # read is the one that sees the change.
+            ended = meta.ended_at if meta else self._ended_at(feed, session_id)
+            if ended:
+                latest = max(latest, min(_utc(ended), now))
         # The session's own times, as they are: capped at now, the same times read again would look newer.
         if row is None:
             listed_at = _first(meta).ended_at
             active_at = latest or (_utc(listed_at) if listed_at else now)
         elif latest is None:
-            # A session with no times at all, such as Cursor CLI's in agentsview: a change happened about now.
+            # A session with no times at all, from a source that keeps none: a change happened about now.
             active_at = now if changed else row.active_at
         else:
             # Only a newer time is activity: a re-parse, or a new field in how a message reads, isn't.
@@ -511,16 +528,21 @@ def _answer(messages: Sequence[Message]) -> str | None:
 
 def _latest(messages: Iterable[Message]) -> datetime | None:
     """The latest time in the messages, theirs and their tool results'; one without a zone counts as UTC."""
-    stamps = [
-        _utc(stamp)
-        for message in messages
-        for stamp in (
-            message.timestamp,
-            *(event.timestamp for call in message.tool_calls for event in call.result_events),
-        )
-        if stamp is not None
-    ]
+    stamps = [_utc(stamp) for message in messages for stamp in _times(message)]
     return max(stamps) if stamps else None
+
+
+def _untimed(message: Message) -> bool:
+    """The message, or a result folded into it, has no time of its own."""
+    return message.timestamp is None or any(
+        event.timestamp is None for call in message.tool_calls for event in call.result_events
+    )
+
+
+def _times(message: Message) -> list[datetime]:
+    """A message's times: its own, and its tool results'."""
+    stamps = [message.timestamp, *(event.timestamp for call in message.tool_calls for event in call.result_events)]
+    return [stamp for stamp in stamps if stamp is not None]
 
 
 def _utc(stamp: datetime) -> datetime:

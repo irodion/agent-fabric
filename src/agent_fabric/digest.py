@@ -627,7 +627,7 @@ def _worktree(first: Snapshot | None) -> dict[str, str] | None:
 
 def _utc(stamp: datetime | None) -> datetime:
     if stamp is None:
-        return datetime(1970, 1, 1, tzinfo=UTC)  # a session with no times at all: Cursor CLI's in agentsview
+        return datetime(1970, 1, 1, tzinfo=UTC)  # a session with no times at all, from a source that keeps none
     return stamp.astimezone(UTC) if stamp.tzinfo else stamp.replace(tzinfo=UTC)
 
 
