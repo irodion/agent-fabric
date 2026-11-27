@@ -21,6 +21,11 @@ def state_db(env: Mapping[str, str]) -> Path:
     return _data_home(env) / "agent-fabric" / "state.db"
 
 
+def index_db(env: Mapping[str, str]) -> Path:
+    """The default workspace's search index, which kb-go rebuilds from its pages (docs/design.md §4.9)."""
+    return _data_home(env) / "agent-fabric" / "index.db"
+
+
 def local_dir(env: Mapping[str, str]) -> Path:
     """Digests of projects not on the allow list, never committed (docs/design.md §4.5)."""
     return _data_home(env) / "agent-fabric" / "local"

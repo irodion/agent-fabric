@@ -956,10 +956,32 @@ instructions, between markers drawn new for each answer. A page's path is its pa
 workspace, `raw/sessions/…` or `wiki/projects/…` as §4.6 lays the wiki out, wherever it's kept: a digest moves between
 the workspace's local digests and its wiki as its project joins or leaves the allow list (§4.5), and keeps its path.
 `get_page` and `kb show` read it in the local digests first, then the wiki, and only a Markdown file under `wiki/`,
-`raw/sessions/` or `raw/notes/`, by a path that stays there, links included; not the manifests, nor quarantined
+`raw/sessions/` or `raw/notes/`, by a path with no link along it; not the manifests, nor quarantined
 digests. What a tool answers reaches the agent's model, and its vendor: the wiki's pages passed §4.5's gitleaks gate,
 but local digests only its redaction, as `kb` output always has (§4.5), so a secret the redaction misses in a project
 off the allow list reaches an agent of any project in the workspace that asks for it.
+
+`search`, `kb search` and `kb reindex` are built (2026-11-27), in kb-go over `modernc.org/sqlite`'s FTS5 (porter, a
+page has to hold every word of the query, each quoted so none reads as FTS5's syntax). Each workspace has its own
+`index.db`, in kb's data folder beside its local digests, out of the root's `.fabric/`. A search brings it up to date
+first, reading again each page whose size or time changed and dropping each that's gone, so there is no daemon to keep
+it fresh; where the index can't be written, as in an agent's sandbox, it's searched as it stands, and where there's
+none yet, kb says to run `kb reindex` outside. `kb reindex` empties it and fills it again in one transaction, since a
+file moved over an index another search is writing would take that search's journal for its own; a file of another
+version, or one that isn't an index, is built anew in a file of its own moved over it, by `kb reindex` or a search. It
+covers the pages `get_page` serves, which both find through one package: a link or anything but a file where a page
+would be is no page there. `--kind` is `session`, `page` or `note` by the page's folder; `--project` searches where kb
+writes that project's pages, which `kb paths --project` names with Python's own rules, so that a git project with no
+remote is found too (a folder outside git isn't, for its digests: the tracker files those under agentsview's name for
+the project, not the folder that names its notes); with none, a search covers every project in the workspace, unlike
+the other tools, as finding what another project learned is what it's for. `--since` takes a day or an age, counted in
+whole days, a page dated by its name, or a wiki page by when it was written. A search gives the best 20 pages, each
+with the words found marked «so», as `[` and `]` are Markdown's own, and says when more match. A page or folder it
+can't read is left out, rather than failing every search. Open: a search from an agent's sandbox (Codex's
+`workspace-write`, say) reads the index as the last search or `kb reindex` outside left it, so the writers, fabricd's
+digester and ingest, could bring it up to date after they write. Not yet: the inbox's notes (`list_notes` lists them),
+the trigram table for paths, commands and errors, and the relational tables from front matter, which `list_sessions`
+and `catchup` will need.
 
 Registration (manual, once): Codex `~/.codex/config.toml` `[mcp_servers.kb]`, Cursor `~/.cursor/mcp.json`, VS Code
 user `mcp.json`; each gets `kb` and `agentsview` (`mcp --profile memory --server http://127.0.0.1:<port>`, §4.1).
