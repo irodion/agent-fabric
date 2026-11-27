@@ -194,8 +194,8 @@ def _turn_on(command: str, env: Mapping[str, str], shown: str, unit: Unit) -> Ro
 def _wanted(env: Mapping[str, str], unit: Unit) -> bool:
     """Once there's a project for its ingest to publish and the tools it runs are on PATH: a unit written without one
     would lack it, and the ingest row says what to install."""
-    tools = unit.tools
-    return unit.allowed and tools is not None and all(shutil.which(tool, path=env.get("PATH", "")) for tool in tools)
+    # node too, where a tool runs on it: a unit written without it would lose it at once.
+    return unit.allowed and unit.tools is not None and not _lost(env, unit, env.get("PATH", ""))
 
 
 def _read(path: Path) -> str | None:

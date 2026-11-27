@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 import toon_format
-from conftest import Kb, Lab, a_stub
+from conftest import PROJECT, Kb, Lab, a_stub
 
 from agent_fabric import timer
 
@@ -239,6 +239,33 @@ def test_from_a_shell_without_node_a_unit_that_lost_codexs_node_is_a_problem(
     lab.kb.env["PATH"] = shell  # a shell without nvm, which has no node to show
 
     assert timer_rows(lab.kb) == [("problem", "its PATH no longer finds node, so each run fails")]
+
+
+def test_fix_writes_no_unit_while_codexs_node_is_not_on_path(
+    lab: Lab, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(timer, "BASE_PATH", ())  # a machine's own node, as on CI, would still be found there
+    only_on_path(lab, tmp_path, "gitleaks", "git")
+    a_stub(tmp_path / "only", "systemctl", (tmp_path / "stubs" / "systemctl").read_text())
+    a_stub(tmp_path / "only", "codex", "#!/usr/bin/env node\n")  # its node not on this PATH
+
+    lab.kb("doctor", "--fix")
+
+    assert not (lab.kb.home / UNITS / "fabric-ingest@default.service").exists()  # it would lack node at once
+
+
+def test_a_root_that_isnt_there_needs_no_codex_from_the_shell(lab: Lab, tmp_path: Path) -> None:
+    lab.kb("doctor", "--fix")
+    config = lab.kb.home / ".config" / "agent-fabric" / "config.toml"
+    gone = tmp_path / "mnt" / "clientdisk"  # never made: a disk that isn't mounted
+    config.write_text(config.read_text() + f'\n[[workspace]]\nroot = "{gone}"\nallow = ["{PROJECT}"]\n')
+    only_on_path(lab, tmp_path, "gitleaks")  # a shell without nvm; the default workspace's timer finds codex
+    a_stub(tmp_path / "only", "systemctl", (tmp_path / "stubs" / "systemctl").read_text())
+
+    result = lab.kb("doctor")
+
+    assert "a registered root that isn't there" in result.stdout
+    assert "codex isn't on PATH" not in result.stdout
 
 
 @pytest.mark.parametrize(
