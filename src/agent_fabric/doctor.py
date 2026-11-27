@@ -276,11 +276,18 @@ def _ingest_tools(
             rows.append(Row("problem", "ingest", config.setting(env, workspace.root, "ingest", "backend"), problem))
         if workspace in from_shell:
             tools.update(dict.fromkeys(("gitleaks",) if problem else ("gitleaks", backend)))
-    return rows + [
+    path = env.get("PATH", "")
+    rows += [
         Row("problem", "ingest", tool, f"{tool} isn't on PATH, and kb ingest needs it")
         for tool in tools
-        if shutil.which(tool, path=env.get("PATH", "")) is None
+        if shutil.which(tool, path=path) is None
     ]
+    # A codex found here that runs on a node this PATH lacks fails too, and --fix writes no timer for it.
+    if not shutil.which("node", path=path) and (
+        on_node := [t for t in tools if timer.runs_on_node(shutil.which(t, path=path))]
+    ):
+        rows.append(Row("problem", "ingest", "node", f"node isn't on PATH, and {' and '.join(on_node)} runs on it"))
+    return rows
 
 
 def _wiki(env: Mapping[str, str], now: datetime, workspace: Workspace) -> list[Row]:
