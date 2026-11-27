@@ -979,9 +979,13 @@ whole days, a page dated by its name, or a wiki page by when it was written. A s
 with the words found marked «so», as `[` and `]` are Markdown's own, and says when more match. A page or folder it
 can't read is left out, rather than failing every search. Open: a search from an agent's sandbox (Codex's
 `workspace-write`, say) reads the index as the last search or `kb reindex` outside left it, so the writers, fabricd's
-digester and ingest, could bring it up to date after they write. Not yet: the inbox's notes (`list_notes` lists them),
-the trigram table for paths, commands and errors, and the relational tables from front matter, which `list_sessions`
-and `catchup` will need.
+digester and ingest, could bring it up to date after they write. `list_sessions` and `kb sessions` are built too
+(2026-11-27), over two more tables, `sessions` and `files`, filled from each digest's front matter as the index
+catches up: kb-go is that front matter's one reader, as digest.py is its writer, through `go.yaml.in/yaml/v3`. A
+session row is the digest's path, for `get_page`, its agent, when it ran, its prompts and errors and its last test
+run; `--file` is a file it changed, `--failing-tests` a last run that failed, `--since` its start. With no project,
+the current folder's, as §4.9's table has it; `--all-projects` lists every one. Not yet: `catchup`, the inbox's notes
+in search (`list_notes` lists them), and the trigram table for paths, commands and errors.
 
 Registration (manual, once): Codex `~/.codex/config.toml` `[mcp_servers.kb]`, Cursor `~/.cursor/mcp.json`, VS Code
 user `mcp.json`; each gets `kb` and `agentsview` (`mcp --profile memory --server http://127.0.0.1:<port>`, §4.1).

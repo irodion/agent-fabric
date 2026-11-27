@@ -15,11 +15,12 @@ import (
 )
 
 // commands are the commands kb-go serves, as the Python kb's GO_COMMANDS names them.
-var commands = []string{"mcp", "show", "search", "reindex"}
+var commands = []string{"mcp", "show", "search", "sessions", "reindex"}
 
 const usage = `usage: kb mcp
        kb show <path>    a page's path in the workspace, as wiki/projects/... or raw/sessions/...
        kb search <words> [--kind session|page|note] [--project ID] [--since DAY|AGE] [-- <words>]
+       kb sessions [--project ID|FOLDER | --all-projects] [--file PATH] [--failing-tests] [--since DAY|AGE]
        kb reindex`
 
 // Run runs one command and gives its exit code: 1 where it fails, 2 for a command line kb-go doesn't take. `kb mcp`
@@ -55,6 +56,23 @@ func Run(args []string, ctx kbmcp.Context, stdout, stderr io.Writer) int {
 			return 2
 		}
 		out, err = ctx.Search(call, search)
+	case len(args) >= 1 && args[0] == "sessions":
+		var sessions kbmcp.SessionsArgs
+		words, help, usageErr := options(args[1:],
+			map[string]*string{"--project": &sessions.Project, "--file": &sessions.File, "--since": &sessions.Since},
+			map[string]*bool{"--all-projects": &sessions.AllProjects, "--failing-tests": &sessions.FailingTests})
+		if help {
+			fmt.Fprintln(stdout, usage)
+			return 0
+		}
+		if usageErr == nil && len(words) > 0 {
+			usageErr = fmt.Errorf("takes no words: %q", strings.Join(words, " "))
+		}
+		if usageErr != nil {
+			fmt.Fprintf(stderr, "kb sessions: %v\n%s\n", usageErr, usage)
+			return 2
+		}
+		out, err = ctx.Sessions(call, sessions)
 	case len(args) == 1 && args[0] == "reindex":
 		out, err = ctx.Reindex(call)
 		if err == nil {
@@ -72,44 +90,58 @@ func Run(args []string, ctx kbmcp.Context, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// searchArgs reads `kb search`'s words and options, in any order: --kind, --project and --since, each with its
-// value as the next argument or after `=`, and -h or --help, which asks for the usage; everything after `--` is words.
+// searchArgs reads `kb search`'s words and options: --kind, --project and --since.
 func searchArgs(args []string) (search kbmcp.SearchArgs, help bool, err error) {
-	options := map[string]*string{"--kind": &search.Kind, "--project": &search.Project, "--since": &search.Since}
-	var words []string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			words = append(words, args[i+1:]...)
-			break
-		}
-		if !strings.HasPrefix(arg, "-") {
-			words = append(words, arg)
-			continue
-		}
-		if arg == "-h" || arg == "--help" {
-			return search, true, nil
-		}
-		name, value, joined := strings.Cut(arg, "=")
-		target, known := options[name]
-		if !known {
-			return search, false, fmt.Errorf("no option %s; put a word that starts with - after --", name)
-		}
-		if !joined {
-			if i+1 == len(args) {
-				return search, false, fmt.Errorf("%s needs a value", name)
-			}
-			i++
-			value = args[i]
-		}
-		if value == "" { // which the tool takes for no option, a search wider than asked for
-			return search, false, fmt.Errorf("%s needs a value", name)
-		}
-		*target = value
+	words, help, err := options(args,
+		map[string]*string{"--kind": &search.Kind, "--project": &search.Project, "--since": &search.Since}, nil)
+	if help || err != nil {
+		return search, help, err
 	}
 	search.Query = strings.Join(words, " ")
 	if strings.TrimSpace(search.Query) == "" { // as kb search "", which holds no word either
 		return search, false, errors.New("no words to look for")
 	}
 	return search, false, nil
+}
+
+// options reads a command's words and options, in any order: each of `values` with its value as the next argument
+// or after `=`, each of `flags` alone, and -h or --help, which asks for the usage; everything after `--` is words.
+func options(args []string, values map[string]*string, flags map[string]*bool) (words []string, help bool, err error) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return append(words, args[i+1:]...), false, nil
+		}
+		if !strings.HasPrefix(arg, "-") {
+			words = append(words, arg)
+			continue
+		}
+		if arg == "-h" || arg == "--help" {
+			return nil, true, nil
+		}
+		if flag, known := flags[arg]; known {
+			*flag = true
+			continue
+		}
+		name, value, joined := strings.Cut(arg, "=")
+		if _, flag := flags[name]; flag {
+			return nil, false, fmt.Errorf("%s takes no value", name)
+		}
+		target, known := values[name]
+		if !known {
+			return nil, false, fmt.Errorf("no option %s; put a word that starts with - after --", name)
+		}
+		if !joined {
+			if i+1 == len(args) {
+				return nil, false, fmt.Errorf("%s needs a value", name)
+			}
+			i++
+			value = args[i]
+		}
+		if value == "" { // which the tool takes for no option, wider than asked for
+			return nil, false, fmt.Errorf("%s needs a value", name)
+		}
+		*target = value
+	}
+	return words, false, nil
 }

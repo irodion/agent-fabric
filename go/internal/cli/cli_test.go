@@ -163,3 +163,38 @@ func TestKbReindexWhereTheIndexCantBeWrittenSaysWhereToRunIt(t *testing.T) {
 		t.Fatalf("exit %d, stderr %q", code, stderr.String())
 	}
 }
+
+func TestKbSessionsPrintsWhatListSessionsGivesWithItsOptions(t *testing.T) {
+	ctx := workspace(t)
+	digest := "---\nschema: \"fabric.digest/1\"\nagent: \"codex\"\ntime: {start: \"2026-11-26T14:00:00Z\", end: " +
+		"\"2026-11-26T14:30:00Z\", active_min: 3}\noutcome: {last_tests: \"failed\"}\ncounts: {prompts: 1, errors: 0}\n" +
+		"files_modified: [\"src/app.py\"]\n---\n"
+	file := filepath.Join(ctx.Cwd, "raw", "sessions", "p", "2026", "11", "2026-11-26-codex-aaaa.md")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(digest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{"sessions", "--all-projects", "--failing-tests", "--file", "src/app.py"}, ctx, &stdout, &stderr)
+	want := "\nraw/sessions/p/2026/11/2026-11-26-codex-aaaa.md\n  codex · 2026-11-26 14:00–14:30 · 1 prompt · 0 errors · tests failed\n"
+	if code != 0 || !strings.Contains(stdout.String(), want) || stderr.Len() > 0 {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestKbSessionsTakesNoWords(t *testing.T) {
+	var stderr bytes.Buffer
+	if code := cli.Run([]string{"sessions", "flaky"}, workspace(t), io.Discard, &stderr); code != 2 || stderr.Len() == 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr.String())
+	}
+}
+
+func TestKbSessionsSaysAFlagTakesNoValue(t *testing.T) {
+	var stderr bytes.Buffer
+	code := cli.Run([]string{"sessions", "--failing-tests=false"}, workspace(t), io.Discard, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "--failing-tests takes no value") {
+		t.Fatalf("exit %d, stderr %q", code, stderr.String())
+	}
+}

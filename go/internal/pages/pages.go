@@ -16,7 +16,10 @@ type Kind struct{ Name, Folder string }
 
 // Kinds are the kinds of page, by folder: the session digests, the wiki's own pages, and the notes it filed. Not its
 // manifests or catalogue, which are ingest's bookkeeping.
-var Kinds = []Kind{{"session", "raw/sessions/"}, {"page", "wiki/"}, {"note", "raw/notes/"}}
+var Kinds = []Kind{{"session", Sessions}, {"page", "wiki/"}, {"note", "raw/notes/"}}
+
+// Sessions is where the session digests are.
+const Sessions = "raw/sessions/"
 
 // IsPage says whether a path names a page: a Markdown file under a kind's folder, by a clean path that stays there.
 func IsPage(rel string) bool {

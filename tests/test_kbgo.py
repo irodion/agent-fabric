@@ -58,7 +58,7 @@ def test_kb_mcp_runs_the_kb_go_beside_it_before_one_on_path(tmp_path: Path) -> N
 def test_kbs_help_names_the_commands_kb_go_serves(tmp_path: Path) -> None:
     done = subprocess.run([*KB, "--help"], capture_output=True, text=True, check=False, env={"HOME": str(tmp_path)})
     assert done.returncode == 0
-    for command in ("mcp", "show", "search", "reindex"):
+    for command in ("mcp", "show", "search", "sessions", "reindex"):
         assert command in done.stdout
 
 
