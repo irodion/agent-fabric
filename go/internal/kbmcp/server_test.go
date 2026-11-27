@@ -863,3 +863,35 @@ func TestCatchupGivesTheFirstFortyHeadingsOfAPageWithMoreClaims(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestSearchFindsTheWikisCopyWhereTheLocalOneCantBeReadAsGetPageDoes(t *testing.T) {
+	kb := stub(t, "")
+	page(t, kb, "local/raw/sessions/p/2026/11/x.md", "local copy of poetry\n")
+	page(t, kb, "wiki/raw/sessions/p/2026/11/x.md", "wiki copy of poetry\n")
+	locked := filepath.Join(filepath.Dir(kb), "local", "raw", "sessions", "p", "2026", "11", "x.md")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o644) })
+	got := text(t, call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "search", map[string]any{"query": "poetry"}))
+	if !strings.Contains(got, "wiki copy of «poetry»") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestSearchDropsAPageThatCantBeReadAnyMore(t *testing.T) {
+	kb := stub(t, "")
+	ctx := kbmcp.Context{KB: kb, Cwd: t.TempDir()}
+	page(t, kb, "wiki/wiki/projects/x.md", "uses poetry\n")
+	if got := text(t, call(t, ctx, "search", map[string]any{"query": "poetry"})); got == "" {
+		t.Fatal("not found before")
+	}
+	locked := filepath.Join(filepath.Dir(kb), "wiki", "wiki", "projects", "x.md")
+	if err := os.Chmod(locked, 0); err != nil { // its size and time as they were
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o644) })
+	if got := text(t, call(t, ctx, "search", map[string]any{"query": "poetry"})); got != "" {
+		t.Fatalf("still found: %q", got)
+	}
+}

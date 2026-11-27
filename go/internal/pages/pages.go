@@ -117,6 +117,14 @@ func Walk(folders []string, visit func(rel, folder string, info fs.FileInfo)) er
 			if err != nil {
 				return nil // gone since the listing
 			}
+			// A copy that can't be read is passed over, as Find passes it over, so the page found is the one Find
+			// gives: a later folder's copy, or none, so that the index drops one made unreadable since, though its
+			// size and time are as they were.
+			opened, err := os.Open(file)
+			if err != nil {
+				return nil
+			}
+			opened.Close()
 			seen[rel] = true
 			visit(rel, folder, info)
 			return nil
