@@ -1,5 +1,5 @@
-# Lint for this repo's shell scripts and workflows, and ruff, mypy and pytest for the Python core
-# (docs/design.md §6).
+# Lint for this repo's shell scripts and workflows, ruff, mypy and pytest for the Python core, and gofmt, go vet and
+# go test for kb-go (docs/design.md §6).
 name: lint
 
 on:
@@ -123,3 +123,35 @@ jobs:
 
       - name: pytest
         run: uv run pytest
+
+  go:
+    name: Go (gofmt, go vet, go test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # The Go build-agentsview.yml builds with, by digest. GOTOOLCHAIN=local: no other Go is downloaded behind it;
+    # -mod=readonly: go.sum must already hold every module, as the vet gate checked them.
+    container: golang:1.27.3-bookworm@sha256:dc0963f32053e4bc451d24d87e3892d42d01021b61f093e98eb95c0352bb84b0
+    env:
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: gofmt
+        # Apart, so that gofmt failing on a file it can't parse fails the step.
+        run: |
+          changed=$(gofmt -l .)
+          test -z "$changed" || { gofmt -d .; exit 1; }
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race ./...

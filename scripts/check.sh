@@ -52,11 +52,50 @@ run_shfmt() {
 	shell_scripts ':!scripts/spike/phase0.sh' | xargs -0 shfmt -d
 }
 
+go_env() { # Go's caches. In an agent's sandbox the real ones are read-only: the build cache moves into TMPDIR, and
+	# the module cache too, but only where a module isn't in the real one yet, as moving it downloads them all again.
+	export GOTOOLCHAIN=local GOFLAGS=-mod=readonly
+	local gocache
+	gocache=$(go env GOCACHE)
+	mkdir -p "$gocache" 2>/dev/null || true # a first run: no cache yet, which doesn't make it read-only
+	[[ -w $gocache ]] || export GOCACHE="${TMPDIR:-/tmp}/go-build"
+	if [[ ! -w "$(go env GOMODCACHE)" ]] && ! (cd go && GOPROXY=off go list -deps -test ./... >/dev/null 2>&1); then
+		export GOPATH="${TMPDIR:-/tmp}/go" GOFLAGS="-mod=readonly -modcacherw"
+	fi
+}
+
+go_in() { # command...: in go/
+	(cd go && "$@")
+}
+
+run_go_test() { # as CI runs it, with the race detector, where cgo has a C compiler to build it with
+	local race=()
+	[[ $(go env CGO_ENABLED) != 1 ]] || race=(-race)
+	go_in go test "${race[@]}" ./...
+}
+
+run_gofmt() { # fails on any file gofmt would change, and names it, or on one it can't read
+	local changed
+	changed=$(go_in gofmt -l .) || return
+	[[ -z $changed ]] || {
+		printf '%s\n' "$changed"
+		return 1
+	}
+}
+
 checks() {
 	step "ruff format" "${uv_run[@]}" ruff format --check
 	step "ruff check" "${uv_run[@]}" ruff check
 	step mypy "${uv_run[@]}" mypy
 	step pytest "${uv_run[@]}" pytest
+	if command -v go >/dev/null; then
+		go_env
+		step gofmt run_gofmt
+		step "go vet" go_in go vet ./...
+		step "go test" run_go_test
+	else
+		printf 'skipped  go (not installed here; CI runs gofmt, go vet and go test)\n'
+	fi
 	optional shellcheck run_shellcheck
 	optional shfmt run_shfmt
 	optional actionlint actionlint

@@ -115,8 +115,11 @@ def run_in(argv: list[str], ctx: Context) -> Result:
     )
     lint_cmd = commands.add_parser("lint", help="what's stale or broken in the wiki (docs/design.md §4.7)")
     lint_cmd.add_argument("--workspace", help=WORKSPACE_HELP)
+    commands.add_parser("mcp", help="serve kb's read-only tools to an agent over MCP on stdio (docs/design.md §4.9)")
     try:
         args = parser.parse_args(argv)
+        if args.command in GO_COMMANDS:  # main hands these to kb-go before they get here
+            raise UsageError(f"kb {args.command} runs as kb-go, a process of its own: start it from a shell")
         if args.command == "hook":
             return Result(0, run_hook(args.event, args.agent, ctx), "")
         if args.command in ("lint", "ingest"):
@@ -480,8 +483,29 @@ def _entry(note: Note, now: datetime, resolved_by: str | None, moved: bool) -> s
     return "".join(f"{line}\n" for line in lines)
 
 
+# The commands written in Go: `kb` hands each to `kb-go`, which takes over the process (docs/design.md §6).
+GO_COMMANDS = frozenset({"mcp"})
+
+
 def main() -> None:
+    if sys.argv[1:2] and sys.argv[1] in GO_COMMANDS:
+        _hand_to_go(sys.argv[1:])
     result = run(sys.argv[1:], env=os.environ, cwd=Path.cwd(), stdin=sys.stdin, now=datetime.now(UTC))
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)
     sys.exit(result.exit_code)
+
+
+def _hand_to_go(argv: list[str]) -> typing.NoReturn:
+    """Run `kb-go` in this process's place, with its stdin and stdout, as an MCP session needs them: the one
+    scripts/install.sh put beside this `kb`, else one on PATH."""
+    beside = Path(sys.argv[0]).parent / "kb-go"
+    try:
+        # Only where kb was started by a path: a bare name (`python -c`'s `-c`) would look in the current folder.
+        if os.sep in sys.argv[0] and os.access(beside, os.X_OK):
+            os.execv(beside, ["kb-go", *argv])
+        os.execvp("kb-go", ["kb-go", *argv])
+    except OSError as error:
+        why = error.strerror or error
+        sys.stderr.write(f"kb: kb {argv[0]} runs kb-go, which can't be run ({why}): run scripts/install.sh again\n")
+        sys.exit(1)

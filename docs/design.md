@@ -1415,7 +1415,14 @@ its arguments run against the Go binary too before the Python piece is removed. 
 2. `fabricd` with the capture, normalizer, tracker and digester under it: the long-running process.
 3. The rest of `kb`: `note` and `inbox`, then `doctor` and `setup`, then `ingest` and `lint`.
 
-New components (the panel, `kb mcp`) are written in Go from the start once step 1 has set the module up.
+New components (the panel, `kb mcp`) are written in Go from the start. `kb mcp` came first and set the module up
+before step 1 (decided 2026-11-27): it is in `go/`, as the repo's `vendor/` (agentsview's pin) would make Go read the
+root as vendored, and builds `kb-go`, which `scripts/install.sh` puts beside `kb` with the Go on the user's PATH
+(`GOTOOLCHAIN=local`, `-mod=readonly`). `kb` hands each command written in Go to `kb-go`, which takes over the process,
+so `kb mcp` keeps its command line and its stdio; once the port is done, `kb-go` becomes `kb`. What a Go command needs
+that Go doesn't read yet, it asks the Python `kb` beside it, so that each file format has one reader until its piece
+is ported: `kb mcp`'s `list_notes` is `kb inbox` until step 3. CI's `lint` runs gofmt, go vet and go test in the Go
+image `build-agentsview.yml` uses, and the vet gate scans `go/go.mod` with the rest.
 
 ## 7. Security and privacy
 
