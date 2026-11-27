@@ -517,7 +517,7 @@ def saved_path(text: str | None) -> str:
     return saved[1].replace("%%", "%").replace('\\"', '"').replace("\\\\", "\\") if saved else ""
 
 
-def _runs_on_node(script: str | None) -> bool:
+def runs_on_node(script: str | None) -> bool:
     """Whether a tool is a script that finds node on PATH, as codex's `#!/usr/bin/env node` does. A first line that
     names node by its path needs none on PATH."""
     if script is None:
@@ -538,7 +538,7 @@ def _lost(env: Mapping[str, str], unit: Unit, path: str) -> list[str]:
     the unit's PATH finds runs on it, which a shell without nvm has no node to show."""
     tools = unit.tools or ()
     needs_node = shutil.which("node", path=env.get("PATH", "")) or any(
-        _runs_on_node(shutil.which(tool, path=path)) for tool in tools
+        runs_on_node(shutil.which(tool, path=path)) for tool in tools
     )
     return [tool for tool in (*tools, *(("node",) if needs_node else ())) if not shutil.which(tool, path=path)]
 

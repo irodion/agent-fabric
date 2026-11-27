@@ -252,6 +252,9 @@ def test_fix_writes_no_unit_while_codexs_node_is_not_on_path(
     lab.kb("doctor", "--fix")
 
     assert not (lab.kb.home / UNITS / "fabric-ingest@default.service").exists()  # it would lack node at once
+    assert ("problem", "node isn't on PATH, and codex runs on it") in [
+        (row["status"], row["detail"]) for row in doctor(lab.kb)["checks"] if row["check"] == "ingest"
+    ]
 
 
 def test_a_root_that_isnt_there_needs_no_codex_from_the_shell(lab: Lab, tmp_path: Path) -> None:
@@ -280,7 +283,7 @@ def test_a_root_that_isnt_there_needs_no_codex_from_the_shell(lab: Lab, tmp_path
 def test_a_tool_needs_node_on_path_only_where_env_finds_it(tmp_path: Path, first: str, needs: bool) -> None:
     script = a_stub(tmp_path, "codex", f"{first}\n")
 
-    assert timer._runs_on_node(str(script)) is needs
+    assert timer.runs_on_node(str(script)) is needs
 
 
 def test_from_a_shell_without_codex_a_timer_without_its_service_is_a_problem(lab: Lab, tmp_path: Path) -> None:
