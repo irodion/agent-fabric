@@ -2,6 +2,7 @@
 
 import argparse
 import errno
+import json
 import os
 import re
 import secrets
@@ -116,6 +117,9 @@ def run_in(argv: list[str], ctx: Context) -> Result:
     lint_cmd = commands.add_parser("lint", help="what's stale or broken in the wiki (docs/design.md §4.7)")
     lint_cmd.add_argument("--workspace", help=WORKSPACE_HELP)
     commands.add_parser("mcp", help="serve kb's read-only tools to an agent over MCP on stdio (docs/design.md §4.9)")
+    show_cmd = commands.add_parser("show", help="a session digest or a wiki page, whole (docs/design.md §4.9)")
+    show_cmd.add_argument("path", help="the page's path in the workspace, as wiki/projects/... or raw/sessions/...")
+    commands.add_parser("paths")  # for kb-go, so no help of its own
     try:
         args = parser.parse_args(argv)
         if args.command in GO_COMMANDS:  # main hands these to kb-go before they get here
@@ -131,6 +135,13 @@ def run_in(argv: list[str], ctx: Context) -> Result:
         if argv[:1] == ["hook"]:
             return Result(0, "", "")  # an agent's hook never fails (docs/design.md §4.10)
         return Result(2, "", f"kb: {e}\n")
+
+
+def _paths(workspace: Workspace, ctx: Context) -> Result:
+    """`kb paths`: the folders a page's path is read in for kb-go, the workspace's local digests first, then its wiki,
+    so that which workspace a folder is in has one reader until the port reaches it (docs/design.md §4.9, §6)."""
+    pages = [str(workspace.local(ctx.env)), str(workspace.wiki(ctx.env))]
+    return Result(0, json.dumps({"pages": pages}, ensure_ascii=False) + "\n", "")
 
 
 def _setup_command(args: argparse.Namespace, ctx: Context) -> Result:
@@ -156,11 +167,13 @@ def _setup_command(args: argparse.Namespace, ctx: Context) -> Result:
 
 
 def _notes_command(args: argparse.Namespace, ctx: Context) -> Result:
-    """`kb note` and `kb inbox`, on the inbox of the current folder's workspace (docs/design.md §4.11)."""
+    """`kb note`, `kb inbox` and `kb paths`, on the current folder's workspace (docs/design.md §4.11)."""
     try:
         workspace = workspace_of(ctx.cwd, ctx.env)
     except (OSError, ValueError) as e:  # TOMLDecodeError too
         return _unreadable_config(e, ctx.env)
+    if args.command == "paths":
+        return _paths(workspace, ctx)
     inbox = Inbox(workspace.inbox(ctx.env))
     return _note(args, workspace, inbox, ctx) if args.command == "note" else _inbox(args, workspace, inbox, ctx)
 
@@ -484,7 +497,7 @@ def _entry(note: Note, now: datetime, resolved_by: str | None, moved: bool) -> s
 
 
 # The commands written in Go: `kb` hands each to `kb-go`, which takes over the process (docs/design.md §6).
-GO_COMMANDS = frozenset({"mcp"})
+GO_COMMANDS = frozenset({"mcp", "show"})
 
 
 def main() -> None:

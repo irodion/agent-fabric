@@ -6,7 +6,8 @@
 Three parts are built: agent notes (`kb note`, `inbox`, `doctor`, `hook` and the `kb-note` skill), notes into the wiki
 (`kb ingest`, `kb lint`), and the CI that builds and vets agentsview. The agentsview adapter, the first piece of
 capture, is built too, with Copilot CLI's and Cursor CLI's own readers, the normalizer, the tracker, the digester, and
-`fabricd`, which runs the last two. `kb mcp`, in Go, serves one tool so far, `list_notes`. The rest of the design,
+`fabricd`, which runs the last two. `kb mcp`, in Go, serves `list_notes` and `get_page` so far, and `kb show` is
+`get_page`'s twin. The rest of the design,
 including fabricd's panel, `kb mcp`'s other tools and the other `kb` commands, is still a plan (§9 has the phases).
 
 The design holds decisions, their reasons and dated findings from real agent runs. Details live in code and tests,
@@ -133,7 +134,8 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   and turn ends, and its digest written at each finalization, retried while it can't be.
 - **kb-go.** The part of kb written in Go, in `go/` (§6): `cmd/kb-go` is the binary, `internal/cli.Run` its entry,
   and `kb` hands it the commands in `cli.GO_COMMANDS` by exec, the `kb-go` beside it first. `internal/kbmcp` is `kb
-  mcp` (§4.9); what Go doesn't read yet it asks the Python `kb` beside `kb-go`, so `list_notes` is `kb inbox`. Its
+  mcp` (§4.9); what Go doesn't read yet it asks the Python `kb` beside `kb-go`, so `list_notes` is `kb inbox`, and a
+  workspace's folders come from `kb paths`. Its
   tests call each tool through an MCP client over the SDK's in-memory transport, with a stand-in `kb`, and
   `cmd/kb-go`'s test runs the test binary as `kb-go` over stdio.
 - **fabricd.** `fabricd.start` is the process (`fabricd` on PATH): it reads `[agentsview] port` and `[sessions]
