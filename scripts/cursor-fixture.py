@@ -59,9 +59,9 @@ def main(chat: Path, pairs: Pairs) -> None:
             sys.exit(f"{recorded!r} has characters a URI would encode, which this script doesn't look for")
     meta = json.loads((chat / "meta.json").read_bytes())
     recorded_cwd = meta["cwd"]
-    scrubbed = _replace(meta["cwd"].encode(), pairs).decode()
-    if scrubbed == meta["cwd"]:
-        sys.exit(f"no pair replaces the recorded folder {meta['cwd']!r}")
+    scrubbed = _replace(recorded_cwd.encode(), pairs).decode()
+    if scrubbed == recorded_cwd:
+        sys.exit(f"no pair replaces the recorded folder {recorded_cwd!r}")
     meta["cwd"] = scrubbed
     # Cursor names a chat's folder by the md5 of the folder it ran in.
     target = FIXTURES / hashlib.md5(meta["cwd"].encode()).hexdigest() / chat.name

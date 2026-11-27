@@ -111,7 +111,8 @@ reach them: `gitinfo._git` runs git with it, and `notes.missing_ref` expands `~`
   read-only home (§4.1). It reads `events.jsonl` the way agentsview does, and its tests compare the two readings of
   the live check's Copilot session. `cursor.py` is Cursor CLI's, over its chat folders: it reads each `store.db` in
   place, writing nothing beside it, and times the messages from Cursor's turn index. Its fixture is a synthetic
-  recording scrubbed by `scripts/cursor-fixture.py`; the tests build other stores themselves.
+  recording scrubbed by `scripts/cursor-fixture.py`; the tests build other stores themselves. What the two readers
+  share, such as a session's id and a transcript from an ordinal, is in `sessionfolders.py`.
 - **Normalizing.** `normalize.events` turns a session's messages into §4.2's events, one per message, each tool call
   an action with a kind, a command, an exit code and whether it failed. A table per agent (`ACTIONS`) says where it
   keeps its command and exit code; Codex's code-mode scripts split into one action per call inside. The tests run the

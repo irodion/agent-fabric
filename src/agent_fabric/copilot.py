@@ -15,9 +15,7 @@ import asyncio
 import json
 import logging
 import os
-import re
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,25 +24,19 @@ from pydantic import ValidationError
 
 from agent_fabric.capture import CaptureError, Message, SessionMeta, Transcript
 from agent_fabric.paths import expand
+from agent_fabric.sessionfolders import SESSION_ID, Read, file_stamp, nonempty, tool_category
 
 log = logging.getLogger(__name__)
 
 AGENT = "copilot"
 PREFIX = "copilot:"  # agentsview's prefix, so a session has one id whichever source reads it
 POLL = 1.0  # seconds between looks at a watched session's file
-SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 def copilot_home(env: Mapping[str, str]) -> Path:
     """`COPILOT_HOME`, `~` expanded as `kb doctor` expands it, else `~/.copilot`."""
     home = expand(env.get("COPILOT_HOME") or "", env)
     return home if home.is_absolute() else Path(env["HOME"]) / ".copilot"
-
-
-@dataclass(frozen=True)
-class _Read:
-    session: SessionMeta
-    messages: tuple[Message, ...]
 
 
 class CopilotSource:
@@ -85,19 +77,17 @@ class CopilotSource:
         return self._read(self._folder(session_id)).session
 
     def messages(self, session_id: str, from_ordinal: int) -> Transcript:
-        read = self._read(self._folder(session_id))
-        later = tuple(message for message in read.messages if message.ordinal >= from_ordinal)
-        return Transcript(read.session.transcript_revision if later else None, later)
+        return self._read(self._folder(session_id)).transcript(from_ordinal)
 
     async def watch(self, session_id: str) -> AsyncIterator[None]:
         events = self._root / self._folder(session_id) / "events.jsonl"
-        seen = _stamp(events)
+        seen = file_stamp(events)
         if seen is None:
             raise CaptureError(f"Copilot CLI session {session_id}: no {events}")
         yield None
         while True:
             await asyncio.sleep(self._poll)
-            now = _stamp(events)
+            now = file_stamp(events)
             if now is None:
                 return  # the session was removed: nothing left to watch
             if now != seen:
@@ -110,7 +100,7 @@ class CopilotSource:
             raise CaptureError(f"not a Copilot CLI session id: {session_id!r}")
         return folder
 
-    def _read(self, folder: str) -> _Read:
+    def _read(self, folder: str) -> Read:
         events = self._root / folder / "events.jsonl"
         try:
             with events.open("rb") as file:
@@ -128,7 +118,7 @@ class CopilotSource:
         for number, line in enumerate(complete.split(b"\n")[:-1], 1):
             try:
                 event = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):  # one nested too deep to read is as good as none
                 log.warning("Copilot CLI session %s: line %d isn't JSON", folder, number)
                 continue
             if not isinstance(event, dict):
@@ -143,14 +133,6 @@ class CopilotSource:
             return builder.build(revision=str(inode))
         except ValidationError as error:
             raise CaptureError(f"Copilot CLI session {PREFIX}{folder}: {error}") from error
-
-
-def _stamp(path: Path) -> tuple[int, int, int] | None:
-    try:
-        stat = path.stat()
-    except FileNotFoundError:
-        return None
-    return stat.st_ino, stat.st_size, stat.st_mtime_ns
 
 
 class _Builder:
@@ -178,7 +160,7 @@ class _Builder:
                 if isinstance(data.get("context"), dict):
                     self.context = data["context"]
             case "session.model_change":
-                self.model = _text(data.get("newModel")) or self.model
+                self.model = nonempty(data.get("newModel")) or self.model
             case "user.message":
                 self._prompt(data, stamp)
             case "assistant.message":
@@ -193,9 +175,9 @@ class _Builder:
                 self._result(data, stamp, "errored" if failed else "completed")
 
     def _prompt(self, data: dict[str, Any], stamp: str | None) -> None:
-        content = (_text(data.get("content")) or "").strip()
+        content = (nonempty(data.get("content")) or "").strip()
         # A skill's text, which Copilot sends as a user message, isn't a prompt.
-        if not content or (_text(data.get("source")) or "").startswith("skill-") or content.startswith("<skill"):
+        if not content or (nonempty(data.get("source")) or "").startswith("skill-") or content.startswith("<skill"):
             return
         self._append({"role": "user", "content": content, "timestamp": stamp})
 
@@ -203,13 +185,13 @@ class _Builder:
         calls = []
         requests = data.get("toolRequests")
         for request in requests if isinstance(requests, list) else []:
-            if not isinstance(request, dict) or not _text(request.get("name")):
+            if not isinstance(request, dict) or not nonempty(request.get("name")):
                 continue
             arguments = request.get("arguments")
             call = {
-                "tool_use_id": _text(request.get("toolCallId")),
+                "tool_use_id": nonempty(request.get("toolCallId")),
                 "tool_name": request["name"],
-                "category": _category(request["name"]),
+                "category": tool_category(request["name"], CATEGORIES),
                 # Compact, as Copilot wrote it and agentsview keeps it.
                 "input_json": arguments if isinstance(arguments, str) else _compact(arguments),
                 "result_events": [],
@@ -217,18 +199,18 @@ class _Builder:
             calls.append(call)
             if call["tool_use_id"]:
                 self.calls[call["tool_use_id"]] = call
-        content = (_text(data.get("content")) or "").strip()
-        thinking = (_text(data.get("reasoningText")) or "").strip()
+        content = (nonempty(data.get("content")) or "").strip()
+        thinking = (nonempty(data.get("reasoningText")) or "").strip()
         if not content and not calls and not thinking:
             return
-        model = _text(data.get("model")) or self.model
+        model = nonempty(data.get("model")) or self.model
         self._append(
             {"role": "assistant", "content": content, "thinking_text": thinking, "model": model, "timestamp": stamp}
             | {"tool_calls": calls}
         )
 
     def _result(self, data: dict[str, Any], stamp: str | None, status: str) -> None:
-        call = self.calls.get(_text(data.get("toolCallId")) or "")
+        call = self.calls.get(nonempty(data.get("toolCallId")) or "")
         if call is None:
             return
         content = None
@@ -236,9 +218,9 @@ class _Builder:
             result, error = data.get("result"), data.get("error")
             # A failed call has no result, only its error: keep that text, which agentsview drops.
             source = result if status == "completed" else error
-            content = _text(source.get("content") if isinstance(source, dict) else source)
+            content = nonempty(source.get("content") if isinstance(source, dict) else source)
             if status == "errored" and isinstance(error, dict):
-                content = _text(error.get("message")) or content
+                content = nonempty(error.get("message")) or content
             call["result_content"] = content
             shell = data.get("shellExecution")
             if isinstance(shell, dict) and isinstance(shell.get("exitCode"), int):
@@ -250,17 +232,17 @@ class _Builder:
         defaults |= {"thinking_text": None, "model": None, "tool_calls": []}
         self.messages.append(defaults | message)
 
-    def build(self, revision: str) -> _Read:
+    def build(self, revision: str) -> Read:
         messages = tuple(Message.model_validate(message) for message in self.messages)
-        cwd = _text(self.context.get("cwd"))
-        root = _text(self.context.get("gitRoot")) or cwd
+        cwd = nonempty(self.context.get("cwd"))
+        root = nonempty(self.context.get("gitRoot")) or cwd
         session = SessionMeta.model_validate(
             {
                 "id": self.session_id,
                 "agent": AGENT,
                 "project": Path(root).name if root else "",  # a display name; the tracker works out the id (§4.4)
                 "cwd": cwd,
-                "git_branch": _text(self.context.get("branch")),
+                "git_branch": nonempty(self.context.get("branch")),
                 "is_automated": False,
                 "started_at": self.first,
                 "ended_at": self.last,
@@ -268,7 +250,7 @@ class _Builder:
                 "transcript_revision": revision,
             }
         )
-        return _Read(session, messages)
+        return Read(session, messages)
 
 
 def _compact(value: object) -> str:
@@ -285,10 +267,6 @@ def _stamp_of(value: object) -> str | None:
     return value
 
 
-def _text(value: object) -> str | None:
-    return value if isinstance(value, str) and value else None
-
-
 # agentsview's categories (NormalizeToolCategory in v0.46.1) for the names Copilot's tools use, so both sources agree.
 CATEGORIES = {
     "bash": "Bash",
@@ -303,7 +281,3 @@ CATEGORIES = {
     "grep": "Grep",
     "report_intent": "Tool",
 }
-
-
-def _category(tool: str) -> str:
-    return "Task" if "subagent" in tool else CATEGORIES.get(tool, "Other")

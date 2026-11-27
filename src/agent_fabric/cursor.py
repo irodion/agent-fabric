@@ -25,18 +25,19 @@ from typing import Any
 from pydantic import ValidationError
 
 from agent_fabric.capture import CaptureError, Message, SessionMeta, Transcript
+from agent_fabric.sessionfolders import SESSION_ID, Read, file_stamp, nonempty, tool_category
 
 log = logging.getLogger(__name__)
 
 AGENT = "cursor"
 PREFIX = "cursor:"  # agentsview's prefix, so a session has one id whichever source reads it
-SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 FOLDER = re.compile(r"[0-9a-f]{32}")
 TURNS = 8  # the root's field that indexes the conversation's turns
 POLL = 1.0  # seconds between looks at a watched session's files
 READ_TRIES = 3  # reads of a store, each made again if Cursor wrote to it meanwhile
 READ_PAUSE = 0.05  # seconds before the second read, twice that before the third
 LOCK_WAIT = 1.0  # seconds a read waits on Cursor's lock: a busy store is read again, not waited on
+PART_TYPES = frozenset({"text", "image", "media", "file"})  # the AI SDK's content parts
 
 
 class _Unfilled(ValueError):
@@ -51,13 +52,7 @@ class _Turn:
     request: str | None  # the id of the prompt's request, which the prompt's own message carries
     at: datetime | None  # None where the prompt can't be read: its calls still have their times
     replies: tuple[tuple[str, datetime], ...]
-    calls: tuple[tuple[str, datetime | None, datetime | None], ...] = ()
-
-
-@dataclass(frozen=True)
-class _Read:
-    session: SessionMeta
-    messages: tuple[Message, ...]
+    calls: tuple[tuple[str, datetime | None, datetime | None], ...]
 
 
 class CursorSource:
@@ -83,7 +78,7 @@ class CursorSource:
             except FileNotFoundError:
                 continue  # removed since the listing
             except CaptureError as error:
-                if isinstance(error.__cause__, FileNotFoundError | _Unfilled):
+                if error.gone or isinstance(error.__cause__, _Unfilled):
                     continue  # removed between the listing and the read, or not begun
                 # One session that can't be read mustn't stop capture of every other (§4.1).
                 log.warning("skipping Cursor CLI session %s: %s", folder.name, error)
@@ -95,9 +90,7 @@ class CursorSource:
         return self._read(self._folder(session_id)).session
 
     def messages(self, session_id: str, from_ordinal: int) -> Transcript:
-        read = self._read(self._folder(session_id))
-        later = tuple(message for message in read.messages if message.ordinal >= from_ordinal)
-        return Transcript(read.session.transcript_revision if later else None, later)
+        return self._read(self._folder(session_id)).transcript(from_ordinal)
 
     async def watch(self, session_id: str) -> AsyncIterator[None]:
         """A tick on opening and one each time Cursor writes the session: its store, its WAL or its meta, in the copy
@@ -121,7 +114,7 @@ class CursorSource:
         """What a watch compares: the folder read and its store's and meta's stamps; None once the store is gone."""
         try:
             folder = self._folder(session_id)
-            return folder, _stamps(folder / "store.db"), _stamp(folder / "meta.json")
+            return folder, _stamps(folder / "store.db"), file_stamp(folder / "meta.json")
         except CaptureError as error:
             if error.gone:
                 return None
@@ -185,7 +178,7 @@ class CursorSource:
                 raise CaptureError(f"Cursor CLI's chats in {project}: {error}") from None
         return folders
 
-    def _read(self, folder: Path) -> _Read:
+    def _read(self, folder: Path) -> Read:
         session_id = PREFIX + folder.name
         try:
             root, messages, turns = _conversation(folder / "store.db")
@@ -198,7 +191,7 @@ class CursorSource:
             raise CaptureError(f"Cursor CLI session {session_id}: {error}") from error
         try:
             meta = json.loads((folder / "meta.json").read_bytes())
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, RecursionError) as error:
             # Gone only if the store went with it: a store without its meta is a session that can't be read.
             gone = isinstance(error, FileNotFoundError) and not (folder / "store.db").exists()
             raise CaptureError(f"Cursor CLI session {session_id}: meta.json: {error}") from (error if gone else None)
@@ -221,7 +214,7 @@ class CursorSource:
                     "transcript_revision": root,
                 }
             )
-            return _Read(session, tuple(Message.model_validate(message) for message in built))
+            return Read(session, tuple(Message.model_validate(message) for message in built))
         except ValidationError as error:
             raise CaptureError(f"Cursor CLI session {session_id}: {error}") from error
 
@@ -293,27 +286,16 @@ def _open(store: Path, mode: str) -> tuple[str, list[dict[str, Any]], list[_Turn
         tables = {name for (name,) in db.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")}
         if not {"blobs", "meta"} <= tables:
             raise _Unfilled("the store has no tables yet")  # as while Cursor creates it
-        read = _blobs(db)
-    return read
+        return _blobs(db)
 
 
 def _stamps(store: Path) -> tuple[tuple[int, int, int], tuple[int, int, int] | None, bool]:
     """The store's and its WAL's size and time, and whether the -shm is there, which a close removes first: what tells
     a read made while Cursor wrote or closed, to make again."""
-    stamp = _stamp(store)
+    stamp = file_stamp(store)
     if stamp is None:
         raise FileNotFoundError(store)
-    return stamp, _stamp(store.with_name("store.db-wal")), _stamp(store.with_name("store.db-shm")) is not None
-
-
-def _stamp(path: Path) -> tuple[int, int, int] | None:
-    """A file's inode, size and time; None where it isn't there. Any other error is raised, on Python 3.13 as on
-    3.14, where Path.exists would swallow it."""
-    try:
-        stat = path.stat()
-    except FileNotFoundError:
-        return None
-    return stat.st_ino, stat.st_size, stat.st_mtime_ns
+    return stamp, file_stamp(store.with_name("store.db-wal")), file_stamp(store.with_name("store.db-shm")) is not None
 
 
 def _blobs(db: sqlite3.Connection) -> tuple[str, list[dict[str, Any]], list[_Turn | None]]:
@@ -327,18 +309,18 @@ def _blobs(db: sqlite3.Connection) -> tuple[str, list[dict[str, Any]], list[_Tur
     root = head.get("latestRootBlobId") if isinstance(head, dict) else None
     if not isinstance(root, str):
         raise ValueError("the store names no root")
-    row = db.execute("SELECT data FROM blobs WHERE id = ?", (root,)).fetchone()
-    if row is None or not isinstance(row[0], bytes | str):
+    data = _blob(db, root)
+    if data is None:
         raise ValueError(f"the store has no root blob {root}")
     messages = []
-    fields = _fields(row[0] if isinstance(row[0], bytes) else row[0].encode())
+    fields = _fields(data)
     for number, value in fields:
         if number != 1 or not isinstance(value, bytes):
             continue
-        row = db.execute("SELECT data FROM blobs WHERE id = ?", (value.hex(),)).fetchone()
-        if row is None or not isinstance(row[0], bytes | str):
+        data = _blob(db, value.hex())
+        if data is None:
             raise ValueError(f"the store has no message blob {value.hex()}")
-        message = json.loads(row[0])
+        message = json.loads(data)
         if not isinstance(message, dict):
             raise ValueError(f"message blob {value.hex()} isn't a JSON object")
         messages.append(message)
@@ -397,11 +379,16 @@ def _message_of(db: sqlite3.Connection, value: int | bytes | None) -> list[tuple
     """A protobuf message held inline, or in the blob a 32-byte field names."""
     if not isinstance(value, bytes):
         raise ValueError("not a message")
-    if len(value) == 32:
-        row = db.execute("SELECT data FROM blobs WHERE id = ?", (value.hex(),)).fetchone()
-        if row is not None and isinstance(row[0], bytes | str):
-            return _fields(row[0] if isinstance(row[0], bytes) else row[0].encode())
-    return _fields(value)
+    data = _blob(db, value.hex()) if len(value) == 32 else None
+    return _fields(data if data is not None else value)
+
+
+def _blob(db: sqlite3.Connection, id: str) -> bytes | None:
+    """The blob with that id, None where there's none: SQLite may hand one back as text."""
+    row = db.execute("SELECT data FROM blobs WHERE id = ?", (id,)).fetchone()
+    if row is None or not isinstance(row[0], bytes | str):
+        return None
+    return row[0] if isinstance(row[0], bytes) else row[0].encode()
 
 
 def _field(fields: list[tuple[int, int | bytes]], number: int, default: object = ...) -> Any:
@@ -420,8 +407,9 @@ def _messages(session_id: str, messages: list[dict[str, Any]], turns: list[_Turn
     reads: list[dict[str, Any]] = []
     latest: dict[str, dict[str, Any]] = {}  # the latest call read with each id, which a result after it folds into
     for message in messages:
-        if message.get("role") == "assistant" or (message.get("role") == "user" and _query(message)):
-            reads.append(_message(session_id, 0, message))
+        query = _query(message) if message.get("role") == "user" else None
+        if message.get("role") == "assistant" or query:
+            reads.append(_message(session_id, message, query))
             latest |= {call["tool_use_id"]: call for call in reads[-1]["tool_calls"] if call["tool_use_id"]}
         elif message.get("role") == "tool":
             for call, result in _results(message):
@@ -502,7 +490,7 @@ def _results(message: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     message named for another call has no record, and no status."""
     results = []
     for part in _parts(message.get("content")):
-        call = _text_of(part.get("toolCallId"))
+        call = nonempty(part.get("toolCallId"))
         if part.get("type") != "tool-result" or call is None:
             continue
         ended = _ended(message) if message.get("id") == call else {}
@@ -541,41 +529,39 @@ def _answer(answer: object) -> str | None:
     image's data), or else its JSON, NaN and all."""
     if answer is None or isinstance(answer, str):
         return answer
-    if (
-        isinstance(answer, list)
-        and answer
-        and all(isinstance(t := _type(part), str) and t in PART_TYPES for part in answer)
-    ):
+    if isinstance(answer, list) and answer and all(_is_part(part) for part in answer):
         return "\n".join(texts) if (texts := _texts(answer)) else None
     return json.dumps(answer, ensure_ascii=False, separators=(",", ":"))
 
 
-PART_TYPES = frozenset({"text", "image", "media", "file"})  # the AI SDK's content parts
-
-
-def _type(part: object) -> object:
-    return part.get("type") if isinstance(part, dict) else None
+def _is_part(part: object) -> bool:
+    """One of the AI SDK's content parts, by its type: a string first, as an unhashable one can't be looked up."""
+    kind = part.get("type") if isinstance(part, dict) else None
+    return isinstance(kind, str) and kind in PART_TYPES
 
 
 def _ended(message: dict[str, Any]) -> dict[str, Any]:
     """Cursor's own record of how a call ended: its `output` (`success`, `failure` with the exit code, `rejected`,
     `error`) and whether it was an error."""
-    options = message.get("providerOptions")
-    cursor = options.get("cursor") if isinstance(options, dict) else None
-    ended = cursor.get("highLevelToolCallResult") if isinstance(cursor, dict) else None
+    ended = _options(message).get("highLevelToolCallResult")
     return ended if isinstance(ended, dict) else {}
 
 
-def _message(session_id: str, ordinal: int, message: dict[str, Any]) -> dict[str, Any]:
-    """A prompt or a reply as `capture.Message` holds it. A prompt is the text Cursor wraps in `<user_query>`; a reply
-    is its text parts, its reasoning and its tool calls, the model named on its reasoning."""
-    said = {"session_id": session_id, "ordinal": ordinal, "role": message["role"], "timestamp": None}
+def _options(value: dict[str, Any]) -> dict[str, Any]:
+    """What Cursor keeps of its own on a message or a part: its `providerOptions.cursor`, else nothing."""
+    options = value.get("providerOptions")
+    cursor = options.get("cursor") if isinstance(options, dict) else None
+    return cursor if isinstance(cursor, dict) else {}
+
+
+def _message(session_id: str, message: dict[str, Any], query: str | None) -> dict[str, Any]:
+    """A prompt or a reply as `capture.Message` holds it, numbered later. A prompt is the text Cursor wraps in
+    `<user_query>`, its `query`; a reply is its text parts, its reasoning and its tool calls, the model named on its
+    reasoning."""
+    said = {"session_id": session_id, "role": message["role"], "timestamp": None}
     said |= {"is_system": False, "thinking_text": None, "model": None, "tool_calls": []}
-    if message["role"] == "user":
-        options = message.get("providerOptions")
-        cursor = options.get("cursor") if isinstance(options, dict) else None
-        request = cursor.get("requestId") if isinstance(cursor, dict) else None
-        return said | {"content": _prompt(_query(message) or ""), "request": _text_of(request)}
+    if query is not None:
+        return said | {"content": _prompt(query), "request": nonempty(_options(message).get("requestId"))}
     parts = [part for part in _parts(message.get("content")) if isinstance(part.get("type"), str)]
     # Joined as agentsview joins a reply's lines, and trimmed only at the ends, so a part keeps its indentation.
     texts = _texts(message.get("content"))
@@ -587,7 +573,7 @@ def _message(session_id: str, ordinal: int, message: dict[str, Any]) -> dict[str
         "thinking_text": "\n".join(thoughts).strip() or None,
         "model": next((model for model in models if model), None),
         "tool_calls": [
-            _call(part) for part in parts if part["type"] == "tool-call" and _text_of(part.get("toolName"))
+            _call(part) for part in parts if part["type"] == "tool-call" and nonempty(part.get("toolName"))
         ],
     }
 
@@ -604,9 +590,9 @@ def _prompt(text: str) -> str:
 def _call(part: dict[str, Any]) -> dict[str, Any]:
     arguments = part.get("args", part.get("input"))  # the AI SDK's older name, which Cursor writes, and its newer
     return {
-        "tool_use_id": _text_of(part.get("toolCallId")),
+        "tool_use_id": nonempty(part.get("toolCallId")),
         "tool_name": part["toolName"],
-        "category": _category(part["toolName"]),
+        "category": tool_category(part["toolName"], CATEGORIES),
         # Compact, as agentsview keeps a call's input.
         "input_json": _input(arguments),
     }
@@ -633,17 +619,11 @@ def _input(arguments: object) -> str | None:
 
 
 def _model(part: dict[str, Any]) -> str | None:
-    options = part.get("providerOptions")
-    cursor = options.get("cursor") if isinstance(options, dict) else None
-    return _text_of(cursor.get("modelName")) if isinstance(cursor, dict) else None
+    return nonempty(_options(part).get("modelName"))
 
 
 def _parts(content: object) -> list[dict[str, Any]]:
     return [part for part in content if isinstance(part, dict)] if isinstance(content, list) else []
-
-
-def _text_of(value: object) -> str | None:
-    return value if isinstance(value, str) and value else None
 
 
 # agentsview's categories (NormalizeToolCategory in v0.46.1) for the names Cursor's tools use, so both sources agree.
@@ -662,10 +642,6 @@ CATEGORIES = {
     "WebFetch": "Tool",
     "WebSearch": "Tool",
 }
-
-
-def _category(tool: str) -> str:
-    return "Task" if "subagent" in tool else CATEGORIES.get(tool, "Other")
 
 
 def _ms(value: object) -> datetime | None:
