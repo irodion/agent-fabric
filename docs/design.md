@@ -247,7 +247,7 @@ tmux as well as headless.
   sessions. Neither Copilot nor Cursor records anything found so far that marks a headless run. The rule is in §4.3.
 - **Cursor CLI.** It writes two records per chat: a thin `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl`
   (role and content parts; no tool results, ids or timestamps) and the full `~/.cursor/chats/<hash>/<id>/store.db`
-  (tables `blobs` and `meta`, `journal_mode=delete`), next to a `meta.json` with `cwd`, `createdAtMs`, `updatedAtMs`
+  (tables `blobs` and `meta`, in WAL mode, which this check missed: Cursor CLI 2026.11.22, 2026-11-27), next to a `meta.json` with `cwd`, `createdAtMs`, `updatedAtMs`
   and `hasConversation`. agentsview parses the transcript but also opens `store.db`, and when `~/.cursor/chats` is
   read-only the whole session fails (`1 failed`, `local sync processing incomplete`). The unit's
   `ProtectHome=read-only` has the same effect. With write access it archives the prompts, replies and tool calls, but
@@ -319,12 +319,30 @@ content). A contract test runs the adapter against recorded responses validated 
 spec doesn't name the watch stream's events, so only the recordings cover them. If agentsview fails for one agent, that agent
 gets its own `CaptureSource` (direct transcript reader) without touching the rest.
 
-Cursor CLI is the first such agent. `CursorChatSource` lists `~/.cursor/chats/*/*/meta.json`, watches each
-`store.db`, opens it read-only and decodes the JSON message blobs; `cwd` and the times come from `meta.json`, the
-project from `cwd` (§4.4). Still to work out from synthetic sessions: message order from the blob tree
-(`latestRootBlobId` and the protobuf blobs; row order matched the conversation in the check, which isn't a
-guarantee), timestamps (the blobs have none, so the watcher stamps each message when it first sees it), and whether
-`blobEncryptionKey` means some blobs are encrypted (none of the JSON ones were).
+Cursor CLI is the first such agent (built 2026-11-27, on Cursor CLI 2026.11.22). `CursorSource` lists the chat
+folders `~/.cursor/chats/<md5 of the folder>/<id>/` that have a `store.db`, which a chat that never got a message
+hasn't. `cwd` and the start come from `meta.json`, the project from `cwd` (§4.4), and the end from the last write to
+the store, its WAL or `meta.json`, since Cursor rewrites `meta.json` only now and then while a chat runs.
+
+- **Reading the store.** It reads the store where it is and writes nothing beside it. SQLite can't open a WAL store
+  read-only without a `-shm` beside it, and in a folder it can write, as under fabricd's unit, it would make one.
+  While Cursor runs, its `-wal` and `-shm` are there, and the store opens read-only on Cursor's own `-shm`
+  (`readonly_shm`), its writes still in the WAL included. Once Cursor closes it, the store holds everything and opens
+  `immutable`, which needs neither. A WAL a crash left without its `-shm` isn't read. On the devbox all four chats
+  read from inside an agent's sandbox, where agentsview read none (2026-11-27).
+- **Order.** The store is content-addressed: a blob's id is the sha256 of its bytes. `meta` key `0` names the root
+  blob, a protobuf message whose field 1 lists the message blobs in conversation order. A prompt is a user message
+  Cursor wraps in `<user_query>`; its system prompt and the context it sends first aren't. A tool result folds into
+  the last call before it with its id, with the exit code and an `errored` status from Cursor's own record of how
+  the call ended, which it keeps on the tool message.
+- **Times.** The JSON blobs have none. The root's field 8 entries are Cursor's turn index (agentsview reads only the
+  first): each names the request it answers, as the prompt's own message does (`requestId`), with the prompt's
+  time, each reply's text and time, and each tool call's id, start and end. A prompt takes its request's turns, a
+  reply the time of the step holding its text or else its first call's start, and a result its call's end. Nothing
+  else gets a time. On the devbox's four chats, all 80 messages and 96 results got one. Where a session's last
+  message still has none, as before Cursor indexes it, the tracker counts new messages from the session's end
+  (§4.3).
+- **Encryption.** None of the blobs read was encrypted, whatever `blobEncryptionKey` is for.
 
 Copilot CLI is the second. `CopilotSource` reads `<COPILOT_HOME>/session-state/<id>/events.jsonl` (`~/.copilot` by
 default), which holds the whole conversation; the session store that fails agentsview adds only token usage, which kb
@@ -374,11 +392,12 @@ starts with `Script failed` or a non-zero exit code it printed, and what it prin
 Before code mode, Codex's `exec_command` call was the tool itself, its exit code in `Process exited with code N`.
 
 Failed calls keep the output their source stores. agentsview v0.46.1 sets `errored` for a failed Claude Code command
-and a failed Copilot edit, but a Copilot or Codex command that exits non-zero is `completed`, and Cursor sets none,
-so failure also comes from the exit code and the error patterns. Each agent puts the exit code somewhere else:
+and a failed Copilot edit, but a Copilot or Codex command that exits non-zero is `completed`. Cursor CLI's own reader
+sets `errored` from Cursor's record of how a call ended, whatever its exit code (2026-11-27). So failure also comes
+from the exit code and the error patterns. Each agent puts the exit code somewhere else:
 Claude Code starts a failed command's result with `Exit code N` and says nothing of a successful one's, Copilot ends
-it with `completed with exit code N` and records it apart in its own files, and Codex puts it in each command's
-output chunk. Claude Code and Copilot fold a tool's result into the message that called it, so their ordinals in
+it with `completed with exit code N` and records it apart in its own files, Cursor starts every command's output
+with `Exit code: N` and records it apart too, and Codex puts it in each command's output chunk. Claude Code and Copilot fold a tool's result into the message that called it, so their ordinals in
 agentsview have gaps. Agents often append `; echo EXIT:$?` to a command (Copilot and Cursor both did in the capture
 check), so the shell's own exit code is 0; the echoed code is the command's. A Codex command whose chunk has no
 exit code is still running, whatever the script around it did. Copilot's own reader keeps the error
@@ -409,12 +428,14 @@ text of a failed call, which agentsview drops (§4.1). The digest stores an exce
   request of 1,000 messages a page bears; a cursor into a transcript whose results fold back into old messages
   and whose ordinals a re-parse can change took more rules than it saved (2026-11-20). `/api/v1/events` isn't
   used: it coalesces to one event per 10 s and names no session (§4.1), so it says no more than the poll.
-- Each agent is read through one source: agentsview for Claude Code and Codex, Copilot CLI's own reader for Copilot
-  (§4.1), so a session agentsview also lists is read from one place. Sessions with `is_automated` are left out (§8).
+- Each agent is read through one source: agentsview for Claude Code and Codex, their own readers for Copilot CLI and
+  Cursor CLI (§4.1), so a session agentsview also lists is read from one place. Sessions with `is_automated` are left out (§8).
 - **Quiet** is measured from the session's own timestamps (its messages' and its tool results'), so a session that
   went on while fabricd was down finalizes from its real last activity, not from the restart. Only a newer time is
-  activity: a re-parse, or a field added to how a message reads, reopens nothing. A session with no times at all
-  (Cursor CLI's in agentsview) counts a change from when the tracker saw it. While a source can't be asked, its
+  activity: a re-parse, or a field added to how a message reads, reopens nothing. A session with no times at all, from
+  a source that keeps none, counts a change from when the tracker saw it. One whose new messages have none of their
+  own yet, as Cursor CLI's before Cursor indexes them, counts them from the session's own end, its last write; only
+  new messages do, so a write that adds nothing, or a time filled in late, reopens nothing (2026-11-27). While a source can't be asked, its
   sessions don't finalize: they aren't quiet, only unheard.
 - Each session's row keeps whether its last read failed or its source no longer has it (a 404, a removed folder),
   so a restart knows too. A failed read is tried again every poll, and the session isn't settled on what was read
@@ -1512,8 +1533,8 @@ neither agentsview nor fabricd, so a one-week trial in one or two projects runs 
 `kb ingest` and `kb lint` on the `codex` backend follow, for the same reason (§4.7). They are built and first ran on a
 real model on 2026-11-12; their daily timer followed (§5), and `kb lint`'s summary check comes with `kb prune`. Then
 CI with the `vet` gate for this repo; the agentsview pin bumped to v0.46.1 (2026-11-19, §4.1); adapter,
-normalizer and tracker (built); digester (the rendering, git snapshots, the writer with allow list/redaction/gate/commit, and the loop over the tracker's changes, built; turn-end drafts come with the panel); `fabricd` running the tracker and the digester, and its unit (built), for the CLI agents: agentsview for Claude Code,
-Codex and Copilot CLI, `CursorChatSource` for Cursor CLI; wiki repo skeleton, `kb` CLI + `kb mcp`; a prototype session
+normalizer and tracker (built); digester (the rendering, git snapshots, the writer with allow list/redaction/gate/commit, and the loop over the tracker's changes, built; turn-end drafts come with the panel); `fabricd` running the tracker and the digester, and its unit (built), for the CLI agents: agentsview for Claude Code
+and Codex, and their own readers for Copilot CLI and Cursor CLI (built); wiki repo skeleton, `kb` CLI + `kb mcp`; a prototype session
 for the panel layout, then the panel with rules only (incl. open loops and carry-over).
 
 **Go port.** Alongside phase 1 and after it, in §6's order; each step lands when the Go piece passes the same tests
@@ -1536,8 +1557,9 @@ them on the desktop; per-agent slash commands for catch-up, Cursor hooks if lag 
 - Failure detection: per-agent fixtures of failing shell commands, failed edits and MCP tool errors, including
   Codex code-mode scripts (`Script failed`), Copilot's `errored` edits with no stored error text, and commands that
   end in `; echo EXIT:$?`.
-- Cursor CLI: `store.db` fixtures from synthetic sessions (the capture check's three turns, `-p` and interactive);
-  the reader must give the same messages and tool results as the JSON blobs, in conversation order.
+- Cursor CLI: a synthetic `-p` session recorded on Cursor CLI 2026.11.22, scrubbed by `scripts/cursor-fixture.py`,
+  which refuses a recording it can't vouch for; other shapes are built in the tests. The reader must give the same
+  messages and tool results as the JSON blobs, in conversation order, with the turn index's times.
 - Headless runs: fixtures of `claude -p`, `codex exec` and `copilot -p` sessions; each gets a local digest only unless
   its project is on `[publish] headless`.
 - `kb note`, `kb inbox`, `kb doctor`, `kb hook`: each case is a test in `tests/`. `scripts/check.sh` runs them with
@@ -1652,7 +1674,10 @@ Open (2026-11-01):
   given a command to run); whether it adds `cursor_version` to the input of Claude Code's hooks (that entry stayed
   silent, as it would if Cursor never ran it); and where it runs hooks relative to its sandbox (`sandbox.mode` is
   `disabled` on the test box, so the markers it wrote there don't settle it).
-- The Cursor CLI reader: message order from the `store.db` blob tree, timestamps, and encrypted blobs (§4.1).
+- Settled for the Cursor CLI reader (2026-11-27, §4.1): message order (the root blob), timestamps (the turn index,
+  by request id), and encrypted blobs (none seen). Open: what the root holds once Cursor summarises a long chat, as
+  earlier messages could drop out and the ordinals move; whether to read the reasoning text the turn index carries,
+  which the JSON blobs leave empty; and timing a reply whose texts Cursor indexed as several steps.
 
 Open (2026-11-04):
 

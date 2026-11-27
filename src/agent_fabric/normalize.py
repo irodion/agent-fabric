@@ -3,8 +3,8 @@
 An event is one message, addressed by `(session_id, ordinal)`, and each tool call in it is an action with a kind, the
 command a shell call ran, its exit code and whether it failed. Each agent keeps its command and exit code somewhere
 else; the table per agent below says where. The kinds come from the categories agentsview gives every agent's tools,
-which Copilot CLI's own reader gives too, except for Codex's code mode: one `exec` call runs a script that can call
-several tools, and each of those becomes an action of its own.
+which Copilot CLI's and Cursor CLI's own readers give too, except for Codex's code mode: one `exec` call runs a
+script that can call several tools, and each of those becomes an action of its own.
 """
 
 import json
@@ -113,7 +113,7 @@ def _action(
     echoes = bool(command and ECHOES_EXIT.search(command))
     if kind == "shell" and exit_code in (0, None) and echoes and (echoed := ECHOED_EXIT.findall(output or "")):
         exit_code = int(echoed[-1])
-    # A source that records no status (Cursor) still has the output of a call that finished.
+    # A call with no status, from a source that kept no record of how it ended, still has a finished call's output.
     finished = status not in ("started", "running") and (status is not None or output is not None)
     unexplained = patterns and (
         kind == "edit" or (kind == "shell" and exit_code is None and not shows_files(command))
@@ -236,6 +236,29 @@ def _copilot(call: ToolCall) -> Iterator[Action]:
     # Its own reader keeps the exit code Copilot records apart; agentsview only has the line Copilot ends output with.
     code = call.exit_code if call.exit_code is not None else _code(COPILOT_EXIT, call.result_content)
     yield _action(call, command=_command(call, "command"), exit_code=code)
+
+
+# ── Cursor CLI ────────────────────────────────────────────────────────────
+
+# Cursor starts a command's output with its exit code, or with `Rejected:` where it wasn't run; a file the command
+# shows comes after it.
+CURSOR_EXIT = re.compile(r"\AExit code: (-?\d+)")
+CURSOR_REJECTED = "Rejected:"
+
+
+def _cursor(call: ToolCall) -> Iterator[Action]:
+    status = _status(call)
+    if status is None and (call.result_content or "").startswith(CURSOR_REJECTED):
+        status = "errored"  # whatever the tool, as Cursor answers a call it didn't let run
+    if KINDS.get(call.category) != "shell":
+        yield _action(call, command=None, exit_code=None, status=status)
+        return
+    # Its reader keeps the exit code Cursor records apart; the output's first line is where none was kept, and a
+    # command still running has none to give.
+    code = call.exit_code
+    if code is None and status not in ("started", "running"):
+        code = _code(CURSOR_EXIT, call.result_content)
+    yield _action(call, command=_command(call, "command"), exit_code=code, status=status)
 
 
 # ── Codex ─────────────────────────────────────────────────────────────────
@@ -590,4 +613,4 @@ def _literal(script: str, index: int, limit: int) -> tuple[str | None, int]:
 
 
 # The table per agent, by agentsview's agent name; an agent without one gets the generic reading.
-ACTIONS = {"claude": _claude, "codex": _codex, "copilot": _copilot}
+ACTIONS = {"claude": _claude, "codex": _codex, "copilot": _copilot, "cursor": _cursor}

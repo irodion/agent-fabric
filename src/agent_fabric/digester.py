@@ -183,7 +183,7 @@ class Digester:
             meta = feed.source.session(session_id)
             seen = datetime.fromisoformat(row["first_seen"])
             if meta.started_at is None:
-                # No times at all, as Cursor CLI's in agentsview: it began when kb first saw it, and ended at its
+                # No times at all, as from a source that keeps none: it began when kb first saw it, and ended at its
                 # last change the tracker saw.
                 meta = meta.model_copy(update={"started_at": seen, "ended_at": meta.ended_at or session.active_at})
             messages = feed.source.messages(session_id, 0).messages
