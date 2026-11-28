@@ -943,3 +943,71 @@ func TestSearchFindsTheWikisPagesWhereTheLocalFolderIsUnderOneThatCantBeSearched
 		t.Fatalf("got %q (error: %v)", got, result.IsError)
 	}
 }
+
+func TestSearchLeavesANewerKbGosIndexAsItIs(t *testing.T) {
+	// As a kb mcp still running the old kb-go finds the index the new one built: one it can't read, nor replace.
+	kb := stub(t, "")
+	page(t, kb, "wiki/wiki/projects/x.md", "uses poetry\n")
+	ctx := kbmcp.Context{KB: kb, Cwd: t.TempDir()}
+	if _, err := ctx.Reindex(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(filepath.Dir(kb), "data", "index.db")
+	db, err := sql.Open("sqlite", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 99`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	result := call(t, ctx, "search", map[string]any{"query": "poetry"})
+	if got := text(t, result); !result.IsError || !strings.Contains(got, "newer kb-go") {
+		t.Fatalf("got %q (error: %v)", got, result.IsError)
+	}
+	db, err = sql.Open("sqlite", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	was := 0
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&was); err != nil || was != 99 {
+		t.Fatalf("version %d, %v", was, err)
+	}
+}
+
+func TestGetPageReadsTheWikisCopyWhereTheLocalFolderIsAFile(t *testing.T) {
+	kb := stub(t, "")
+	page(t, kb, "wiki/wiki/projects/x.md", "wiki's\n")
+	if err := os.WriteFile(filepath.Join(filepath.Dir(kb), "local"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "get_page", map[string]any{"path": "wiki/projects/x.md"})
+	if got := text(t, result); result.IsError || !strings.Contains(got, "\nwiki's\n") {
+		t.Fatalf("got %q (error: %v)", got, result.IsError)
+	}
+}
+
+func TestListSessionsRefusesAFileByAnAbsolutePath(t *testing.T) {
+	kb := stub(t, "")
+	result := call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "list_sessions",
+		map[string]any{"all_projects": true, "file": "/home/me/app/src/app.py"})
+	if got := text(t, result); !result.IsError || !strings.Contains(got, "as src/app.py") {
+		t.Fatalf("got %q (error: %v)", got, result.IsError)
+	}
+}
+
+func TestCatchupTakesASectionByItsNameAsPagesPyDoes(t *testing.T) {
+	kb := stub(t, "")
+	var live []string
+	for i := range 15 {
+		live = append(live, fmt.Sprintf("claim %d", i))
+	}
+	// "Superseded " is no Superseded to pages.py, so its claims hold.
+	page(t, kb, "wiki/wiki/projects/github.com/me/app.md",
+		strings.Replace(rendered("", live, []string{"still holds"}), "## Superseded\n", "## Superseded \n", 1))
+	got := text(t, call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "catchup", map[string]any{"project": "github.com/me/app"}))
+	if !strings.Contains(got, "\n### still holds\n") {
+		t.Fatalf("got %q", got)
+	}
+}

@@ -236,6 +236,11 @@ func phrases(query string) string {
 // errStale is an index of another version, or a file that isn't one.
 var errStale = errors.New("not an index of this version")
 
+// errNewer is an index a newer kb-go built, which this one can't read, and mustn't build again as its own: the newer
+// one would build it back on its next search, and each again on every search after.
+var errNewer = errors.New("a newer kb-go built this index: restart this kb mcp, which runs an older one, or run " +
+	"scripts/install.sh again")
+
 // current is the index at `file`, built again where it's stale, brought up to date with the page folders.
 func current(file string, folders []string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
@@ -304,6 +309,8 @@ func openReadOnly(file string) (*sql.DB, error) {
 func create(db *sql.DB) error {
 	if was, _, err := versionOf(db); err == nil && was == version {
 		return nil // made already: no write lock to take, as there's nothing to write
+	} else if err == nil && was > version {
+		return errNewer // where it can't be written too, which would otherwise call it another kb's
 	}
 	tx, err := db.Begin()
 	if err != nil {
@@ -318,6 +325,8 @@ func create(db *sql.DB) error {
 		if _, err := tx.Exec(schema + sessionsSchema + fmt.Sprintf("PRAGMA user_version = %d;", version)); err != nil {
 			return err
 		}
+	case was > version:
+		return errNewer
 	case was != version:
 		return errStale
 	}
