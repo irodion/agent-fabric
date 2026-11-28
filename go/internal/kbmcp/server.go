@@ -171,14 +171,14 @@ func (ctx Context) Catchup(call context.Context, args CatchupArgs) (string, erro
 func excerpt(page string) (part, which string) {
 	lines := strings.Split(strings.TrimRight(page, "\n"), "\n")
 	var summary, headings []string
-	section := ""
+	section, sectioned := "", false // a section's name, as pages.py reads it: "## " and the rest of the line
 	for _, line := range lines {
 		switch {
 		case strings.HasPrefix(line, "## "):
-			section = strings.TrimSpace(line)
-		case section == "## Summary" && (len(summary) > 0 || strings.TrimSpace(line) != ""):
+			section, sectioned = line[3:], true
+		case section == "Summary" && (len(summary) > 0 || strings.TrimSpace(line) != ""):
 			summary = append(summary, line)
-		case strings.HasPrefix(line, "### ") && section != "" && section != "## Superseded": // as pages.py parses claims
+		case strings.HasPrefix(line, "### ") && sectioned && section != "Superseded": // as pages.py parses claims
 			headings = append(headings, line)
 		}
 	}
@@ -239,6 +239,9 @@ func (ctx Context) CheckSessions(args SessionsArgs) error {
 	}
 	if args.AllProjects && args.Project != "" {
 		return errors.New("a project or all projects, not both")
+	}
+	if filepath.IsAbs(args.File) { // which no digest holds: its files are the project's, by their path in it
+		return fmt.Errorf("file %s: give its path in the project, as src/app.py", args.File)
 	}
 	return nil
 }

@@ -38,6 +38,9 @@ func IsPage(rel string) bool {
 // say, is no page there: fs.ErrNotExist, as is a link or a file where a folder of the path should be.
 func Read(folder, rel string) ([]byte, error) {
 	root, err := os.OpenRoot(folder)
+	if info, statErr := os.Stat(folder); err != nil && statErr == nil && !info.IsDir() {
+		return nil, fs.ErrNotExist // a file where the folder should be, whose error OpenRoot gives as no ENOTDIR
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -65,8 +68,8 @@ func Read(folder, rel string) ([]byte, error) {
 func Find(folders []string, rel string) ([]byte, error) {
 	for _, folder := range folders {
 		data, err := Read(folder, rel)
-		if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, fs.ErrPermission) {
-			return data, err
+		if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, fs.ErrPermission) && !errors.Is(err, syscall.ENOTDIR) {
+			return data, err // ENOTDIR: a file where a folder above it should be, which Walk passes over too
 		}
 	}
 	return nil, fs.ErrNotExist

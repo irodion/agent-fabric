@@ -60,7 +60,7 @@ go_env() { # Go's caches. In an agent's sandbox the real ones are read-only: the
 	mkdir -p "$gocache" 2>/dev/null || true # a first run: no cache yet, which doesn't make it read-only
 	[[ -w $gocache ]] || export GOCACHE="${TMPDIR:-/tmp}/go-build"
 	if [[ ! -w "$(go env GOMODCACHE)" ]] && ! (cd go && GOPROXY=off go list -deps -test ./... >/dev/null 2>&1); then
-		export GOPATH="${TMPDIR:-/tmp}/go" GOFLAGS="-mod=readonly -modcacherw"
+		export GOPATH="${TMPDIR:-/tmp}/go" GOMODCACHE="${TMPDIR:-/tmp}/go/pkg/mod" GOFLAGS="-mod=readonly -modcacherw"
 	fi
 }
 
