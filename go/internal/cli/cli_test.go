@@ -217,3 +217,22 @@ func TestKbCatchupPrintsWhatCatchupGives(t *testing.T) {
 		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
 	}
 }
+
+func TestKbSessionsWithASinceOrProjectsItCantTakeIsAUsageError(t *testing.T) {
+	for _, args := range [][]string{
+		{"sessions", "--since", "yesterday"}, {"sessions", "--project", "p", "--all-projects"},
+	} {
+		var stderr bytes.Buffer
+		if code := cli.Run(args, workspace(t), io.Discard, &stderr); code != 2 || !strings.Contains(stderr.String(), "usage: ") {
+			t.Errorf("%v: exit %d, stderr %q", args, code, stderr.String())
+		}
+	}
+}
+
+func TestAnOptionGivenNoValueTakesNotTheNextOptionForOne(t *testing.T) {
+	var stderr bytes.Buffer
+	code := cli.Run([]string{"sessions", "--project", "--failing-tests"}, workspace(t), io.Discard, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "--project needs a value") {
+		t.Fatalf("exit %d, stderr %q", code, stderr.String())
+	}
+}

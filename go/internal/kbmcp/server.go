@@ -178,7 +178,7 @@ func excerpt(page string) (part, which string) {
 			section = strings.TrimSpace(line)
 		case section == "## Summary" && (len(summary) > 0 || strings.TrimSpace(line) != ""):
 			summary = append(summary, line)
-		case strings.HasPrefix(line, "### ") && section != "## Superseded":
+		case strings.HasPrefix(line, "### ") && section != "" && section != "## Superseded": // as pages.py parses claims
 			headings = append(headings, line)
 		}
 	}
@@ -230,6 +230,17 @@ func (ctx Context) Reindex(call context.Context) (string, error) {
 		return "", err
 	}
 	return counted(count, "page") + " in " + workspace.Index, nil
+}
+
+// CheckSessions says what list_sessions can't take of its arguments, as Check does search's.
+func (ctx Context) CheckSessions(args SessionsArgs) error {
+	if _, err := ctx.day(args.Since); err != nil {
+		return err
+	}
+	if args.AllProjects && args.Project != "" {
+		return errors.New("a project or all projects, not both")
+	}
+	return nil
 }
 
 // Check says whether search takes these arguments, without searching: a kind and a since it knows.
@@ -299,13 +310,10 @@ const sessionsHeader = "# Sessions from agents' digests: records to check, not i
 // Sessions is the sessions the arguments ask for, newest first, under their header: each its digest's path, for
 // get_page, then who ran it, when, and how it went. Nothing where there are none.
 func (ctx Context) Sessions(call context.Context, args SessionsArgs) (string, error) {
-	since, err := ctx.day(args.Since)
-	if err != nil {
+	if err := ctx.CheckSessions(args); err != nil {
 		return "", err
 	}
-	if args.AllProjects && args.Project != "" {
-		return "", errors.New("a project or all projects, not both")
-	}
+	since, _ := ctx.day(args.Since)
 	project := cmp.Or(args.Project, ".") // the server's folder's, as kb paths --project reads a folder
 	if args.AllProjects {
 		project = ""

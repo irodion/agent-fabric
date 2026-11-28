@@ -94,8 +94,10 @@ func Walk(folders []string, visit func(rel, folder string, info fs.FileInfo)) er
 			return err
 		}
 		err = filepath.WalkDir(resolved, func(file string, entry fs.DirEntry, err error) error {
-			if err != nil && file != resolved && errors.Is(err, fs.ErrPermission) {
-				return skip(entry) // one page or folder that can't be read spoils no search of the rest
+			if err != nil && errors.Is(err, fs.ErrPermission) {
+				// One page or folder that can't be read, the page folder itself too, spoils no search of the rest,
+				// as Find passes it over.
+				return skip(entry)
 			}
 			if err != nil {
 				if errors.Is(err, fs.ErrNotExist) {

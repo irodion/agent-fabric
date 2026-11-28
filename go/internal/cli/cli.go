@@ -64,6 +64,10 @@ func Run(args []string, ctx kbmcp.Context, stdout, stderr io.Writer) int {
 			map[string]*bool{"--all-projects": &sessions.AllProjects, "--failing-tests": &sessions.FailingTests}); done {
 			return code
 		}
+		if err := ctx.CheckSessions(sessions); err != nil { // as for search: the command line's fault
+			fmt.Fprintf(stderr, "kb sessions: %v\n%s\n", err, usage)
+			return 2
+		}
 		out, err = ctx.Sessions(call, sessions)
 	case len(args) >= 1 && args[0] == "catchup":
 		var catchup kbmcp.CatchupArgs
@@ -148,7 +152,7 @@ func options(args []string, values map[string]*string, flags map[string]*bool) (
 			return nil, false, fmt.Errorf("no option %s; put a word that starts with - after --", name)
 		}
 		if !joined {
-			if i+1 == len(args) {
+			if i+1 == len(args) || strings.HasPrefix(args[i+1], "-") { // --project=-x for one that starts with -
 				return nil, false, fmt.Errorf("%s needs a value", name)
 			}
 			i++
