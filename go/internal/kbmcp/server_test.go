@@ -1046,3 +1046,26 @@ func TestSearchWhileAnotherHoldsTheRebuildsLockSaysSoInTime(t *testing.T) {
 		t.Fatalf("got %q (error: %v)", got, result.IsError)
 	}
 }
+
+func TestSearchReadsTheWikisCopyOnceTheLocalOneIsGoneThoughBothAreOfOneSizeAndTime(t *testing.T) {
+	kb := stub(t, "")
+	page(t, kb, "local/raw/sessions/p/2026/11/x.md", "older\n")
+	page(t, kb, "wiki/raw/sessions/p/2026/11/x.md", "newer\n")
+	local := filepath.Join(filepath.Dir(kb), "local", "raw", "sessions", "p", "2026", "11", "x.md")
+	when := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
+	for _, file := range []string{local, filepath.Join(filepath.Dir(kb), "wiki", "raw", "sessions", "p", "2026", "11", "x.md")} {
+		if err := os.Chtimes(file, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := kbmcp.Context{KB: kb, Cwd: t.TempDir()}
+	if got := text(t, call(t, ctx, "search", map[string]any{"query": "older"})); !strings.Contains(got, "x.md") {
+		t.Fatalf("got %q", got)
+	}
+	if err := os.Remove(local); err != nil {
+		t.Fatal(err)
+	}
+	if got := text(t, call(t, ctx, "search", map[string]any{"query": "newer"})); !strings.Contains(got, "x.md") {
+		t.Fatalf("got %q", got)
+	}
+}

@@ -21,14 +21,15 @@ import (
 )
 
 // version is the index's schema: an index of another version is built again, as it can always be. 2 added the
-// sessions and files tables.
-const version = 2
+// sessions and files tables, 3 each page's folder.
+const version = 3
 
 // schema is the index: a row per page, and its text in FTS5 under the same rowid, so that a page is dropped by its
 // rowid; FTS5 finds a row by any other column only by reading every one.
 const schema = `
 CREATE TABLE pages (
 	id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, mtime INTEGER NOT NULL,
+	folder TEXT NOT NULL, -- the page folder it was read in: another's copy is another page, of any size and time
 	day TEXT NOT NULL -- yyyy-mm-dd: the date its name starts with, else the day it was last written (UTC)
 );
 CREATE VIRTUAL TABLE text USING fts5(body, tokenize = 'porter unicode61');
@@ -416,19 +417,24 @@ type stamp struct {
 	day         string
 }
 
+// as says whether a page found is the copy indexed, as it was.
+func (now stamp) as(indexed indexedPage) bool {
+	return now.folder == indexed.folder && now.size == indexed.size && now.mtime == indexed.mtime
+}
+
 var dated = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}`)
 
 type indexedPage struct {
-	id          int64
-	path        string
-	size, mtime int64
+	id           int64
+	path, folder string
+	size, mtime  int64
 }
 
 // indexedPages are the pages the index holds, as they were when indexed.
 func indexedPages(db interface {
 	Query(query string, args ...any) (*sql.Rows, error)
 }) ([]indexedPage, error) {
-	rows, err := db.Query(`SELECT id, path, size, mtime FROM pages`)
+	rows, err := db.Query(`SELECT id, path, folder, size, mtime FROM pages`)
 	if err != nil {
 		return nil, err
 	}
@@ -436,7 +442,7 @@ func indexedPages(db interface {
 	var indexed []indexedPage
 	for rows.Next() {
 		var page indexedPage
-		if err := rows.Scan(&page.id, &page.path, &page.size, &page.mtime); err != nil {
+		if err := rows.Scan(&page.id, &page.path, &page.folder, &page.size, &page.mtime); err != nil {
 			return nil, err
 		}
 		indexed = append(indexed, page)
@@ -444,13 +450,14 @@ func indexedPages(db interface {
 	return indexed, rows.Err()
 }
 
-// unchanged says whether the pages found are the pages indexed, each of the size and time it was indexed at.
+// unchanged says whether the pages found are the pages indexed, each in the folder, and of the size and time, it
+// was indexed at.
 func unchanged(indexed []indexedPage, found map[string]stamp) bool {
 	if len(indexed) != len(found) {
 		return false
 	}
 	for _, page := range indexed {
-		if now, ok := found[page.path]; !ok || now.size != page.size || now.mtime != page.mtime {
+		if now, ok := found[page.path]; !ok || !now.as(page) {
 			return false
 		}
 	}
@@ -497,7 +504,7 @@ func sync(db *sql.DB, folders []string, again bool) error {
 		return err
 	}
 	for _, r := range indexed {
-		if now, ok := found[r.path]; ok && now.size == r.size && now.mtime == r.mtime {
+		if now, ok := found[r.path]; ok && now.as(r) {
 			delete(found, r.path) // as indexed
 			continue
 		}
@@ -516,8 +523,8 @@ func sync(db *sql.DB, folders []string, again bool) error {
 			// %v, as for the walk: a page that can't be read is no index that can't be written.
 			return fmt.Errorf("page %s can't be read: %v", path, err)
 		}
-		added, err := tx.Exec(`INSERT INTO pages (path, size, mtime, day) VALUES (?, ?, ?, ?)`,
-			path, now.size, now.mtime, now.day)
+		added, err := tx.Exec(`INSERT INTO pages (path, size, mtime, folder, day) VALUES (?, ?, ?, ?, ?)`,
+			path, now.size, now.mtime, now.folder, now.day)
 		if err != nil {
 			return err
 		}
