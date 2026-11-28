@@ -924,3 +924,22 @@ func TestCatchupCountsNoHeadingInAPagesHeadAsAClaim(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestSearchFindsTheWikisPagesWhereTheLocalFolderIsUnderOneThatCantBeSearched(t *testing.T) {
+	kb := stub(t, "")
+	page(t, kb, "wiki/wiki/projects/x.md", "uses poetry\n")
+	page(t, kb, "shut/local/wiki/projects/y.md", "poetry here\n")
+	shut := filepath.Join(filepath.Dir(kb), "shut")
+	// The local folder kept elsewhere, as a link, where a folder above it can't be searched.
+	if err := os.Symlink(filepath.Join(shut, "local"), filepath.Join(filepath.Dir(kb), "local")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shut, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(shut, 0o755) })
+	result := call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "search", map[string]any{"query": "poetry"})
+	if got := text(t, result); result.IsError || !strings.Contains(got, "wiki/projects/x.md\n") {
+		t.Fatalf("got %q (error: %v)", got, result.IsError)
+	}
+}

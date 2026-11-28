@@ -87,8 +87,8 @@ func Walk(folders []string, visit func(rel, folder string, info fs.FileInfo)) er
 	seen := map[string]bool{}
 	for _, folder := range folders {
 		resolved, err := filepath.EvalSymlinks(folder)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.ENOTDIR) {
+			continue // no folder here to walk, or none it may: passed over, as Find passes it over
 		}
 		if err != nil {
 			return err
