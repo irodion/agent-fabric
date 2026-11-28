@@ -720,7 +720,7 @@ func TestCatchupGivesTheProjectsNotesItsLastSessionsAndItsPage(t *testing.T) {
 	for i := range 20 {
 		claims = append(claims, fmt.Sprintf("### claim %d\ntext %d\n- source: n%06d", i, i, i))
 	}
-	page(t, kb, "wiki/wiki/projects/github.com/me/app.md", "# app\n"+strings.Join(claims, "\n")+"\n")
+	page(t, kb, "wiki/wiki/projects/github.com/me/app.md", "# app\n## Gotchas\n"+strings.Join(claims, "\n")+"\n")
 
 	got := text(t, call(t, ctx, "catchup", map[string]any{"project": "github.com/me/app"}))
 
@@ -892,5 +892,35 @@ func TestSearchDropsAPageThatCantBeReadAnyMore(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o644) })
 	if got := text(t, call(t, ctx, "search", map[string]any{"query": "poetry"})); got != "" {
 		t.Fatalf("still found: %q", got)
+	}
+}
+
+func TestSearchFindsTheWikisPagesWhereTheWholeLocalFolderCantBeRead(t *testing.T) {
+	kb := stub(t, "")
+	page(t, kb, "local/raw/sessions/p/2026/11/x.md", "poetry here\n")
+	page(t, kb, "wiki/wiki/projects/x.md", "uses poetry\n")
+	shut := filepath.Join(filepath.Dir(kb), "local")
+	if err := os.Chmod(shut, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(shut, 0o755) })
+	result := call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "search", map[string]any{"query": "poetry"})
+	if got := text(t, result); result.IsError || !strings.Contains(got, "wiki/projects/x.md\n") {
+		t.Fatalf("got %q (error: %v)", got, result.IsError)
+	}
+}
+
+func TestCatchupCountsNoHeadingInAPagesHeadAsAClaim(t *testing.T) {
+	kb := stub(t, "")
+	var live []string
+	for i := range 15 {
+		live = append(live, fmt.Sprintf("claim %d", i))
+	}
+	// As pages.py parses it: a ### line before the first ## section is the page's head, no claim.
+	page(t, kb, "wiki/wiki/projects/github.com/me/app.md",
+		strings.Replace(rendered("", live, nil), "\n\n## Gotchas", "\n### Overview\n\n## Gotchas", 1))
+	got := text(t, call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "catchup", map[string]any{"project": "github.com/me/app"}))
+	if !strings.Contains(got, ", its 15 claims' headings;") || strings.Contains(got, "Overview") {
+		t.Fatalf("got %q", got)
 	}
 }
