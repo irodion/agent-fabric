@@ -151,7 +151,8 @@ These hold across the code:
 
 - A hook never breaks a session: on any error it prints nothing and exits 0.
 - The start hook's reminder carries a count and the project id, and the stop hook's question is a fixed string. Note
-  text reaches an agent only through `kb inbox`, under its untrusted header.
+  text reaches an agent only through `kb inbox` and kb-go's tools (a filed note is a page), each under an untrusted
+  header.
 - No model text reaches a claim: `kb` files the note's own text, and a claim's lines never change once filed.
 - A note is untrusted. Its refs are read only from git objects of its own project, and its text is escaped when filed.
   A bad note fails by itself, and the run files the others.

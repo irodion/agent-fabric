@@ -60,6 +60,7 @@ def test_kbs_help_names_the_commands_kb_go_serves(tmp_path: Path) -> None:
     assert done.returncode == 0
     for command in ("mcp", "show", "search", "sessions", "catchup", "reindex"):
         assert command in done.stdout
+    assert "paths" not in done.stdout  # kb-go's, not the user's
 
 
 def test_kb_show_hands_its_path_to_kb_go(tmp_path: Path) -> None:

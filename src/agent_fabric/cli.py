@@ -118,6 +118,7 @@ def run_in(argv: list[str], ctx: Context) -> Result:
     lint_cmd = commands.add_parser("lint", help="what's stale or broken in the wiki (docs/design.md §4.7)")
     lint_cmd.add_argument("--workspace", help=WORKSPACE_HELP)
     _go_parsers(commands)
+    commands.metavar = "{" + ",".join(commands.choices) + "}"  # the user's commands: not paths, after them
     paths_cmd = commands.add_parser("paths")  # for kb-go, so no help of its own
     paths_cmd.add_argument("--project")
     try:
