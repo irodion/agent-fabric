@@ -165,8 +165,8 @@ func replace(file string, folders []string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer lock.Close() // and with it the lock
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+	defer lock.Close()                                      // and with it the lock
+	if err := lockWithin(lock, 5*time.Second); err != nil { // as busy_timeout waits for SQLite's own lock
 		return 0, err
 	}
 	if db, err := open(file); err == nil {
@@ -212,6 +212,22 @@ func fill(db *sql.DB, folders []string, again bool) (int, error) {
 	count := 0
 	err := db.QueryRow(`SELECT count(*) FROM pages`).Scan(&count)
 	return count, err
+}
+
+// errBuilding is the lock replace takes, held longer than a search waits: by a kb reindex stopped mid-build, say.
+var errBuilding = errors.New("another kb is building the search index again: try again in a moment")
+
+// lockWithin takes `lock` within `wait`, or gives errBuilding.
+func lockWithin(lock *os.File, wait time.Duration) error {
+	for deadline := time.Now().Add(wait); ; time.Sleep(50 * time.Millisecond) {
+		err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return errBuilding
+		}
+	}
 }
 
 // fillAndClose fills the index as fill does, then closes it, and gives fill's error before Close's.

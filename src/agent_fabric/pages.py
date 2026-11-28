@@ -165,6 +165,18 @@ def page_path(project: str) -> str:
     return MACHINE_PAGE if project == MACHINE else f"{PROJECTS}/{_slug(project)}.md"
 
 
+def sessions_folder(project: str) -> str:
+    """`raw/sessions/<project>/`, where a project's digests are, inside the wiki or the local folder."""
+    folder = "/".join(name_part(part) for part in project.split("/") if part.strip("./"))
+    return f"raw/sessions/{folder or 'unknown'}/"
+
+
+def name_part(text: str) -> str:
+    """`text` as one folder or file name's part: only letters, digits, ., _ and -."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-.")
+    return cleaned or "unknown"
+
+
 def notes_folder(project: str) -> str:
     """`raw/notes/<project>/`, where ingest keeps the copies of a project's notes."""
     return f"raw/notes/{_slug(project)}/"
