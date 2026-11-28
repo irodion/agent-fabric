@@ -13,6 +13,16 @@ import (
 	"github.com/irodion/agent-fabric/go/internal/kbmcp"
 )
 
+// fakeKB is a stand-in `kb` in a folder of its own, a shell script with this body.
+func fakeKB(t *testing.T, body string) string {
+	t.Helper()
+	kb := filepath.Join(t.TempDir(), "kb")
+	if err := os.WriteFile(kb, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return kb
+}
+
 // workspace is a stand-in `kb` whose `kb paths` names a wiki in its own folder, with one page.
 func workspace(t *testing.T) kbmcp.Context {
 	t.Helper()
@@ -62,10 +72,7 @@ func TestKbShowHelpIsItsUsageNotAPage(t *testing.T) {
 }
 
 func TestKbShowWhereKbPathsFailsGivesItsWordsOnce(t *testing.T) {
-	kb := filepath.Join(t.TempDir(), "kb")
-	if err := os.WriteFile(kb, []byte("#!/bin/sh\necho 'kb: config.toml cannot be read' >&2\nexit 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	kb := fakeKB(t, "echo 'kb: config.toml cannot be read' >&2\nexit 1\n")
 	var stdout, stderr bytes.Buffer
 	code := cli.Run([]string{"show", "wiki/projects/a.md"}, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, &stdout, &stderr)
 	if got := stderr.String(); code != 1 || got != "kb show: config.toml cannot be read\n" {
@@ -135,10 +142,7 @@ func TestKbSearchHelpAfterItsWordsIsItsUsage(t *testing.T) {
 }
 
 func TestKbsOwnRefusalIsPrintedWithOnePrefix(t *testing.T) {
-	kb := filepath.Join(t.TempDir(), "kb")
-	if err := os.WriteFile(kb, []byte("#!/bin/sh\necho 'kb: that folder is in another workspace' >&2\nexit 2\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	kb := fakeKB(t, "echo 'kb: that folder is in another workspace' >&2\nexit 2\n")
 	var stderr bytes.Buffer
 	cli.Run([]string{"search", "x", "--project", "../o"}, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, io.Discard, &stderr)
 	if got := stderr.String(); got != "kb search: that folder is in another workspace\n" {
