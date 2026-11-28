@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1009,5 +1010,39 @@ func TestCatchupTakesASectionByItsNameAsPagesPyDoes(t *testing.T) {
 	got := text(t, call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "catchup", map[string]any{"project": "github.com/me/app"}))
 	if !strings.Contains(got, "\n### still holds\n") {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestListSessionsRefusesAFileThatNamesTheProjectsFolder(t *testing.T) {
+	for _, file := range []string{".", "./", "../app.py"} {
+		result := call(t, kbmcp.Context{KB: stub(t, ""), Cwd: t.TempDir()}, "list_sessions",
+			map[string]any{"all_projects": true, "file": file})
+		if got := text(t, result); !result.IsError || !strings.Contains(got, "as src/app.py") {
+			t.Errorf("%q: got %q (error: %v)", file, got, result.IsError)
+		}
+	}
+}
+
+func TestSearchWhileAnotherHoldsTheRebuildsLockSaysSoInTime(t *testing.T) {
+	kb := stub(t, "")
+	page(t, kb, "wiki/wiki/projects/x.md", "uses poetry\n")
+	data := filepath.Join(filepath.Dir(kb), "data")
+	if err := os.MkdirAll(data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(data, "index.db"), []byte("not an index"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(data, "index.db.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil { // as a kb reindex stopped mid-build
+		t.Fatal(err)
+	}
+	result := call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "search", map[string]any{"query": "poetry"})
+	if got := text(t, result); !result.IsError || !strings.Contains(got, "building") {
+		t.Fatalf("got %q (error: %v)", got, result.IsError)
 	}
 }

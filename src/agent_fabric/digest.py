@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 
 from agent_fabric.capture import Message, SessionMeta
 from agent_fabric.normalize import ERRORS, Action, events, shows_files
+from agent_fabric.pages import name_part, sessions_folder
 from agent_fabric.snapshot import MAX_DIFF, Snapshot, parse
 
 SCHEMA = "fabric.digest/1"
@@ -174,19 +175,13 @@ class _Section:
     cut: str = "[… {n} earlier entries cut: kb show {session}]"  # what a cut says
 
 
-def sessions_folder(project: str) -> str:
-    """`raw/sessions/<project>/`, where a project's digests are, inside the wiki or the local folder."""
-    folder = "/".join(_segment(part) for part in project.split("/") if part.strip("./"))
-    return f"raw/sessions/{folder or 'unknown'}/"
-
-
 def path(meta: SessionMeta, project: str, start: datetime) -> str:
     """`raw/sessions/<project>/<yyyy>/<mm>/<yyyy-mm-dd>-<agent>-<shortid>.md`, inside the wiki or the local folder."""
     when = _utc(start)
     # The id's last 8 letters and digits: a UUIDv7 (Codex's) starts with its time, so its first 8 are shared by all
     # sessions started in the same minute or so, while its end is random, like a UUIDv4's (Claude Code's).
-    short = _segment(re.sub(r"[^A-Za-z0-9]", "", meta.id.rsplit(":", 1)[-1])[-8:])
-    return f"{sessions_folder(project)}{when:%Y/%m}/{when:%Y-%m-%d}-{_segment(meta.agent)}-{short}.md"
+    short = name_part(re.sub(r"[^A-Za-z0-9]", "", meta.id.rsplit(":", 1)[-1])[-8:])
+    return f"{sessions_folder(project)}{when:%Y/%m}/{when:%Y-%m-%d}-{name_part(meta.agent)}-{short}.md"
 
 
 def started(meta: SessionMeta, messages: Sequence[Message]) -> datetime | None:
@@ -656,11 +651,6 @@ def _escape(char: str) -> str:
     if code < 0x7F:
         return char  # JSON has escaped the controls below 0x20 already
     return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
-
-
-def _segment(text: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-.")
-    return cleaned or "unknown"
 
 
 def _clean(text: str) -> str:

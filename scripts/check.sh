@@ -88,6 +88,11 @@ checks() {
 	step "ruff check" "${uv_run[@]}" ruff check
 	step mypy "${uv_run[@]}" mypy
 	step pytest "${uv_run[@]}" pytest
+	optional shellcheck run_shellcheck
+	optional shfmt run_shfmt
+	optional actionlint actionlint
+	optional zizmor zizmor .
+	# Last, as go_env's settings stay set for whatever runs after it in this shell, where step can still count them.
 	if command -v go >/dev/null; then
 		go_env
 		step gofmt run_gofmt
@@ -96,10 +101,6 @@ checks() {
 	else
 		printf 'skipped  go (not installed here; CI runs gofmt, go vet and go test)\n'
 	fi
-	optional shellcheck run_shellcheck
-	optional shfmt run_shfmt
-	optional actionlint actionlint
-	optional zizmor zizmor .
 	exit "$failed"
 }
 

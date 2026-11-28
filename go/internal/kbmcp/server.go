@@ -152,8 +152,8 @@ func (ctx Context) Catchup(call context.Context, args CatchupArgs) (string, erro
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		about = "## Project page\nnone yet\n"
-	case err != nil:
-		return "", err
+	case err != nil: // as for the sessions: the notes and the sessions still hold what to know
+		about = "## Project page: " + path + "\nnot read: " + err.Error() + "\n"
 	default:
 		part, which := excerpt(string(page))
 		about = "## Project page: " + path + which + "\n" + untrusted(pageHeader, "kb-page", part)
@@ -240,7 +240,9 @@ func (ctx Context) CheckSessions(args SessionsArgs) error {
 	if args.AllProjects && args.Project != "" {
 		return errors.New("a project or all projects, not both")
 	}
-	if filepath.IsAbs(args.File) { // which no digest holds: its files are the project's, by their path in it
+	// One no digest holds: its files are the project's, each by its path in it.
+	if file := path.Clean(filepath.ToSlash(args.File)); args.File != "" &&
+		(path.IsAbs(file) || file == "." || file == ".." || strings.HasPrefix(file, "../")) {
 		return fmt.Errorf("file %s: give its path in the project, as src/app.py", args.File)
 	}
 	return nil

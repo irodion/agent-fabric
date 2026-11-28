@@ -26,7 +26,7 @@ from agent_fabric.inbox import Inbox, Snapshot
 from agent_fabric.ingest import BUSY, Busy, Stopped, ingest
 from agent_fabric.lint import lint
 from agent_fabric.notes import KINDS, MACHINE, MAX_TEXT, STALE_AFTER, Note, expired, missing_ref, new_id
-from agent_fabric.pages import notes_folder, page_path
+from agent_fabric.pages import notes_folder, page_path, sessions_folder
 from agent_fabric.paths import config_file, expand, tilde
 from agent_fabric.secretgate import GateUnavailable
 from agent_fabric.shown import shown
@@ -146,9 +146,6 @@ def _paths(args: argparse.Namespace, workspace: Workspace, ctx: Context) -> Resu
     pages = [str(workspace.local(ctx.env)), str(workspace.wiki(ctx.env))]
     found: dict[str, object] = {"pages": pages, "index": str(workspace.index(ctx.env))}
     if args.project is not None:
-        # Loaded only here: digest brings in capture's httpx and pydantic, which every hook would pay for otherwise.
-        from agent_fabric.digest import sessions_folder  # noqa: PLC0415
-
         # Where kb writes the project's pages, so kb-go never turns a project id into a path itself.
         project = _project_here(args.project, workspace, ctx, "run it from there")
         found["project"] = {
