@@ -20,6 +20,16 @@ import (
 	"github.com/irodion/agent-fabric/go/internal/kbmcp"
 )
 
+// fakeKB is a stand-in `kb` in a folder of its own, a shell script with this body.
+func fakeKB(t *testing.T, body string) string {
+	t.Helper()
+	kb := filepath.Join(t.TempDir(), "kb")
+	if err := os.WriteFile(kb, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return kb
+}
+
 // stub writes a stand-in `kb`. `kb paths` names a workspace in its own folder, its local digests first, then its
 // wiki, as the test writes them; anything else prints the folder it ran in and its arguments, one per line, then runs
 // `script`.
@@ -177,10 +187,7 @@ func TestGetPageTakesAFolderWhereThePageWouldBeAsNoPageThere(t *testing.T) {
 
 func TestGetPageFromAKbWithoutPathsSaysToInstallAgain(t *testing.T) {
 	// A kb older than kb-go, as on PATH where none is beside kb-go: argparse refuses the command.
-	kb := filepath.Join(t.TempDir(), "kb")
-	if err := os.WriteFile(kb, []byte("#!/bin/sh\necho \"kb: error: invalid choice: '$1'\" >&2\nexit 2\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	kb := fakeKB(t, "echo \"kb: error: invalid choice: '$1'\" >&2\nexit 2\n")
 	result := call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "get_page", map[string]any{"path": "wiki/projects/x.md"})
 	if got := text(t, result); !result.IsError || !strings.Contains(got, kb) || !strings.Contains(got, "scripts/install.sh") {
 		t.Fatalf("got %q", got)
@@ -453,11 +460,7 @@ func TestGetPageServesNoPageThroughALinkedFolderAsSearchIndexesNone(t *testing.T
 }
 
 func TestAKbThatRefusesTheProjectSaysWhyWithoutBlamingItsVersion(t *testing.T) {
-	kb := filepath.Join(t.TempDir(), "kb")
-	script := "#!/bin/sh\necho 'kb: --project ../x: that folder is in another workspace; run it from there' >&2\nexit 2\n"
-	if err := os.WriteFile(kb, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	kb := fakeKB(t, "echo 'kb: --project ../x: that folder is in another workspace; run it from there' >&2\nexit 2\n")
 	result := call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "search", map[string]any{"query": "x", "project": "../x"})
 	if got := text(t, result); !result.IsError || !strings.Contains(got, "another workspace") || strings.Contains(got, "install.sh") {
 		t.Fatalf("got %q", got)
@@ -477,11 +480,7 @@ func TestGetPageTakesAPathAsTypedWithADotOrADoubleSlash(t *testing.T) {
 
 func TestSearchFromAKbWhosePathsTakesNoProjectSaysToInstallAgain(t *testing.T) {
 	// A kb from before search: it has paths, but argparse refuses its --project.
-	kb := filepath.Join(t.TempDir(), "kb")
-	script := "#!/bin/sh\necho \"kb: error: unrecognized arguments: $2\" >&2\nexit 2\n"
-	if err := os.WriteFile(kb, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	kb := fakeKB(t, "echo \"kb: error: unrecognized arguments: $2\" >&2\nexit 2\n")
 	result := call(t, kbmcp.Context{KB: kb, Cwd: t.TempDir()}, "search", map[string]any{"query": "x", "project": "p"})
 	if got := text(t, result); !result.IsError || !strings.Contains(got, "scripts/install.sh") {
 		t.Fatalf("got %q", got)

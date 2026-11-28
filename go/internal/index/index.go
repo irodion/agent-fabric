@@ -152,11 +152,7 @@ func rebuild(file string, folders []string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	count, err := fill(db, folders, true)
-	if closed := db.Close(); err == nil {
-		err = closed
-	}
-	return count, err
+	return fillAndClose(db, folders, true)
 }
 
 // replace builds the index in a new file of its own, so that two rebuilds at once don't write one file, then moves
@@ -174,11 +170,7 @@ func replace(file string, folders []string) (int, error) {
 		return 0, err
 	}
 	if db, err := open(file); err == nil {
-		count, err := fill(db, folders, false)
-		if closed := db.Close(); err == nil {
-			err = closed
-		}
-		return count, err
+		return fillAndClose(db, folders, false)
 	} else if !errors.Is(err, errStale) {
 		return 0, err
 	}
@@ -194,10 +186,7 @@ func replace(file string, folders []string) (int, error) {
 	db, err := open(fresh)
 	count := 0
 	if err == nil {
-		count, err = fill(db, folders, false)
-		if closed := db.Close(); err == nil {
-			err = closed
-		}
+		count, err = fillAndClose(db, folders, false)
 	}
 	if err == nil {
 		if err = os.Remove(file + "-journal"); errors.Is(err, fs.ErrNotExist) {
@@ -222,6 +211,15 @@ func fill(db *sql.DB, folders []string, again bool) (int, error) {
 	}
 	count := 0
 	err := db.QueryRow(`SELECT count(*) FROM pages`).Scan(&count)
+	return count, err
+}
+
+// fillAndClose fills the index as fill does, then closes it, and gives fill's error before Close's.
+func fillAndClose(db *sql.DB, folders []string, again bool) (int, error) {
+	count, err := fill(db, folders, again)
+	if closed := db.Close(); err == nil {
+		err = closed
+	}
 	return count, err
 }
 
@@ -304,6 +302,9 @@ func openReadOnly(file string) (*sql.DB, error) {
 // create makes the index's tables where the file has none, in one transaction, so that two searches finding no index
 // make it once: errStale for an index of another version.
 func create(db *sql.DB) error {
+	if was, _, err := versionOf(db); err == nil && was == version {
+		return nil // made already: no write lock to take, as there's nothing to write
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -392,6 +393,45 @@ type stamp struct {
 
 var dated = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}`)
 
+type indexedPage struct {
+	id          int64
+	path        string
+	size, mtime int64
+}
+
+// indexedPages are the pages the index holds, as they were when indexed.
+func indexedPages(db interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}) ([]indexedPage, error) {
+	rows, err := db.Query(`SELECT id, path, size, mtime FROM pages`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var indexed []indexedPage
+	for rows.Next() {
+		var page indexedPage
+		if err := rows.Scan(&page.id, &page.path, &page.size, &page.mtime); err != nil {
+			return nil, err
+		}
+		indexed = append(indexed, page)
+	}
+	return indexed, rows.Err()
+}
+
+// unchanged says whether the pages found are the pages indexed, each of the size and time it was indexed at.
+func unchanged(indexed []indexedPage, found map[string]stamp) bool {
+	if len(indexed) != len(found) {
+		return false
+	}
+	for _, page := range indexed {
+		if now, ok := found[page.path]; !ok || now.size != page.size || now.mtime != page.mtime {
+			return false
+		}
+	}
+	return true
+}
+
 // sync re-reads each page whose size or time changed since it was indexed, and drops each that's gone; where `again`,
 // it drops every page first, and reads them all.
 func sync(db *sql.DB, folders []string, again bool) error {
@@ -408,6 +448,15 @@ func sync(db *sql.DB, folders []string, again bool) error {
 		// a reason to search the index as it stands.
 		return fmt.Errorf("the pages can't be read: %v", err)
 	}
+	if !again {
+		indexed, err := indexedPages(db)
+		if err != nil {
+			return err
+		}
+		if unchanged(indexed, found) {
+			return nil // nothing to write, so no write lock to wait for, or to be refused, as in an agent's sandbox
+		}
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -418,25 +467,8 @@ func sync(db *sql.DB, folders []string, again bool) error {
 			return err
 		}
 	}
-	type row struct {
-		id          int64
-		path        string
-		size, mtime int64
-	}
-	var indexed []row
-	rows, err := tx.Query(`SELECT id, path, size, mtime FROM pages`)
+	indexed, err := indexedPages(tx) // again, under the write lock: another search may have changed it since
 	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.id, &r.path, &r.size, &r.mtime); err != nil {
-			rows.Close()
-			return err
-		}
-		indexed = append(indexed, r)
-	}
-	if err := rows.Close(); err != nil {
 		return err
 	}
 	for _, r := range indexed {

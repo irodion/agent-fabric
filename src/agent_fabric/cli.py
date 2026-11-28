@@ -158,17 +158,21 @@ def _paths(args: argparse.Namespace, workspace: Workspace, ctx: Context) -> Resu
     return Result(0, json.dumps(found, ensure_ascii=False) + "\n", "")
 
 
+# The commands kb-go serves, with their help for `kb --help`: `main` hands them over, `kb <command> --help` too,
+# before argparse reads them.
+GO_COMMANDS = {
+    "mcp": "serve kb's read-only tools to an agent over MCP on stdio (docs/design.md §4.9)",
+    "show": "a session digest or a wiki page, whole, by its path in the workspace",
+    "search": "pages that hold every word, among digests, wiki pages and filed notes",
+    "sessions": "agents' sessions in a project, newest first, from their digests",
+    "catchup": "a project's open notes, last sessions and wiki page, before work on it",
+    "reindex": "build the workspace's search index again from its pages",
+}
+
+
 def _go_parsers(commands: "argparse._SubParsersAction[_Parser]") -> None:
-    """The commands kb-go serves (`GO_COMMANDS`), for `kb --help` alone: `main` hands them over, `kb <command> --help`
-    too, before argparse reads them."""
-    for name, about in (
-        ("mcp", "serve kb's read-only tools to an agent over MCP on stdio (docs/design.md §4.9)"),
-        ("show", "a session digest or a wiki page, whole, by its path in the workspace"),
-        ("search", "pages that hold every word, among digests, wiki pages and filed notes"),
-        ("sessions", "agents' sessions in a project, newest first, from their digests"),
-        ("catchup", "a project's open notes, last sessions and wiki page, before work on it"),
-        ("reindex", "build the workspace's search index again from its pages"),
-    ):
+    """`GO_COMMANDS`, for `kb --help` alone."""
+    for name, about in GO_COMMANDS.items():
         commands.add_parser(name, help=about)
 
 
@@ -525,9 +529,6 @@ def _entry(note: Note, now: datetime, resolved_by: str | None, moved: bool) -> s
 
 
 # The commands written in Go: `kb` hands each to `kb-go`, which takes over the process (docs/design.md §6).
-GO_COMMANDS = frozenset({"mcp", "show", "search", "sessions", "catchup", "reindex"})
-
-
 def main() -> None:
     if sys.argv[1:2] and sys.argv[1] in GO_COMMANDS:
         _hand_to_go(sys.argv[1:])
