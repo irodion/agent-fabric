@@ -154,4 +154,8 @@ jobs:
         run: go vet ./...
 
       - name: go test
-        run: go test -race ./...
+        # As a user of its own, not the container's root, whom no permission refuses: the tests of pages and folders
+        # that can't be read need one. The module cache go vet filled is readable by any user.
+        run: |
+          useradd --create-home tester
+          runuser -u tester -- env PATH="$PATH" HOME=/home/tester go test -race ./...

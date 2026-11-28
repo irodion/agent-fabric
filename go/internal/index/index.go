@@ -464,9 +464,8 @@ func unchanged(indexed []indexedPage, found map[string]stamp) bool {
 	return true
 }
 
-// sync re-reads each page whose size or time changed since it was indexed, and drops each that's gone; where `again`,
-// it drops every page first, and reads them all.
-func sync(db *sql.DB, folders []string, again bool) error {
+// walk is the pages the folders hold, by their path, each with the copy's folder, size and time.
+func walk(folders []string) (map[string]stamp, error) {
 	found := map[string]stamp{}
 	err := pages.Walk(folders, func(rel, folder string, info fs.FileInfo) {
 		day := dated.FindString(filepath.Base(rel))
@@ -478,9 +477,19 @@ func sync(db *sql.DB, folders []string, again bool) error {
 	if err != nil {
 		// %v, not %w: a page folder that can't be read is no index that can't be written, which readOnly takes for
 		// a reason to search the index as it stands.
-		return fmt.Errorf("the pages can't be read: %v", err)
+		return nil, fmt.Errorf("the pages can't be read: %v", err)
 	}
+	return found, nil
+}
+
+// sync re-reads each page whose size or time changed since it was indexed, and drops each that's gone; where `again`,
+// it drops every page first, and reads them all.
+func sync(db *sql.DB, folders []string, again bool) error {
 	if !again {
+		found, err := walk(folders)
+		if err != nil {
+			return err
+		}
 		indexed, err := indexedPages(db)
 		if err != nil {
 			return err
@@ -494,6 +503,12 @@ func sync(db *sql.DB, folders []string, again bool) error {
 		return err
 	}
 	defer tx.Rollback()
+	// Walked under the write lock, as another search may have written since a walk before it: this one would then
+	// drop a page that search found and an earlier walk was too early to.
+	found, err := walk(folders)
+	if err != nil {
+		return err
+	}
 	if again {
 		if _, err := tx.Exec(`DELETE FROM text; DELETE FROM pages; DELETE FROM sessions; DELETE FROM files;`); err != nil {
 			return err
